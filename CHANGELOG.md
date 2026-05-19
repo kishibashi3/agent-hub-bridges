@@ -8,6 +8,65 @@ changes between minor versions are possible until `v1.0.0`.
 
 ## [Unreleased]
 
+### Added — M3 bridge-gemini port + SDK migration + Protocol cleanup (issue #8)
+
+- `src/agent_hub_bridges/gemini/` ports `agent-hub-bridge-gemini` (~1052
+  LOC) **with the SDK migration done in the same PR** (operator-approved
+  scope, DM `4556116c-...`). Behaviour is 1:1 with the legacy repo at the
+  CLI / env / console-script level — same `--user` (required) /
+  `--model` (gemini-specific) / `--display-name` / `--tenant` /
+  `--workdir`, same env (`GEMINI_API_KEY`, `GEMINI_MODEL`,
+  `GEMINI_CLI_PATH`, `GEMINI_CLI_TIMEOUT_S`, `GEMINI_MAX_RETRIES`,
+  `GEMINI_BACKOFF_BASE_S`, `GEMINI_BACKOFF_CAP_S`, `AGENT_HUB_URL`,
+  `GITHUB_PAT`), same console script name (`agent-hub-bridge-gemini`),
+  same per-peer `gemini --session-id` mapping, same 429 retry/backoff
+  semantics.
+- **Dropped the legacy `hub.py` (= self-rolled `HubClient`, ~198 LOC)**.
+  `worker.py` now uses `agent_hub_sdk.AgentHub` + `hub.inbox()` like
+  bridge-claude / bridge-slack — the hand-rolled push/poll/heartbeat
+  task-group is replaced by a single `async for msg in messages:` loop.
+  The legacy `IncomingMessage` dataclass from `hub.py` is replaced by
+  `agent_hub_sdk.IncomingMessage` everywhere.
+- **Dropped `_IncomingMessageLike` Protocol from `_common/prompt.py`**
+  (Minor 2 from PR #2 review). With all four bridges now on the SDK,
+  the structural typing escape hatch is no longer needed —
+  `format_peer_message_prompt` now takes `agent_hub_sdk.IncomingMessage`
+  directly. `tests/common/test_smoke.py` swapped its `_FakeMessage`
+  dataclass for a real `IncomingMessage` constructor.
+- Refactored to use `_common/` helpers (same pattern as M1):
+  - `BaseConfig` + `load_base_config` + `load_required_env` /
+    `load_optional_env`; gemini `Config` adds `gemini_api_key`,
+    `gemini_model`, `gemini_cli_path` and narrows `workdir` to
+    required.
+  - `build_common_parser` + gemini-specific `--user` (required) +
+    `--model` (optional, env `GEMINI_MODEL` fallback, default
+    `gemini-2.5-flash`).
+  - `run_with_reconnect` for outer reconnect — gemini is now in the
+    same single-task lifecycle as claude (= the legacy 2-task
+    `_inbox_push_loop` + `_heartbeat_loop` collapses into one
+    `async for` since the SDK handles both internally).
+  - `format_peer_message_prompt` is reused for the prompt preamble;
+    gemini adds its own "DM の sender に返せ / team broadcast 避けろ"
+    suffix on top.
+  - `summarize_exc` is used transitively via `run_with_reconnect`.
+- gemini-specific code that stays in `gemini/`: `engine.py` (= 466 LOC
+  `GeminiCLIEngine` — subprocess management, isolated HOME with
+  per-bridge `.gemini/settings.json` for MCP config, 429 rate-limit
+  detection + retry with `retryDelay` parsing + exponential backoff).
+  Verbatim port, only `agent_hub_bridge_gemini` → `agent_hub_bridges.gemini`
+  rename + a B904 fix (`raise ... from err` in the timeout path).
+- `tests/gemini/` (3 existing + 1 new = 4 files): `test_config.py` (8
+  cases, updated to match new fail-fast error format from
+  `load_required_env`), `test_engine_retry.py` (24 cases, verbatim
+  port), `test_engine_settings.py` (5 cases, verbatim port), and
+  **new** `test_cli.py` (8 cases for parity with claude/slack:
+  `--version`, `--user` required, missing env, `GEMINI_API_KEY`
+  missing, happy-path `run_worker` invocation, `--model` env
+  fallback, `KeyboardInterrupt` exit code 130).
+- `tests/common/test_smoke.py`: 3 prompt tests updated to construct
+  `IncomingMessage` directly (= Protocol removal side effect).
+- M0 stub at `gemini/cli.py` removed.
+
 ### Added — M2 bridge-slack port (issue #6)
 
 - `src/agent_hub_bridges/slack/` ports the M5_sdk-state of
