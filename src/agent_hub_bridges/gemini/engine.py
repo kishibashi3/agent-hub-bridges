@@ -14,9 +14,11 @@ bridge-claude が Claude Agent SDK + MCP 設定一時 file で同じ事をして
   - 応答 text を Python 側で組み立てて hub に送り返す必要は無くなった。
     返信は `gemini` 自身が `mcp__agent-hub__send_message` tool を呼ぶ。
     worker は subprocess を spawn / 待機するだけ。
-  - 会話履歴の保持: `gemini --session-id <uuid>` を使えば再開できるが、
-    M2 段階では peer 単位の確定 UUID を使った 1 ターン処理に留め、
-    chat 継続は M3 (永続化) の課題に残す。
+  - 会話履歴の保持: 現状は `gemini` を **session_id 引数なしで 1 ターン
+    処理** で 呼んでいる (= peer ごとの 会話 context は 持たない)。
+    将来的に `gemini --session-id <uuid>` で chat 永続化に拡張する余地
+    はあるが、 monorepo M3 時点では **未実装**。 旧 repo の M3 milestone
+    (= chat session 永続化) は future scope として 残置。
 """
 
 from __future__ import annotations
