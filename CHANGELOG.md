@@ -8,6 +8,14 @@ changes between minor versions are possible until `v1.0.0`.
 
 ## [Unreleased]
 
+### Changed — SDK pin swap (issue #15 on agent-hub-sdk)
+
+- `pyproject.toml`: swapped `agent-hub-sdk @ ...@f63a80e` (commit SHA) for
+  `@v0.3.0` (annotated tag). The tag was created post-M0 by @sdk-impl
+  (2026-05-19T22:05Z) and dereferences to the same commit `f63a80e`, so the
+  resolved package is byte-identical — this is a discoverability-only swap.
+  TODO comment removed since the trigger condition is satisfied.
+
 ### Added — M0 monorepo bootstrap (issue #1)
 
 - `pyproject.toml` (hatchling) with extras `[claude]` / `[slack]` / `[gemini]`
