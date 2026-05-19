@@ -8,6 +8,52 @@ changes between minor versions are possible until `v1.0.0`.
 
 ## [Unreleased]
 
+### Added — M2 bridge-slack port (issue #6)
+
+- `src/agent_hub_bridges/slack/` ports the M5_sdk-state of
+  `agent-hub-bridge-slack` (~1336 LOC). Behaviour is 1:1 with the legacy
+  repo — same CLI args (`--user` optional, default `slack-bot` with
+  `AGENT_HUB_USER` env fallback), same env (`SLACK_BOT_TOKEN`,
+  `SLACK_APP_TOKEN`, `SLACK_DEFAULT_CHANNEL`, `AGENT_HUB_URL`,
+  `GITHUB_PAT`), same console script name (`agent-hub-bridge-slack`),
+  same 3-task TaskGroup structure (slack handler / hub→slack relay /
+  periodic resubscribe), same `ThreadContext` shared between Slack and
+  hub sides, same M4 rate-limit-retry / error-visibility behaviour.
+- `routing.py` (426 LOC), `slack_handler.py` (588 LOC), `worker.py` (151
+  LOC) ported verbatim — only `agent_hub_bridge_slack` → `agent_hub_bridges.slack`
+  rename. The 3-task structure (not the outer reconnect of claude/gemini)
+  is kept inside `slack/`, intentionally not using
+  `_common.reconnect.run_with_reconnect` — slack binds its 3 tasks to a
+  single hub session lifetime by design.
+- Refactored to use `_common/` helpers:
+  - `BaseConfig` + `load_base_config` + `load_required_env` /
+    `load_optional_env` for shared env loading; slack `Config` adds
+    `slack_bot_token` / `slack_app_token` / `slack_default_channel` and
+    inherits `workdir` as None.
+  - `build_common_parser` for shared argparse args; only `--user`
+    (optional, default `slack-bot`) is added in slack-specific CLI.
+  - The `--workdir` arg accepted by the common parser is silently
+    ignored by slack (backward compat for legacy systemd units that
+    passed it).
+- All 7 legacy slack tests ported (~118 cases): `test_routing.py`,
+  `test_slack_handler.py`, `test_hub_to_slack.py`, `test_error_paths.py`,
+  `test_thread_follow_up.py`, `test_resubscribe.py`,
+  `test_list_participants.py`. Only mechanical changes: `agent_hub_bridge_slack`
+  → `agent_hub_bridges.slack` import rename, and `_make_config()` helper
+  fixtures gain `workdir=None` (= base inheritance).
+- New slack-specific tests for parity with claude (`tests/slack/test_config.py`
+  7 cases + `tests/slack/test_cli.py` 8 cases): env resolution, missing
+  required env (`SLACK_BOT_TOKEN`/`SLACK_APP_TOKEN`/`AGENT_HUB_URL`/`GITHUB_PAT`),
+  `--user` default-/env-/cli- resolution order, `--version` output,
+  `KeyboardInterrupt` exit code 130, `--workdir` silently ignored.
+- `pyproject.toml`: `tests/slack/**` per-file-ignores added for `N802`
+  (mocks of Slack SDK's camelCase `chat_postMessage`), `N818` (test
+  sentinel exceptions `_LoopExit` / `_Exc`), `RUF003` (full-width `＝`
+  in legacy Japanese comments) — these are pre-existing legacy test
+  patterns we intentionally do not rewrite during a 1:1 port.
+- M0 stub at `slack/cli.py` (= "M0 stub. Real implementation lands in M2")
+  removed.
+
 ### Added — M1 bridge-claude port (issue #3)
 
 - `src/agent_hub_bridges/claude/` ports the M_sdk-state of
