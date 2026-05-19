@@ -1,0 +1,101 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "agent-hub-bridges"
+version = "0.1.0"
+description = "Monorepo of agent-hub bridge workers (Claude / Gemini / Slack / A2A)"
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.11"
+authors = [
+    { name = "kishibashi3" },
+]
+keywords = ["agent-hub", "mcp", "bridge", "monorepo"]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+
+# 全 bridge が必ず使う core deps だけここに置く。 bridge 固有 deps は
+# [project.optional-dependencies] の各 extra へ。 user は
+#   pip install "agent-hub-bridges[claude]"
+# のように必要な bridge だけ pull する。
+dependencies = [
+    # agent-hub-sdk 0.3.0 (M2.1 command routing) を 使う。 v0.3.0 タグは
+    # SDK 側 で 未作成 (CHANGELOG では bump 済だが git tag が無い、 2026-05-19
+    # 時点) なので 当面 commit SHA に pin する。 SDK 側 で `v0.3.0` タグが
+    # push されたら ここを `@v0.3.0` に戻す (TODO: post-M0)。
+    "agent-hub-sdk @ git+https://github.com/kishibashi3/agent-hub-sdk.git@f63a80e#subdirectory=python",
+    "anyio>=4.0.0",
+    "python-dotenv>=1.0.0",
+]
+
+[project.optional-dependencies]
+# 各 bridge は自分の追加依存だけここに宣言する。 全 bridge をまとめて入れたい
+# 開発者は `[all]` を使う。 `[dev]` は test / lint toolchain。
+claude = [
+    "claude-agent-sdk>=0.1.0",
+]
+slack = [
+    "slack-bolt>=1.18.0",
+    "slack-sdk>=3.27.0",
+    "aiohttp>=3.9.0",  # slack-bolt async path に必須
+]
+gemini = [
+    # Gemini API は `gemini` CLI (npm: @google/gemini-cli) 経由なので Python
+    # 追加 deps は無し。 CLI は別途 `npm i -g @google/gemini-cli` で入れる。
+]
+a2a = [
+    # TODO(M4): a2a-sdk の pin は実装着手時に決定 (issue #94 で検討)。
+]
+all = [
+    "agent-hub-bridges[claude,slack,gemini,a2a]",
+]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "ruff>=0.6.0",
+]
+
+[project.scripts]
+# 後方互換: 旧 repo の console script 名 (`agent-hub-bridge-<name>`) を保持。
+# operator (@ope-ultp1635) と DM 合意済 (5 質問 D)。
+agent-hub-bridge-claude = "agent_hub_bridges.claude.cli:main"
+agent-hub-bridge-slack  = "agent_hub_bridges.slack.cli:main"
+agent-hub-bridge-gemini = "agent_hub_bridges.gemini.cli:main"
+agent-hub-bridge-a2a    = "agent_hub_bridges.a2a.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/kishibashi3/agent-hub-bridges"
+Repository = "https://github.com/kishibashi3/agent-hub-bridges"
+Issues = "https://github.com/kishibashi3/agent-hub-bridges/issues"
+"Related: agent-hub" = "https://github.com/kishibashi3/agent-hub"
+"Related: agent-hub-sdk" = "https://github.com/kishibashi3/agent-hub-sdk"
+
+[tool.hatch.metadata]
+# `agent-hub-sdk @ git+https://...` 形式の direct URL を `dependencies` に
+# 書くために必須。 PyPI 公開していないので git+ で参照する運用 (SDK 側も同じ)。
+allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/agent_hub_bridges"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP", "B", "RUF"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["ANN"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
