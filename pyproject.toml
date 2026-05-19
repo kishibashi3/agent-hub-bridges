@@ -94,6 +94,11 @@ select = ["E", "F", "I", "N", "W", "UP", "B", "RUF"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["ANN"]
+# slack tests に許容する style violation (= 1:1 port preserves legacy patterns):
+#   N802: Slack SDK の `chat_postMessage` を mock するため method 名を camelCase で 保持
+#   N818: test-internal sentinel exception (`_LoopExit`, `_Exc`) は Error suffix を 付けない
+#   RUF003: 旧 test の 日本語コメント中の 全角 `＝` (= half-width に直す価値が無い)
+"tests/slack/**" = ["ANN", "N802", "N818", "RUF003"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
