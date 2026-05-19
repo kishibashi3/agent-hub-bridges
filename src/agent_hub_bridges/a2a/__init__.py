@@ -1,10 +1,17 @@
-"""agent_hub_bridges.a2a: A2A client bridge (placeholder for M4).
+"""agent_hub_bridges.a2a: A2A client bridge (no-LLM protocol translator).
 
-設計仕様は `kishibashi3/agent-hub#94` を参照。 外部 A2A agent への client
-(= 呼びに行く側、 server ではない)。 LLM を持たない pure protocol
-translator として実装する (scheduler と同じ構造)。
+外部 A2A agent を agent-hub の peer として 引き込む **client bridge**
+(= 呼びに行く側、 server ではない)。 spec は `kishibashi3/agent-hub#94`
+を 参照。
 
-M0 の段階では stub のみ。 M4 で実装着手。
+LLM engine を **持たない**: bridge は agent-hub の inbox を購読し、 受信
+message を そのまま (= 整形なし) 外部 A2A agent に forward し、 stream
+response を collect して agent-hub に send_message で 戻す。 scheduler と
+同じ pure protocol translator 構造。
+
+`pip install "agent-hub-bridges[a2a]"` で `a2a-sdk` (Google LLC 公式、
+Apache-2.0、 v1.0.3+) と `httpx` (= a2a-sdk が transport で 要求) が
+install される。 console script は `agent-hub-bridge-a2a`。
 """
 
 from agent_hub_bridges import __version__
