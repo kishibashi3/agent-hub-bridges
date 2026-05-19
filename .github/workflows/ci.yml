@@ -1,0 +1,43 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# 同じ branch への新しい push が来たら 古い run を cancel する。 PR の手戻しが
+# CI 詰まりを起こすのを 防ぐ (= agent-hub-sdk と同じ運用)。
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint-test:
+    name: lint + test (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      # 全 extras を入れて lint / test を 1 度に回す (= M0 では stub 中心
+      # なので 重くない)。 M2 以降 (slack-bolt 等) が入って重くなったら
+      # extras を分割する。
+      - name: Install (dev + all extras)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,all]"
+
+      - name: Ruff lint
+        run: ruff check src/ tests/
+
+      - name: Pytest
+        run: pytest -v
