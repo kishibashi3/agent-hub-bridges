@@ -25,7 +25,7 @@ import sys
 import uuid
 
 import httpx
-from a2a.client import A2ACardResolver, ClientConfig, create_client
+from a2a.client import A2ACardResolver, Client, ClientConfig, create_client
 from a2a.types.a2a_pb2 import (
     ROLE_USER,
     AgentCard,
@@ -68,7 +68,9 @@ def _extract_reply_text(stream: list[StreamResponse]) -> str:
                 parts.append(part.text)
             else:
                 skipped += 1
-    text = "\n".join(p for p in parts if p)
+    # parts は append 時に既に truthy のみ蓄積されるため `if p` filter は不要
+    # (= PR #13 review Suggestion 1)。
+    text = "\n".join(parts)
     if skipped:
         suffix = f"\n_(non-text parts omitted: {skipped})_"
         text = (text + suffix) if text else suffix.lstrip()
@@ -160,7 +162,7 @@ async def run_worker(config: Config) -> None:
 async def _run_hub_session(
     config: Config,
     card: AgentCard,
-    a2a_client: object,  # `a2a.client.Client` だが ABC のため抽象型
+    a2a_client: Client,
 ) -> None:
     """1 回分の hub session lifecycle.
 
@@ -191,7 +193,7 @@ async def _run_hub_session(
 
 async def _handle_one(
     hub: HubSession,
-    a2a_client: object,
+    a2a_client: Client,
     msg: IncomingMessage,
     config: Config,
 ) -> None:
@@ -215,7 +217,7 @@ async def _handle_one(
     # sender に通知する (= ops 視点で silent fail させない)。
     try:
         responses: list[StreamResponse] = []
-        async for response in a2a_client.send_message(request):  # type: ignore[attr-defined]
+        async for response in a2a_client.send_message(request):
             responses.append(response)
     except Exception as exc:
         logger.exception("A2A send_message failed for message %s: %s", msg.id, exc)
