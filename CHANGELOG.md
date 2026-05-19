@@ -8,6 +8,69 @@ changes between minor versions are possible until `v1.0.0`.
 
 ## [Unreleased]
 
+### Added — M4 bridge-a2a new implementation (issue #12, agent-hub#94 spec)
+
+- `src/agent_hub_bridges/a2a/` is **new** (not a port) — a no-LLM A2A
+  client bridge that fronts an external Agent2Agent agent to agent-hub
+  as a peer. Per `kishibashi3/agent-hub#94` spec: pure protocol
+  translator, no LLM engine, single-endpoint, scheduler-like structure.
+- SDK selection: investigated PyPI candidates with operator approval
+  (DM `8d540c65-...`). `a2a-python` 0.0.1 is an empty placeholder
+  (Luke Hinds's name reservation); the correct package is **`a2a-sdk`
+  1.0.3** — Google LLC official, Apache-2.0, repo `a2aproject/a2a-python`.
+  Pinned in `[a2a]` extra as `a2a-sdk>=1.0.3,<2` + `httpx>=0.27` (the
+  SDK's transport).
+- Bridge flow:
+  1. Start with `A2A_AGENT_URL` env (required) — single endpoint per
+     `kishibashi3/agent-hub#94`; multi-endpoint is future scope.
+  2. `A2ACardResolver(httpx_client, base_url, agent_card_path)` →
+     `get_agent_card()` to fetch the agent's Agent Card.
+  3. Open `a2a.client.create_client(card, ClientConfig(httpx_client=...))`.
+  4. Register on agent-hub with `display_name` derived from
+     `card.description` > `card.name` > `--user` fallback (= the new
+     `_derive_display_name` helper in worker.py).
+  5. Loop `hub.inbox()` — for each incoming hub message:
+     - Build `SendMessageRequest(message=Message(role=ROLE_USER,
+       parts=[Part(text=msg.body)], message_id=<uuid>))`.
+     - Stream-iterate `Client.send_message(request)` and collect
+       `StreamResponse` chunks.
+     - Concatenate `response.message.parts[*].text` via the new
+       `_extract_reply_text` helper. Non-text parts (raw / url / data /
+       file) are dropped but a `_(non-text parts omitted: N)_` note is
+       appended for ops visibility.
+     - `hub.send(to=msg.sender, message=reply_text)` then `hub.ack`.
+  6. On `Client.send_message` exception, fall back to a single
+     `(自動応答) A2A agent でエラー: ...` notification to the sender so
+     failures don't silently disappear.
+- Refactored to use `_common/` helpers (same pattern as slack):
+  - `BaseConfig` + `load_base_config` + `load_required_env` /
+    `load_optional_env`; a2a `Config` adds `a2a_agent_url` (required) +
+    `a2a_agent_card_path` (default `/.well-known/agent.json`) and
+    inherits `workdir` as None (relay bridge).
+  - `build_common_parser` + a2a-specific `--user` (optional, default
+    fallback `'a2a-agent'`, env `AGENT_HUB_USER` middle tier — same as
+    slack since both are workspace-singleton relays).
+  - `run_with_reconnect` for outer reconnect — single-task lifecycle
+    (claude/gemini-shaped, not the 3-task structure of slack).
+  - `format_peer_message_prompt` is **not** used (no LLM, plain body
+    forwarded verbatim).
+- `tests/a2a/` (3 files, 26 cases): `test_config.py` (7 cases — env
+  resolution, missing required env, card path override, frozen
+  dataclass, display/tenant propagation), `test_cli.py` (7 cases —
+  `--version`, `--user` default/env/cli precedence, missing
+  `A2A_AGENT_URL`, missing `AGENT_HUB_URL`, `KeyboardInterrupt` exit
+  130), `test_mapping.py` (12 cases — `_extract_reply_text` for
+  single/multi/empty chunks, no-message field, non-text parts handling;
+  `_build_send_message_request` minimal/distinct-ids/empty-body;
+  `_derive_display_name` description/name/fallback precedence).
+- `.env.example`: `A2A_AGENT_URL` + optional `A2A_AGENT_CARD_PATH`
+  documented.
+- M0 stub at `a2a/cli.py` removed.
+
+**Note on live verification**: this PR ships unit tests + mocks only.
+Integration testing against a real A2A agent endpoint requires a
+public/staging A2A-compliant agent (operator follow-up after merge).
+
 ### Added — M3 bridge-gemini port + SDK migration + Protocol cleanup (issue #8)
 
 - `src/agent_hub_bridges/gemini/` ports `agent-hub-bridge-gemini` (~1052
