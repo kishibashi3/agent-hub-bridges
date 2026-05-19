@@ -8,6 +8,45 @@ changes between minor versions are possible until `v1.0.0`.
 
 ## [Unreleased]
 
+### Added — M1 bridge-claude port (issue #3)
+
+- `src/agent_hub_bridges/claude/` ports the M_sdk-state of
+  `agent-hub-bridge-claude` (~437 LOC, agent-hub-sdk-based). Behaviour is
+  1:1 with the legacy repo — same CLI args (`--user` required,
+  `--display-name` / `--tenant` / `--workdir` optional), same env (`GITHUB_PAT`,
+  `AGENT_HUB_URL`, `ANTHROPIC_API_KEY`), same console script name
+  (`agent-hub-bridge-claude`), same Claude Agent SDK options
+  (`bypassPermissions`, `setting_sources=["project", "local"]`), same
+  per-peer `session_id` (= per-sender stateful context).
+- Refactored to use `_common/` helpers:
+  - `BaseConfig` + `load_base_config` for shared env loading; claude `Config`
+    adds only `anthropic_api_key` and narrows `workdir` to required.
+  - `build_common_parser` for shared argparse args; only `--user` (required)
+    is added in claude-specific CLI.
+  - `run_with_reconnect` replaces the hand-rolled outer `while True: try
+    _run_hub_session ...` loop.
+  - `format_peer_message_prompt` replaces claude's private `_format_prompt`.
+  - `summarize_exc` (transitively used by `run_with_reconnect`) replaces
+    claude's private `_summarize_exc`.
+- claude-specific code that stays in `claude/` (= not extracted): the
+  `_mcp_config_file` temp-file MCP config builder (= Claude SDK calls
+  agent-hub via this file path so the PAT never appears in `ps`),
+  `_build_options` (Claude Agent SDK options), `_format_message` (SDK
+  message → log-line formatter).
+- `tests/claude/` (15 new tests): `test_config.py` covers env resolution,
+  CLI arg / env precedence, missing required env, bad workdir, frozen
+  dataclass; `test_cli.py` covers `--version`, missing `--user`, missing
+  env, happy-path `run_worker` invocation, and `KeyboardInterrupt` exit
+  code 130.
+- `tests/common/` strengthened (Suggestion 3 from PR #2 review):
+  `test_base_config.py` (16 new tests) covers `load_required_env` /
+  `load_optional_env` empty-string semantics, env override precedence,
+  workdir resolution; `test_reconnect.py` (4 new tests) covers retry,
+  `KeyboardInterrupt` propagation, `CancelledError` propagation,
+  `BaseExceptionGroup` handling.
+- M0 stub at `claude/cli.py` (= "M0 stub. Real implementation lands in M1")
+  removed.
+
 ### Changed — SDK pin swap (issue #15 on agent-hub-sdk)
 
 - `pyproject.toml`: swapped `agent-hub-sdk @ ...@f63a80e` (commit SHA) for
