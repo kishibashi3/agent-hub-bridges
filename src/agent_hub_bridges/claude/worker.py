@@ -91,11 +91,18 @@ def _build_options(config: Config, mcp_config_path: Path) -> ClaudeAgentOptions:
 
     bridge は「入力経路を agent-hub に差し替えただけの Claude Code」を目指す。
     振る舞いは workdir の CLAUDE.md / project .claude/settings に従う。
+
+    ``model`` は ``Config`` 経由で CLI ``--model`` / env ``AGENT_HUB_MODEL`` /
+    内蔵 default (= ``claude-sonnet-4-6``) のいずれかが解決済 で入る。
+    SDK の alias resolver が ``claude-sonnet-4-6`` のような family alias を
+    受け付ける (= 同 family の point release で勝手に上がる) ので、 bridge は
+    date-pinned form ではなく family alias を default にしてる。
     """
     return ClaudeAgentOptions(
         # str (file path) として渡し、 CLI 引数経由の PAT 露出を回避
         mcp_servers=str(mcp_config_path),
         cwd=str(config.workdir),
+        model=config.model,
         # 確認 UI は出さない (CLI なので元々出ないが明示)。 M2 で hook 経由の
         # propagation に置き換える。
         permission_mode="bypassPermissions",
@@ -155,10 +162,11 @@ async def run_worker(config: Config) -> None:
     )
 
     logger.info(
-        "Starting agent-hub-bridge-claude as @%s (workdir=%s, tenant=%s)",
+        "Starting agent-hub-bridge-claude as @%s (workdir=%s, tenant=%s, model=%s)",
         config.user,
         config.workdir,
         config.tenant or "default",
+        config.model,
     )
 
     with _mcp_config_file(config) as mcp_config_path:

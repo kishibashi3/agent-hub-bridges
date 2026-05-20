@@ -1,7 +1,7 @@
 """Unit tests for `agent_hub_bridges.claude.config`.
 
-claude 固有の field (`anthropic_api_key`) + base の `workdir: Optional[Path]`
-を required に絞り直した部分の挙動を 押さえる。
+claude 固有の field (`anthropic_api_key`, `model`) + base の
+`workdir: Optional[Path]` を required に絞り直した部分の挙動を 押さえる。
 """
 
 from __future__ import annotations
@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from agent_hub_bridges.claude.config import Config
+from agent_hub_bridges.claude.config import DEFAULT_MODEL, Config
 
 
 @pytest.fixture
@@ -21,6 +21,7 @@ def _hub_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("AGENT_HUB_DISPLAY_NAME", raising=False)
     monkeypatch.delenv("AGENT_HUB_TENANT", raising=False)
     monkeypatch.delenv("AGENT_HUB_WORKDIR", raising=False)
+    monkeypatch.delenv("AGENT_HUB_MODEL", raising=False)
 
 
 def test_config_happy_path(
@@ -94,6 +95,93 @@ def test_config_is_frozen(
     )
     with pytest.raises((AttributeError, Exception)):
         cfg.user = "evil"  # type: ignore[misc]
+
+
+## --- Sonnet 4.6 model pin (= legacy bridge-claude#10 catch-up) ---
+##
+## Adds coverage for the ``model`` field 解決順位: CLI ``--model`` > env
+## ``AGENT_HUB_MODEL`` > :data:`DEFAULT_MODEL` (= ``claude-sonnet-4-6``).
+## Origin: operator DM 2026-05-21、 planner DM ``79f656f6-...`` (legacy
+## bridge-claude#10), monorepo catch-up dispatch @bridges-impl DM
+## ``6992f13a-...``.
+
+
+def test_model_default_when_no_cli_no_env(
+    monkeypatch: pytest.MonkeyPatch, _hub_env: None, tmp_path: Path
+) -> None:
+    """CLI ``--model`` 未指定 + env ``AGENT_HUB_MODEL`` 未設定 →
+    :data:`DEFAULT_MODEL` (= ``claude-sonnet-4-6``) が解決される.
+
+    これが Sonnet 4.6 切替の core acceptance test。 default が 4.6 で固定
+    されている事を locking する。 将来 4.7 に上げる時はこの assertion を
+    更新する (= 意図的に手で動かす点が audit trail にもなる)。
+    """
+    cfg = Config.from_env_and_args(
+        user="claude-impl", display_name=None, tenant=None, workdir=str(tmp_path)
+    )
+    assert cfg.model == "claude-sonnet-4-6"
+    assert cfg.model == DEFAULT_MODEL
+
+
+def test_model_env_overrides_default(
+    monkeypatch: pytest.MonkeyPatch, _hub_env: None, tmp_path: Path
+) -> None:
+    """env ``AGENT_HUB_MODEL`` が default を上書きする (CLI 未指定時)."""
+    monkeypatch.setenv("AGENT_HUB_MODEL", "claude-opus-4-7")
+    cfg = Config.from_env_and_args(
+        user="claude-impl", display_name=None, tenant=None, workdir=str(tmp_path)
+    )
+    assert cfg.model == "claude-opus-4-7"
+
+
+def test_model_cli_overrides_env(
+    monkeypatch: pytest.MonkeyPatch, _hub_env: None, tmp_path: Path
+) -> None:
+    """CLI ``--model`` が env を上書きする (= 優先順位 CLI > env > default)."""
+    monkeypatch.setenv("AGENT_HUB_MODEL", "claude-opus-4-7")
+    cfg = Config.from_env_and_args(
+        user="claude-impl",
+        display_name=None,
+        tenant=None,
+        workdir=str(tmp_path),
+        model="claude-sonnet-4-6-20260501",  # date-pinned form も受け入れる
+    )
+    assert cfg.model == "claude-sonnet-4-6-20260501"
+
+
+def test_model_cli_overrides_default_no_env(
+    monkeypatch: pytest.MonkeyPatch, _hub_env: None, tmp_path: Path
+) -> None:
+    """CLI ``--model`` が default を上書きする (env も未設定の場合)."""
+    cfg = Config.from_env_and_args(
+        user="claude-impl",
+        display_name=None,
+        tenant=None,
+        workdir=str(tmp_path),
+        model="claude-haiku-4-5",
+    )
+    assert cfg.model == "claude-haiku-4-5"
+
+
+def test_model_empty_string_treated_as_unset(
+    monkeypatch: pytest.MonkeyPatch, _hub_env: None, tmp_path: Path
+) -> None:
+    """``model=""`` (= falsy) は未指定扱い、 env や default に fallback する.
+
+    argparse の ``default=None`` 経由なら None が来るが、 caller が誤って
+    空文字を渡した時に「空文字で SDK call」のような壊れた挙動にならない
+    保証。
+    """
+    monkeypatch.setenv("AGENT_HUB_MODEL", "claude-opus-4-7")
+    cfg = Config.from_env_and_args(
+        user="claude-impl",
+        display_name=None,
+        tenant=None,
+        workdir=str(tmp_path),
+        model="",
+    )
+    # env が拾われる (default ではなく)
+    assert cfg.model == "claude-opus-4-7"
 
 
 # silence unused import warning in some IDEs

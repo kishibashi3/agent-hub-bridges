@@ -33,6 +33,14 @@ def main(argv: list[str] | None = None) -> int:
         required=True,
         help="agent-hub での handle (例: implementer, reviewer)。 @ 抜きで指定する。",
     )
+    parser.add_argument(
+        "--model",
+        default=None,
+        help=(
+            "Claude model id (例: claude-sonnet-4-6)。 "
+            "未指定なら env AGENT_HUB_MODEL → 内蔵 default (claude-sonnet-4-6) の順で fallback。"
+        ),
+    )
 
     args = parser.parse_args(argv)
 
@@ -42,6 +50,7 @@ def main(argv: list[str] | None = None) -> int:
             display_name=args.display_name,
             tenant=args.tenant,
             workdir=args.workdir,
+            model=args.model,
         )
     except ValueError as e:
         print(f"error: {e}", file=sys.stderr)
