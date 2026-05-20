@@ -27,7 +27,7 @@ import tempfile
 from collections.abc import Iterator
 from pathlib import Path
 
-from agent_hub_sdk import AgentHub, HubSession, IncomingMessage
+from agent_hub_sdk import AgentHub, CommandRouter, HubSession, IncomingMessage
 from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
@@ -42,6 +42,7 @@ from claude_agent_sdk import (
 
 from agent_hub_bridges._common.prompt import format_peer_message_prompt
 from agent_hub_bridges._common.reconnect import run_with_reconnect
+from agent_hub_bridges.claude.claude_runner import ClaudeRunner
 from agent_hub_bridges.claude.config import Config
 
 logger = logging.getLogger(__name__)
@@ -141,8 +142,11 @@ async def run_worker(config: Config) -> None:
     """Bridge worker メインループ.
 
     `_common.reconnect.run_with_reconnect` で outer reconnect loop を回す。
-    `ClaudeSDKClient` (= peer ごとの会話履歴を持つ) は hub 再接続に
-    巻き込まず 外側で 1 度だけ立ち上げ、 再接続時も同じインスタンスを使い回す。
+    `ClaudeRunner` (= peer ごとの会話履歴を持つ `ClaudeSDKClient` の in-place
+    restart 対応 wrapper) は hub 再接続に巻き込まず 外側で 1 度だけ立ち上げ、
+    再接続時も同じインスタンスを使い回す。 ``/restart`` (= agent-hub-sdk M6,
+    issue #26) を受信した時だけ runner 内部で ``ClaudeSDKClient`` の close +
+    open が走り、 conversation history が リセットされる。
     """
     logging.basicConfig(
         level=logging.INFO,
@@ -160,24 +164,35 @@ async def run_worker(config: Config) -> None:
     with _mcp_config_file(config) as mcp_config_path:
         options = _build_options(config, mcp_config_path)
 
-        async with ClaudeSDKClient(options=options) as claude:
-            await claude.connect()
+        async with ClaudeRunner(options) as runner:
             logger.info("Claude session started, awaiting hub session...")
 
             async def _one_session() -> None:
-                await _run_hub_session(config, claude)
+                await _run_hub_session(config, runner)
 
             await run_with_reconnect(_one_session, name="hub session (claude)")
 
 
-async def _run_hub_session(config: Config, claude: ClaudeSDKClient) -> None:
+async def _run_hub_session(config: Config, runner: ClaudeRunner) -> None:
     """1 回分の hub session を最後まで走らせる.
 
-    `AgentHub.connect` → `hub.inbox()` の async iterator を `async for` で
-    回すだけ。 push / poll / heartbeat / `/ping` intercept は 全部 SDK 側。
-    session が死ぬと iterator 内部 task が例外を上げ、 `hub.inbox()` の
-    `async with` 出口で transport が tear down し、 本関数 から例外が伝播
-    して 上位 `run_with_reconnect` の retry に乗る。
+    `AgentHub.connect` → `hub.inbox(commands=router)` の async iterator を
+    `async for` で 回すだけ。 push / poll / heartbeat / `/ping` intercept は
+    全部 SDK 側。 session が死ぬと iterator 内部 task が例外を上げ、
+    `hub.inbox()` の `async with` 出口で transport が tear down し、 本関数
+    から例外が伝播して 上位 `run_with_reconnect` の retry に乗る。
+
+    ``CommandRouter`` を構築して ``commands=router`` で inbox に渡すと、
+    SDK が ``/ping`` / ``/status`` / ``/help`` / ``/restart`` を自動 handle
+    する。 ``async for msg in messages:`` に到達するのは natural language
+    の DM のみ (= ``_handle_one`` で LLM に流す対象)。
+
+    ``/restart`` の動作 (= agent-hub-sdk M6, issue #26):
+      - SDK が ``"restarting..."`` を sender に送信
+      - ``router.set_restart_handler`` で注入した ``runner.restart`` を await
+      - ``runner.restart`` が old ``ClaudeSDKClient`` を close → 新規 open
+      - return 後、 SDK が ``"ready"`` を送信 + ack
+      - 失敗時は SDK が generic warning を送信 + ack (= どちらも ack 必ず走る)
 
     SDK M5 (agent-hub-sdk#27, merge ``fc4a4cd``) auto-registers as part
     of ``AgentHub.connect``. The explicit ``registered = await
@@ -188,6 +203,14 @@ async def _run_hub_session(config: Config, claude: ClaudeSDKClient) -> None:
     value is gone, we log the user handle from the already-resolved
     ``config.user`` — same operator-facing signal that the bridge is up.
     """
+    # CommandRouter (= agent-hub-sdk M2.1) を built-in commands ON で構築。
+    # ``/restart`` (M6) の callback として runner.restart を注入する。 SDK の
+    # ``/restart`` built-in は 2-stage reply (= "restarting..." → callback
+    # → "ready") を orchestrate するので、 本 bridge 側 では reply 文字列の
+    # 管理も不要 (= SDK 内 hardcoded)。
+    router = CommandRouter()
+    router.set_restart_handler(runner.restart)
+
     async with AgentHub.connect(
         user=config.user,
         mode="stateful",
@@ -201,9 +224,14 @@ async def _run_hub_session(config: Config, claude: ClaudeSDKClient) -> None:
             config.user,
         )
 
-        async with hub.inbox() as messages:
+        async with hub.inbox(commands=router) as messages:
             async for msg in messages:
-                await _handle_one(hub, claude, msg, config)
+                # ``commands=router`` が ``/ping`` / ``/status`` / ``/help``
+                # / ``/restart`` を SDK 側 で intercept 済。 ここに到達する
+                # のは natural language メッセージのみ。 ``runner.client``
+                # は per-message に読むので、 ``/restart`` で session が
+                # re-spawn された直後の次メッセージから新 client が使われる。
+                await _handle_one(hub, runner.client, msg, config)
                 await hub.ack(msg.id)
 
 
