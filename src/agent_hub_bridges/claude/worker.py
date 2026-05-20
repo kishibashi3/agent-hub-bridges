@@ -173,11 +173,20 @@ async def run_worker(config: Config) -> None:
 async def _run_hub_session(config: Config, claude: ClaudeSDKClient) -> None:
     """1 回分の hub session を最後まで走らせる.
 
-    `AgentHub.connect` → `hub.register` → `hub.inbox()` の async iterator を
-    `async for` で 回すだけ。 push / poll / heartbeat / `/ping` intercept は
-    全部 SDK 側。 session が死ぬと iterator 内部 task が例外を上げ、
-    `hub.inbox()` の `async with` 出口で transport が tear down し、 本関数
-    から例外が伝播して 上位 `run_with_reconnect` の retry に乗る。
+    `AgentHub.connect` → `hub.inbox()` の async iterator を `async for` で
+    回すだけ。 push / poll / heartbeat / `/ping` intercept は 全部 SDK 側。
+    session が死ぬと iterator 内部 task が例外を上げ、 `hub.inbox()` の
+    `async with` 出口で transport が tear down し、 本関数 から例外が伝播
+    して 上位 `run_with_reconnect` の retry に乗る。
+
+    SDK M5 (agent-hub-sdk#27, merge ``fc4a4cd``) auto-registers as part
+    of ``AgentHub.connect``. The explicit ``registered = await
+    hub.register()`` that used to live here is now a harmless duplicate
+    (= server-side ``register`` is idempotent), so we drop it. The log
+    message previously printed the server's registration confirmation
+    text (e.g. ``registered: @claude-bridge``); now that the return
+    value is gone, we log the user handle from the already-resolved
+    ``config.user`` — same operator-facing signal that the bridge is up.
     """
     async with AgentHub.connect(
         user=config.user,
@@ -187,8 +196,10 @@ async def _run_hub_session(config: Config, claude: ClaudeSDKClient) -> None:
         url=config.agent_hub_url,
         pat=config.github_pat,
     ) as hub:
-        registered = await hub.register()
-        logger.info("Hub session ready (%s), listening on inbox...", registered.splitlines()[0])
+        logger.info(
+            "Hub session ready (@%s), listening on inbox...",
+            config.user,
+        )
 
         async with hub.inbox() as messages:
             async for msg in messages:
