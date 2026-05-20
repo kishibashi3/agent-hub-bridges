@@ -41,9 +41,11 @@ When ``/restart`` arrives, the SDK's built-in dispatcher:
 If ``restart()`` raises, the SDK sends a generic warning reply
 instead of ``"ready"`` and still acks. The bridge keeps running with
 whatever state the partial restart left behind — the runner's own
-internal try/finally ordering is designed to keep ``_client`` pointing
-at a usable instance even on partial failure (= old client kept if new
-client failed to open).
+internal try/finally ordering is designed to be **safe** on partial
+failure (= no double-close, no dangling reference, no silent dead
+client). On new-open failure, ``_client`` becomes ``None`` and
+subsequent access raises a clear diagnostic rather than masking the
+broken state.
 """
 
 from __future__ import annotations
@@ -141,9 +143,13 @@ class ClaudeRunner:
 
         Failure-mode contract:
 
-        - If the *new* client fails to open, we keep the *old* client
-          live and re-raise. The bridge keeps running with the old
-          state; the SDK sends a warning to the operator.
+        - If the *new* client fails to open, the old client has already
+          been closed by this point (= best-effort close happens
+          unconditionally before the new-open attempt). ``_client`` is
+          left at ``None``; subsequent ``.client`` access raises
+          ``RuntimeError`` with a clear diagnostic. The bridge no
+          longer has a live Claude session until a subsequent
+          successful restart or worker-level reconnect.
         - If closing the old client fails, we log + continue to opening
           the new one. A best-effort close is acceptable here because
           the operator explicitly asked for a fresh session — leaving
