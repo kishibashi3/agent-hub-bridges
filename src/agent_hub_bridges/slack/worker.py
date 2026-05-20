@@ -139,7 +139,11 @@ async def run_worker(config: Config) -> None:
         url=config.agent_hub_url,
         pat=config.github_pat,
     ) as hub:
-        await hub.register()
+        # SDK M5 (agent-hub-sdk#27, merge fc4a4cd, included in v0.6.0)
+        # auto-registers as part of ``AgentHub.connect``. The explicit
+        # ``await hub.register()`` that used to live here is now a harmless
+        # duplicate (= server-side ``register`` is idempotent), so we drop
+        # it. Catches up legacy `agent-hub-bridge-slack#10` (= `fcd8025`).
         await hub.subscribe_inbox()
 
         app = build_slack_app(config, hub, thread_ctx)
