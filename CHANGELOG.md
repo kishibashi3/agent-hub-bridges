@@ -8,6 +8,31 @@ changes between minor versions are possible until `v1.0.0`.
 
 ## [Unreleased]
 
+### Changed — agent-hub-sdk pin bump v0.3.0 → v0.6.0 (issue #27, catch-up prerequisite)
+
+- `pyproject.toml`: bumped `agent-hub-sdk @ ...@v0.3.0` to `@v0.6.0`. All
+  bridge sub-packages now resolve against the SDK release that includes
+  **M3 stateless + `hub.one_shot()`** (v0.4.0), **M4 TS port + install
+  path fix** (v0.5.0), **M5 auto-register on `AgentHub.connect()`**
+  (v0.6.0/M5), and **M6 `/restart` built-in + `set_restart_handler`**
+  (v0.6.0/M6).
+- This is a **prerequisite-only refactor**: no functional change in this
+  PR. v0.3.0 → v0.6.0 is backward compatible — existing explicit
+  `await hub.register()` calls in monorepo bridges remain harmless (the
+  server-side `register` tool is idempotent), and the new `/restart`
+  built-in is dormant when no `set_restart_handler` callback is
+  registered.
+- Motivation: catch-up port of post-`agent-hub-bridges#5` PRs that
+  landed in legacy `agent-hub-bridge-claude` (PRs #7, #9, #10) and
+  `agent-hub-bridge-slack` (PR #10) before the planned 2026-05-22
+  archive. Those follow-up PRs require SDK M5 (drop redundant
+  `hub.register()`) and M6 (`/restart` integration); see issue #27 for
+  the dependency table.
+- Subsequent catch-up PRs land separately:
+  - `@bridges-impl`: bridge-slack `drop hub.register()` catch-up
+  - `@bridge-claude-impl`: bridge-claude PR #7 (drop `hub.register()`),
+    PR #9 (`/restart` + `ClaudeRunner`), PR #10 (Sonnet 4.6 model pin)
+
 ### Added — M4 bridge-a2a new implementation (issue #12, agent-hub#94 spec)
 
 - `src/agent_hub_bridges/a2a/` is **new** (not a port) — a no-LLM A2A
