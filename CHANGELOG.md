@@ -36,7 +36,7 @@ changes between minor versions are possible until `v1.0.0`.
 - `docs/migration.md`: status を `M0 skeleton` → `M5 complete` に更新。archive
   完了済み旧 repo 一覧を追記。
 
-### Changed — agent-hub-sdk pin bump v0.3.0 → v0.6.0 (issue #27, catch-up prerequisite)
+### Changed — agent-hub-sdk pin bump v0.3.0 → v0.6.0 (issue #27, M5/M6 prerequisite)
 
 - `pyproject.toml`: bumped `agent-hub-sdk @ ...@v0.3.0` to `@v0.6.0`. All
   bridge sub-packages now resolve against the SDK release that includes
