@@ -87,6 +87,56 @@ class _ActivityTracker:
         return "busy" if elapsed < _BUSY_WINDOW_S else "idle"
 
 
+# issue #26: safety-net 発火推定のウィンドウ (秒)。
+# NOTE: Approach C (bridge 側近似実装): SDK が push/poll の source を
+# IncomingMessage に expose していないため、連続メッセージ間の gap で
+# poll 経由 (= safety-net 発火) を推定する。
+# gap >= _PUSH_SILENT_THRESHOLD_S → SSE push が黙っていた可能性あり → WARNING。
+# 閾値の根拠: SDK の poll 間隔デフォルトは 30s (_DEFAULT_INBOX_POLL_INTERVAL_S)。
+# 25s に設定することで poll 間隔より短い gap は無視し、長い gap を捕捉する。
+# env AGENT_HUB_PUSH_SILENT_THRESHOLD_S (float 秒) で上書き可能。
+_PUSH_SILENT_THRESHOLD_S = float(
+    os.environ.get("AGENT_HUB_PUSH_SILENT_THRESHOLD_S", "25")
+)
+
+
+class _MessageGapTracker:
+    """メッセージ受信間の gap を計測して safety-net 発火を推定する.
+
+    issue #26: SDK の push_loop / poll_loop は session.py 内部に実装されており、
+    bridge 側から push/poll の source に直接アクセスできない (Approach C: 近似)。
+    連続メッセージ間の gap が ``_PUSH_SILENT_THRESHOLD_S`` 以上なら、
+    poll 経由 (= safety-net 発火) の可能性があると WARNING を出す。
+
+    精度の限界:
+      - 単純に「しばらくメッセージが来なかっただけ」との区別が不可能。
+      - SDK が push/poll の source を IncomingMessage に expose するまでは
+        近似に留まる。正確な実装は SDK 側 follow-up issue で対応予定。
+      - ``_MessageGapTracker`` は ``run_worker`` で 1 度だけ作成し、
+        reconnect をまたいで共有する (= cursor / tracker と同様)。
+    """
+
+    def __init__(self) -> None:
+        self._last_received_at: float | None = None
+
+    def on_message_received(self, msg_id: str) -> None:
+        """message 受信時に呼ぶ。gap が閾値以上なら WARNING を emit する。"""
+        now = time.monotonic()
+        if self._last_received_at is not None:
+            gap = now - self._last_received_at
+            if gap >= _PUSH_SILENT_THRESHOLD_S:
+                logger.warning(
+                    "[safety-net] message %s arrived %.0fs after previous "
+                    "(>= %.0fs threshold) — SSE push may have been silent; "
+                    "poll fallback likely fired "
+                    "(approximate: SDK source not exposed to bridge)",
+                    msg_id,
+                    gap,
+                    _PUSH_SILENT_THRESHOLD_S,
+                )
+        self._last_received_at = now
+
+
 @contextlib.contextmanager
 def _mcp_config_file(config: Config) -> Iterator[Path]:
     """agent-hub の MCP config を一時 file に書き出す (PAT を ps に出さないため).
@@ -217,6 +267,10 @@ async def run_worker(config: Config) -> None:
     # reconnect をまたいで 1 インスタンスを共有する。
     tracker = _ActivityTracker()
 
+    # issue #26: メッセージ受信間 gap による safety-net 発火推定。
+    # reconnect をまたいで 1 インスタンスを共有する。
+    gap_tracker = _MessageGapTracker()
+
     with _mcp_config_file(config) as mcp_config_path:
         options = _build_options(config, mcp_config_path)
 
@@ -225,7 +279,9 @@ async def run_worker(config: Config) -> None:
 
             async def _one_session() -> None:
                 nonlocal cursor
-                cursor = await _run_hub_session(config, runner, cursor, tracker)
+                cursor = await _run_hub_session(
+                    config, runner, cursor, tracker, gap_tracker
+                )
 
             await run_with_reconnect(_one_session, name="hub session (claude)")
 
@@ -235,6 +291,7 @@ async def _run_hub_session(
     runner: ClaudeRunner,
     cursor: str | None,
     tracker: _ActivityTracker,
+    gap_tracker: _MessageGapTracker,
 ) -> str | None:
     """1 回分の hub session を最後まで走らせる.
 
@@ -311,6 +368,10 @@ async def _run_hub_session(
                 # のは natural language メッセージのみ。 ``runner.client``
                 # は per-message に読むので、 ``/restart`` で session が
                 # re-spawn された直後の次メッセージから新 client が使われる。
+
+                # issue #26: safety-net 発火推定。cursor skip より前に呼ぶことで
+                # 重複 skip されたメッセージも含む全着信 gap を計測する。
+                gap_tracker.on_message_received(msg.id)
 
                 # issue #37: 再起動後の重複 dispatch 防止。
                 # cursor 以前 (cursor と同値含む) は skip + ack して次へ。
