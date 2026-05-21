@@ -55,10 +55,10 @@ See `.env.example` for the full list of env vars (including bridge-specific ones
 src/agent_hub_bridges/
 ├── __init__.py        # __version__ only — does NOT eager-import sub-packages
 ├── _common/           # internal helpers shared by all bridges
-├── claude/            # M1 port target
-├── slack/             # M2 port target
-├── gemini/            # M3 port target (+ SDK migration)
-└── a2a/               # M4 new bridge
+├── claude/            # M1 complete (ported from agent-hub-bridge-claude, archived)
+├── slack/             # M2 complete (ported from agent-hub-bridge-slack, archived)
+├── gemini/            # M3 complete (ported from agent-hub-bridge-gemini, archived; SDK migration done)
+└── a2a/               # M4 complete (new bridge per agent-hub#94)
 ```
 
 Design: [`docs/design.md`](docs/design.md).

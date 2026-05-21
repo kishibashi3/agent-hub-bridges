@@ -8,6 +8,21 @@ changes between minor versions are possible until `v1.0.0`.
 
 ## [Unreleased]
 
+### Changed — M5 complete: legacy bridge repos archived (2026-05-21)
+
+- `agent-hub-bridge-claude`, `agent-hub-bridge-slack`, `agent-hub-bridge-gemini` archived on GitHub.
+  `agent-hub-bridges` monorepo is now the sole active implementation source.
+- `README.md`, `docs/design.md`, `docs/migration.md` updated to reflect M5 completion.
+  Bridge status table updated from M0 stubs to M1-M4 ✅. Milestone table completed.
+
+### Changed — agent-hub-sdk pin v0.6.0 → v0.7.0 (inbox dedup fix)
+
+- `pyproject.toml`: bumped SDK pin from `@v0.6.0` to `@v0.7.0`.
+- v0.7.0 adds **inbox message dedup by ID** (`agent-hub-sdk` issue #31 / PR #32):
+  prevents double-dispatch on SSE replay after reconnect. Works in tandem with
+  server PR #118 (SSE replay filter at event-store layer).
+- Backward compatible: no bridge code changes required.
+
 ### Changed — agent-hub-sdk pin bump v0.3.0 → v0.6.0 (issue #27, catch-up prerequisite)
 
 - `pyproject.toml`: bumped `agent-hub-sdk @ ...@v0.3.0` to `@v0.6.0`. All

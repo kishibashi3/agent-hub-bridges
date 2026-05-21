@@ -117,14 +117,14 @@ bridge にしか出ない pattern は その bridge 内に 留める。
 
 ## 6. 段階的移行プラン
 
-| milestone | scope | issue |
+| milestone | scope | status |
 |---|---|---|
-| **M0** | bootstrap (本 doc) | #1 |
-| **M1** | bridge-claude 移植 + `_common` を実コードで磨く | (M0 merge 後に起票) |
-| **M2** | bridge-slack 移植 (SDK 移行済なのでそのまま) | (M1 merge 後に起票) |
-| **M3** | bridge-gemini 移植 + SDK 移行 (= 旧 hub.py 削除) | (M2 merge 後に起票) |
-| **M4** | bridge-a2a 新規実装 (agent-hub#94 spec) | (M3 merge 後に起票) |
-| **M5** | 旧 repo archive + README に 移行案内 | (M1-M4 安定確認後、 operator 判断) |
+| **M0** | bootstrap (本 doc) | ✅ 完了 (#1) |
+| **M1** | bridge-claude 移植 + `_common` を実コードで磨く | ✅ 完了 (#3) |
+| **M2** | bridge-slack 移植 (SDK 移行済なのでそのまま) | ✅ 完了 (#6) |
+| **M3** | bridge-gemini 移植 + SDK 移行 (= 旧 hub.py 削除) | ✅ 完了 (#8) |
+| **M4** | bridge-a2a 新規実装 (agent-hub#94 spec) | ✅ 完了 (#12) |
+| **M5** | 旧 repo archive + README に 移行案内 | ✅ 完了 (2026-05-21) |
 
 各 milestone は **1 PR / 1 reviewer LGTM**。 planner / reviewer の運用は
 全社共通ルール (`agent-hub/CLAUDE.md`) に従う。
