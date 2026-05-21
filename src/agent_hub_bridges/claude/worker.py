@@ -261,6 +261,10 @@ async def _run_hub_session(
 
                 # issue #37: 再起動後の重複 dispatch 防止。
                 # cursor 以前 (cursor と同値含む) は skip + ack して次へ。
+                # NOTE: ISO-8601 UTC 文字列 (例: "2026-05-21T12:00:00.000Z") は
+                # 辞書順比較 (<=) が時系列順と一致する。これは server が
+                # 一貫した形式を返す前提。server 実装を変えた場合は
+                # `datetime.fromisoformat()` でのパースに切り替えること。
                 if cursor is not None and msg.timestamp <= cursor:
                     logger.info(
                         "Skipping already-seen message %s (ts=%s, cursor=%s)",
