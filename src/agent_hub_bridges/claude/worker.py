@@ -44,6 +44,7 @@ from agent_hub_bridges._common.prompt import format_peer_message_prompt
 from agent_hub_bridges._common.reconnect import run_with_reconnect
 from agent_hub_bridges.claude.claude_runner import ClaudeRunner
 from agent_hub_bridges.claude.config import Config
+from agent_hub_bridges.claude.cursor import load_cursor, save_cursor
 
 logger = logging.getLogger(__name__)
 
@@ -169,6 +170,11 @@ async def run_worker(config: Config) -> None:
         config.model,
     )
 
+    # issue #37: bridge 再起動後のメッセージ重複 dispatch を防ぐ timestamp cursor。
+    # cursor は outer reconnect loop を跨いで 1 度だけ load し、 セッション間で
+    # 共有する (= 再接続しても同じ cursor を使い回す)。
+    cursor = load_cursor(config.user)
+
     with _mcp_config_file(config) as mcp_config_path:
         options = _build_options(config, mcp_config_path)
 
@@ -176,12 +182,17 @@ async def run_worker(config: Config) -> None:
             logger.info("Claude session started, awaiting hub session...")
 
             async def _one_session() -> None:
-                await _run_hub_session(config, runner)
+                nonlocal cursor
+                cursor = await _run_hub_session(config, runner, cursor)
 
             await run_with_reconnect(_one_session, name="hub session (claude)")
 
 
-async def _run_hub_session(config: Config, runner: ClaudeRunner) -> None:
+async def _run_hub_session(
+    config: Config,
+    runner: ClaudeRunner,
+    cursor: str | None,
+) -> str | None:
     """1 回分の hub session を最後まで走らせる.
 
     `AgentHub.connect` → `hub.inbox(commands=router)` の async iterator を
@@ -210,6 +221,14 @@ async def _run_hub_session(config: Config, runner: ClaudeRunner) -> None:
     text (e.g. ``registered: @claude-bridge``); now that the return
     value is gone, we log the user handle from the already-resolved
     ``config.user`` — same operator-facing signal that the bridge is up.
+
+    issue #37: ``cursor`` は再起動をまたいで最後に処理した message の
+    timestamp を保持する。 ``msg.timestamp <= cursor`` のメッセージは
+    skip + ack することで重複 dispatch を防ぐ。 正常処理時の順序は:
+      1. ``_handle_one`` で LLM に流す (process)
+      2. ``save_cursor`` で timestamp を永続化
+      3. ``hub.ack`` でサーバに既読通知
+    Returns: セッション終了時点の cursor 値 (= 上位 reconnect loop で持ち越す)。
     """
     # CommandRouter (= agent-hub-sdk M2.1) を built-in commands ON で構築。
     # ``/restart`` (M6) の callback として runner.restart を注入する。 SDK の
@@ -239,8 +258,28 @@ async def _run_hub_session(config: Config, runner: ClaudeRunner) -> None:
                 # のは natural language メッセージのみ。 ``runner.client``
                 # は per-message に読むので、 ``/restart`` で session が
                 # re-spawn された直後の次メッセージから新 client が使われる。
+
+                # issue #37: 再起動後の重複 dispatch 防止。
+                # cursor 以前 (cursor と同値含む) は skip + ack して次へ。
+                if cursor is not None and msg.timestamp <= cursor:
+                    logger.info(
+                        "Skipping already-seen message %s (ts=%s, cursor=%s)",
+                        msg.id,
+                        msg.timestamp,
+                        cursor,
+                    )
+                    await hub.ack(msg.id)
+                    continue
+
                 await _handle_one(hub, runner.client, msg, config)
+                # process → save_cursor → ack の順 (crash-safe)。
+                # save_cursor 後 ack 前にクラッシュしても、 再起動後に
+                # cursor で skip されるので二重 dispatch にならない。
+                save_cursor(config.user, msg.timestamp)
+                cursor = msg.timestamp
                 await hub.ack(msg.id)
+
+    return cursor
 
 
 async def _handle_one(
