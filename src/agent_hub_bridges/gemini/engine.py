@@ -415,8 +415,18 @@ class GeminiCLIEngine:
         env["HOME"] = str(self._home_dir)
         env["GITHUB_PAT"] = self._config.github_pat
         env["GEMINI_API_KEY"] = self._config.gemini_api_key
-        # gemini CLI が telemetry / interactive 検出を誤らないよう、
-        # CI 環境っぽい hint を入れておく (実害は無いが headless で安全側)。
+        # gemini CLI の interactive/telemetry 検出を抑える hint。
+        # 両方とも setdefault なので env で明示指定があれば尊重する。
+        #
+        #   CI=1: 未設定だと gemini CLI が "Update available: ..." 等の
+        #         interactive な update 案内バナーを stderr に出力する。
+        #         headless daemon では邪魔なため抑制 (= CLI が CI 環境と
+        #         判定すると interactive プロンプト系を全てスキップする)。
+        #
+        #   TERM=dumb: 未設定 (または xterm-256color 等) だと gemini CLI が
+        #              ANSI エスケープシーケンス (色 / カーソル制御: \x1b[...m 等)
+        #              を stdout に混入させる。agent-hub 経由の返信本文に
+        #              制御文字が漏れるため、TERM=dumb で plain text 出力に落とす。
         env.setdefault("CI", "1")
         env.setdefault("TERM", "dumb")
         return env
