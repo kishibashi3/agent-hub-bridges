@@ -51,7 +51,11 @@ logger = logging.getLogger(__name__)
 
 # issue #46: stdout スニフによる busy 判定ウィンドウ (秒)。
 # ASSISTANT: ログが直近この秒数以内に流れていれば /status → "busy"。
-# env AGENT_HUB_BUSY_WINDOW_S で上書き可能。
+# 60s に設定した根拠:
+#   - Claude の tool use ターンは通常 10〜30s。複数ターンで 60s 超は稀。
+#   - 短すぎると LLM が応答中なのに "idle" に見える誤検知が増える。
+#   - 長すぎると「作業完了済みなのに "busy"」が続く。
+# env AGENT_HUB_BUSY_WINDOW_S (float 秒) で上書き可能。
 _BUSY_WINDOW_S = float(os.environ.get("AGENT_HUB_BUSY_WINDOW_S", "60"))
 
 
