@@ -37,7 +37,7 @@ from agent_hub_bridges.gemini.engine import (
         "Please retry: rate limit reached",
     ],
 )
-def testis_rate_limit_error_detects(stderr: str) -> None:
+def test_is_rate_limit_error_detects(stderr: str) -> None:
     assert is_rate_limit_error(stderr) is True
 
 
@@ -50,7 +50,7 @@ def testis_rate_limit_error_detects(stderr: str) -> None:
         "Some normal stderr without quota markers",
     ],
 )
-def testis_rate_limit_error_ignores_unrelated(stderr: str) -> None:
+def test_is_rate_limit_error_ignores_unrelated(stderr: str) -> None:
     assert is_rate_limit_error(stderr) is False
 
 
