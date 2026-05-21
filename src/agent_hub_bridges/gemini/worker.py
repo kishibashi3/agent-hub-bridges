@@ -155,19 +155,24 @@ async def _handle_one(
         return
 
     # stdout / stderr は engine 側で既に INFO ログに残してあるので、
-    # ここでは 1 行サマリを残すだけ。 retry の有無は `attempts` で分かる
-    # (rate limit retry は engine.run 内で吸収済み)。
+    # ここでは 1 行サマリを残すだけ。
     #
     # emoji は exit code で分岐: `✓` = 成功 (returncode == 0)、 `✗` =
     # 失敗 (= gemini CLI が non-zero で 終了。 reply 自体は CLI が tool
     # 経由で 送っているかもしれないが、 ログ目視で 異常を見落とさないため)。
+    #
+    # issue #25: rate-limit retry を経由した場合 (attempts >= 2) に
+    # " RETRIED" marker を末尾に付ける。これにより `grep RETRIED` で
+    # retry が発生した message だけを抽出できる。
     status_emoji = "✓" if result.returncode == 0 else "✗"
+    retry_marker = " RETRIED" if result.attempts >= 2 else ""
     logger.info(
-        "%s processed %s from %s (exit=%d, %.1fs, attempts=%d)",
+        "%s processed %s from %s (exit=%d, %.1fs, attempts=%d%s)",
         status_emoji,
         msg.id,
         msg.sender,
         result.returncode,
         result.duration_s,
         result.attempts,
+        retry_marker,
     )
