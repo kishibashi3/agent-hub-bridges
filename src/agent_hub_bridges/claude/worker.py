@@ -192,6 +192,9 @@ def _build_options(config: Config, mcp_config_path: Path) -> ClaudeAgentOptions:
         mcp_servers=str(mcp_config_path),
         cwd=str(config.workdir),
         model=config.model,
+        # issue #20: workdir 以外の追加ディレクトリ (--add-dir で指定)。
+        # 空 list なら SDK は --add-dir を渡さない (= 旧来挙動と同じ)。
+        add_dirs=list(config.add_dirs),
         # 確認 UI は出さない (CLI なので元々出ないが明示)。 M2 で hook 経由の
         # propagation に置き換える。
         permission_mode="bypassPermissions",

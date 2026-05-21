@@ -41,6 +41,18 @@ def main(argv: list[str] | None = None) -> int:
             "未指定なら env AGENT_HUB_MODEL → 内蔵 default (claude-sonnet-4-6) の順で fallback。"
         ),
     )
+    parser.add_argument(
+        "--add-dir",
+        dest="add_dirs",
+        action="append",
+        default=[],
+        metavar="DIR",
+        help=(
+            "workdir 以外に Claude がアクセスできる追加ディレクトリ (繰り返し指定可)。 "
+            "ClaudeAgentOptions.add_dirs に渡す (issue #20)。 "
+            "例: --add-dir /path/to/docs --add-dir /path/to/data"
+        ),
+    )
 
     args = parser.parse_args(argv)
 
@@ -51,6 +63,7 @@ def main(argv: list[str] | None = None) -> int:
             tenant=args.tenant,
             workdir=args.workdir,
             model=args.model,
+            add_dirs=args.add_dirs,
         )
     except ValueError as e:
         print(f"error: {e}", file=sys.stderr)

@@ -186,3 +186,82 @@ def test_model_empty_string_treated_as_unset(
 
 # silence unused import warning in some IDEs
 _ = os
+
+
+# --- issue #20: add_dirs ---
+
+
+def test_add_dirs_default_empty(
+    monkeypatch: pytest.MonkeyPatch, _hub_env: None, tmp_path: Path
+) -> None:
+    """``add_dirs`` 未指定 (default) は 空 tuple。"""
+    cfg = Config.from_env_and_args(
+        user="claude-impl", display_name=None, tenant=None, workdir=str(tmp_path)
+    )
+    assert cfg.add_dirs == ()
+
+
+def test_add_dirs_single(
+    monkeypatch: pytest.MonkeyPatch, _hub_env: None, tmp_path: Path
+) -> None:
+    """1 件 ``add_dirs`` が Path に変換される。"""
+    other = tmp_path / "other"
+    other.mkdir()
+    cfg = Config.from_env_and_args(
+        user="claude-impl",
+        display_name=None,
+        tenant=None,
+        workdir=str(tmp_path),
+        add_dirs=[str(other)],
+    )
+    assert cfg.add_dirs == (other.resolve(),)
+
+
+def test_add_dirs_multiple(
+    monkeypatch: pytest.MonkeyPatch, _hub_env: None, tmp_path: Path
+) -> None:
+    """複数 ``add_dirs`` が tuple[Path, ...] として保持される。"""
+    dir_a = tmp_path / "a"
+    dir_b = tmp_path / "b"
+    dir_a.mkdir()
+    dir_b.mkdir()
+    cfg = Config.from_env_and_args(
+        user="claude-impl",
+        display_name=None,
+        tenant=None,
+        workdir=str(tmp_path),
+        add_dirs=[str(dir_a), str(dir_b)],
+    )
+    assert cfg.add_dirs == (dir_a.resolve(), dir_b.resolve())
+
+
+def test_add_dirs_resolved_to_absolute(
+    monkeypatch: pytest.MonkeyPatch, _hub_env: None, tmp_path: Path
+) -> None:
+    """相対パスも ``resolve()`` で絶対パスに変換される。"""
+    other = tmp_path / "docs"
+    other.mkdir()
+    monkeypatch.chdir(tmp_path)
+    cfg = Config.from_env_and_args(
+        user="claude-impl",
+        display_name=None,
+        tenant=None,
+        workdir=str(tmp_path),
+        add_dirs=["docs"],  # 相対パス
+    )
+    assert cfg.add_dirs[0].is_absolute()
+    assert cfg.add_dirs[0] == other.resolve()
+
+
+def test_add_dirs_none_treated_as_empty(
+    monkeypatch: pytest.MonkeyPatch, _hub_env: None, tmp_path: Path
+) -> None:
+    """``add_dirs=None`` は空 list 扱い (= 空 tuple に変換)。"""
+    cfg = Config.from_env_and_args(
+        user="claude-impl",
+        display_name=None,
+        tenant=None,
+        workdir=str(tmp_path),
+        add_dirs=None,
+    )
+    assert cfg.add_dirs == ()

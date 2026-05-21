@@ -41,11 +41,15 @@ class Config(BaseConfig):
         model: Claude model id (例: ``claude-sonnet-4-6``). Forwarded to
             ``ClaudeAgentOptions(model=...)``. Resolved from CLI ``--model``
             > env ``AGENT_HUB_MODEL`` > :data:`DEFAULT_MODEL`.
+        add_dirs: workdir 以外に Claude がアクセスできる追加ディレクトリ。
+            CLI ``--add-dir`` の複数指定を ``tuple[Path, ...]`` で保持。
+            ``ClaudeAgentOptions(add_dirs=...)`` に渡す (issue #20)。
     """
 
     anthropic_api_key: str | None
     workdir: Path  # type: ignore[assignment]  # base の Optional を required に絞る
     model: str
+    add_dirs: tuple[Path, ...] = ()  # issue #20: --add-dir で追加するディレクトリ
 
     @classmethod
     def from_env_and_args(
@@ -56,6 +60,7 @@ class Config(BaseConfig):
         tenant: str | None,
         workdir: str | None,
         model: str | None = None,
+        add_dirs: list[str] | None = None,
     ) -> Config:
         """CLI 引数 + env から `Config` を組み立てる.
 
@@ -82,6 +87,13 @@ class Config(BaseConfig):
 
         resolved_model = model or load_optional_env("AGENT_HUB_MODEL") or DEFAULT_MODEL
 
+        # issue #20: --add-dir を Path に変換 (resolve して絶対パス化)。
+        # 呼出元が argparse の action=append を使っている場合、add_dirs は
+        # list[str] または None (= 一度も指定されなかった場合)。
+        resolved_add_dirs = tuple(
+            Path(d).resolve() for d in (add_dirs or [])
+        )
+
         return cls(
             user=base.user,
             display_name=base.display_name,
@@ -91,4 +103,5 @@ class Config(BaseConfig):
             workdir=base.workdir,
             anthropic_api_key=load_optional_env("ANTHROPIC_API_KEY"),
             model=resolved_model,
+            add_dirs=resolved_add_dirs,
         )

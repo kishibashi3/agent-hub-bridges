@@ -84,6 +84,82 @@ def test_cli_calls_run_worker(
     assert cfg.workdir == tmp_path.resolve()
 
 
+def test_cli_add_dir_single(
+    monkeypatch: pytest.MonkeyPatch, _hub_env: None, tmp_path: Path
+) -> None:
+    """``--add-dir`` 1 件が config.add_dirs に届く。"""
+    captured: dict[str, Any] = {}
+
+    async def fake_run_worker(config: Any) -> None:
+        captured["config"] = config
+
+    monkeypatch.setattr(claude_cli, "run_worker", fake_run_worker)
+
+    other = tmp_path / "other"
+    other.mkdir()
+
+    rc = claude_cli.main(
+        [
+            "--user", "claude-impl",
+            "--workdir", str(tmp_path),
+            "--add-dir", str(other),
+        ]
+    )
+    assert rc == 0
+    cfg = captured["config"]
+    assert len(cfg.add_dirs) == 1
+    assert cfg.add_dirs[0] == other.resolve()
+
+
+def test_cli_add_dir_multiple(
+    monkeypatch: pytest.MonkeyPatch, _hub_env: None, tmp_path: Path
+) -> None:
+    """``--add-dir`` を複数回指定すると全件 config.add_dirs に届く。"""
+    captured: dict[str, Any] = {}
+
+    async def fake_run_worker(config: Any) -> None:
+        captured["config"] = config
+
+    monkeypatch.setattr(claude_cli, "run_worker", fake_run_worker)
+
+    dir_a = tmp_path / "a"
+    dir_b = tmp_path / "b"
+    dir_a.mkdir()
+    dir_b.mkdir()
+
+    rc = claude_cli.main(
+        [
+            "--user", "claude-impl",
+            "--workdir", str(tmp_path),
+            "--add-dir", str(dir_a),
+            "--add-dir", str(dir_b),
+        ]
+    )
+    assert rc == 0
+    cfg = captured["config"]
+    assert len(cfg.add_dirs) == 2
+    assert cfg.add_dirs[0] == dir_a.resolve()
+    assert cfg.add_dirs[1] == dir_b.resolve()
+
+
+def test_cli_no_add_dir_gives_empty(
+    monkeypatch: pytest.MonkeyPatch, _hub_env: None, tmp_path: Path
+) -> None:
+    """``--add-dir`` 未指定なら config.add_dirs は空 tuple。"""
+    captured: dict[str, Any] = {}
+
+    async def fake_run_worker(config: Any) -> None:
+        captured["config"] = config
+
+    monkeypatch.setattr(claude_cli, "run_worker", fake_run_worker)
+
+    rc = claude_cli.main(
+        ["--user", "claude-impl", "--workdir", str(tmp_path)]
+    )
+    assert rc == 0
+    assert captured["config"].add_dirs == ()
+
+
 def test_cli_keyboard_interrupt_returns_130(
     monkeypatch: pytest.MonkeyPatch, _hub_env: None, tmp_path: Path
 ) -> None:
