@@ -31,7 +31,7 @@ from agent_hub_sdk import AgentHub, HubSession, IncomingMessage
 from agent_hub_bridges._common.prompt import format_peer_message_prompt
 from agent_hub_bridges._common.reconnect import run_with_reconnect
 from agent_hub_bridges.gemini.config import Config
-from agent_hub_bridges.gemini.engine import GeminiCLIEngine
+from agent_hub_bridges.gemini.engine import GeminiCLIEngine, is_rate_limit_error
 
 logger = logging.getLogger(__name__)
 
@@ -153,6 +153,35 @@ async def _handle_one(
             except Exception:
                 logger.exception("fallback send_message also failed")
         return
+
+    # issue #22: rate-limit retry 全敗 (returncode != 0 かつ rate-limit stderr)
+    # のとき、sender に fallback DM で通知する。
+    # 経路 A (engine 起動失敗 = Exception) は既に fallback DM 済みの対称性を確保。
+    # 非 rate-limit 失敗 (invalid API key 等) は本 issue scope 外: operator ログで
+    # 把握できるため silent のままとし、二重通知リスクより audit trail を優先する
+    # (reviewer / PR #3 audit posture 参照)。
+    if result.returncode != 0 and is_rate_limit_error(result.stderr):
+        logger.warning(
+            "gemini CLI rate-limit retry exhausted for message %s (attempts=%d); "
+            "sending fallback DM to %s",
+            msg.id,
+            result.attempts,
+            msg.sender,
+        )
+        with anyio.move_on_after(10):
+            try:
+                await hub.send(
+                    to=msg.sender,
+                    message=(
+                        f"(自動応答) gemini API が rate-limited のため "
+                        f"{result.attempts} 回 retry しましたが失敗しました。"
+                        f"しばらく時間をおいて再送をお願いします。"
+                    ),
+                )
+            except Exception:
+                logger.exception(
+                    "rate-limit fallback DM to %s failed", msg.sender
+                )
 
     # stdout / stderr は engine 側で既に INFO ログに残してあるので、
     # ここでは 1 行サマリを残すだけ。

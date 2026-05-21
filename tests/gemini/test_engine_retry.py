@@ -17,8 +17,8 @@ from agent_hub_bridges.gemini.engine import (
     EngineResult,
     GeminiCLIEngine,
     _compute_backoff_s,
-    _is_rate_limit_error,
     _parse_retry_delay_s,
+    is_rate_limit_error,
 )
 
 # ---------- 純関数: rate-limit detection ----------
@@ -38,7 +38,7 @@ from agent_hub_bridges.gemini.engine import (
     ],
 )
 def test_is_rate_limit_error_detects(stderr: str) -> None:
-    assert _is_rate_limit_error(stderr) is True
+    assert is_rate_limit_error(stderr) is True
 
 
 @pytest.mark.parametrize(
@@ -51,7 +51,7 @@ def test_is_rate_limit_error_detects(stderr: str) -> None:
     ],
 )
 def test_is_rate_limit_error_ignores_unrelated(stderr: str) -> None:
-    assert _is_rate_limit_error(stderr) is False
+    assert is_rate_limit_error(stderr) is False
 
 
 # ---------- 純関数: retryDelay parse ----------

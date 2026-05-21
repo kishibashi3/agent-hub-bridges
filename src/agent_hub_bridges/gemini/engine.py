@@ -95,8 +95,11 @@ class EngineResult:
     attempts: int = 1
 
 
-def _is_rate_limit_error(stderr: str) -> bool:
-    """stderr が rate limit (429 / Quota exceeded) を示すかを判定する."""
+def is_rate_limit_error(stderr: str) -> bool:
+    """stderr が rate limit (429 / Quota exceeded) を示すかを判定する.
+
+    issue #22 で worker.py からも参照するため public 化 (underscore を除去)。
+    """
     if not stderr:
         return False
     lower = stderr.lower()
@@ -259,7 +262,7 @@ class GeminiCLIEngine:
 
             if result.returncode == 0:
                 return result
-            if not _is_rate_limit_error(result.stderr):
+            if not is_rate_limit_error(result.stderr):
                 # rate-limit 以外の失敗は retry しても無駄なので即返す
                 return result
             if attempt >= max_attempts:
@@ -277,9 +280,13 @@ class GeminiCLIEngine:
                 base_s=self._backoff_base_s,
                 cap_s=self._backoff_cap_s,
             )
+            # issue #19: grep 可能な [RATE_LIMIT_RETRY] マーカー付き WARNING。
+            # `grep RATE_LIMIT_RETRY` で retry 発生行だけを抽出できる。
+            # attempt / max_attempts / peer / wait_s を structured に出すことで
+            # log aggregator での集計 (retry frequency / backoff distribution) に使える。
             logger.warning(
-                "gemini CLI rate-limited (attempt %d/%d) for peer=%s; "
-                "sleeping %.1fs before retry",
+                "[RATE_LIMIT_RETRY] attempt=%d/%d peer=%s backoff=%.1fs — "
+                "gemini CLI rate-limited; sleeping before retry",
                 attempt,
                 max_attempts,
                 peer,

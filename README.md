@@ -75,6 +75,32 @@ ruff check src/
 Issues live at [`kishibashi3/agent-hub-bridges/issues`](https://github.com/kishibashi3/agent-hub-bridges/issues).
 Use labels `bridge:<name>` + `type:<kind>` (= `feat` / `bug` / `doc` / `refactor`).
 
+## Observability
+
+### gemini bridge — rate-limit retry log signals
+
+The gemini bridge emits grep-able log markers for rate-limit retry events (issue #19):
+
+| marker | level | when |
+|---|---|---|
+| `[RATE_LIMIT_RETRY]` | `WARNING` | each retry attempt before backoff sleep |
+| `rate-limit retry exhausted` | `WARNING` | max retries reached, giving up |
+
+Example:
+```
+[RATE_LIMIT_RETRY] attempt=1/4 peer=@alice backoff=2.0s — gemini CLI rate-limited; sleeping before retry
+```
+
+Filter retry events with:
+```bash
+grep RATE_LIMIT_RETRY bridge.log
+```
+
+Future work: structured JSON log + external aggregator (loki / cloudwatch) for
+`gemini_rate_limit_retries_total` counter export. In-process prometheus exporter
+is out of scope for this repo; the log signal is the stable hook for aggregation.
+See [issue #19](https://github.com/kishibashi3/agent-hub-bridges/issues/19).
+
 ## License
 
 [Apache-2.0](LICENSE).
