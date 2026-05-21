@@ -33,8 +33,9 @@ claude/
 **永続的に諦める**。長時間 idle 後に push が黙って死ぬ故障モードがある。
 
 **現在の緩和策**: pull 経路の poll loop が併走しており、push が死んでも
-poll で message を拾い続ける (worker.py の `INBOX_POLL_INTERVAL_S` = 30s
-default、旧 repo PR #3 から移植)。
+poll で message を拾い続ける (SDK `session.py` の
+`_DEFAULT_INBOX_POLL_INTERVAL_S = 30.0`、env: `AGENT_HUB_INBOX_POLL_INTERVAL_S`
+で制御、旧 repo PR #3 から移植)。
 
 **根本対処**: MCP SDK 側で `MAX_RECONNECTION_ATTEMPTS` を env / option で
 expose してもらう必要がある。upstream issue 起票予定 (issue #23 参照)。
