@@ -27,14 +27,12 @@ classifiers = [
 #   pip install "agent-hub-bridges[claude]"
 # のように必要な bridge だけ pull する。
 dependencies = [
-    # agent-hub-sdk v0.6.0 (= M2.1 command routing + M3 stateless + M4 TS port
-    # + M5 auto-register + M6 /restart built-in)。 v0.3.0 → v0.6.0 の 全 minor
-    # は backward compatible (= 既存 explicit `hub.register()` 呼出は server-
-    # side idempotent で 無害、 `/restart` handler 未登録なら no-op)。
-    # bump 理由: legacy bridge-claude/slack の post-port PR (= 旧 PR #7/#9/#10)
-    # を monorepo に catch-up port するため、 SDK M5 (auto-register) / M6
-    # (set_restart_handler) を 必要とする。
-    "agent-hub-sdk @ git+https://github.com/kishibashi3/agent-hub-sdk.git@v0.6.0#subdirectory=python",
+    # agent-hub-sdk v0.7.0 (= M2.1 command routing + M3 stateless + M4 TS port
+    # + M5 auto-register + M6 /restart built-in + inbox dedup fix)。
+    # v0.6.0 → v0.7.0: inbox message dedup by ID (agent-hub-sdk issue #31) —
+    # SSE replay double-dispatch 防止。 server PR #118 の replay filter と組み合わせ
+    # inbox storm を解消。 全 minor は backward compatible。
+    "agent-hub-sdk @ git+https://github.com/kishibashi3/agent-hub-sdk.git@v0.7.0#subdirectory=python",
     "anyio>=4.0.0",
     "python-dotenv>=1.0.0",
 ]
