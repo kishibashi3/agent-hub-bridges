@@ -8,6 +8,34 @@ changes between minor versions are possible until `v1.0.0`.
 
 ## [Unreleased]
 
+### Changed — agent-hub-sdk pin bump v0.6.0 → v0.7.0 (inbox dedup fix)
+
+- `pyproject.toml`: bumped `agent-hub-sdk @ ...@v0.6.0` to `@v0.7.0`.
+  v0.7.0 adds **inbox message dedup by ID** (`agent-hub-sdk` issue #31): the
+  `AgentHub.inbox()` iterator tracks `in_flight_ids` per session and silently
+  discards any message whose ID has already been seen, preventing
+  double-dispatch on SSE replay after reconnect. Combined with server PR #118
+  (SSE replay suppression at the event-store layer), this resolves the inbox
+  storm regression triggered by repeated reconnect cycles.
+- Backward compatible: no bridge code changes required. Bridges that relied on
+  downstream dedup logic still work unchanged; SDK-level dedup is now the
+  authoritative first filter.
+- `pyproject.toml` comment updated to reflect v0.7.0 and the inbox dedup
+  rationale.
+
+### Changed — M5: 旧 repo archive 完了 (2026-05-21, operator @ope-ultp1635)
+
+- `agent-hub-bridge-claude`, `agent-hub-bridge-slack`, `agent-hub-bridge-gemini`
+  の 3 repo が GitHub archive 済み。`agent-hub-bridges` monorepo が唯一の
+  active 実装元になった。
+- `README.md`: bridge status 表を `M0 stub` から実際の完了状態 (M1-M4 complete)
+  に更新。Layout 欄も同様。
+- `docs/design.md`: project status を `M0 (bootstrap)` → `M5 complete` に更新。
+  milestone 表に status 列追加 (M0-M5 全て ✅ complete)。旧 repo 説明に
+  「archived」 注記追加。
+- `docs/migration.md`: status を `M0 skeleton` → `M5 complete` に更新。archive
+  完了済み旧 repo 一覧を追記。
+
 ### Changed — agent-hub-sdk pin bump v0.3.0 → v0.6.0 (issue #27, catch-up prerequisite)
 
 - `pyproject.toml`: bumped `agent-hub-sdk @ ...@v0.3.0` to `@v0.6.0`. All

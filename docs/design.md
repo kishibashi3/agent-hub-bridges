@@ -1,17 +1,17 @@
 # agent-hub-bridges — Monorepo Design
 
-> Status: **M0 (bootstrap)**.
+> Status: **M5 complete** — all 4 bridges ported; `agent-hub-bridge-claude` / `agent-hub-bridge-slack` / `agent-hub-bridge-gemini` archived (2026-05-21). `agent-hub-bridges` monorepo is now the sole active implementation source.
 > Authors: @bridges-impl with operator @ope-ultp1635.
 > Origin: agent-hub DM thread (proposal `45223c10-...`, answers `88c56e68-...`).
 
 ## 1. Why monorepo
 
-旧構成では bridge ごとに 別 repo を 立てていた:
+旧構成では bridge ごとに 別 repo を 立てていた (すべて M5 で archive 済):
 
-- `agent-hub-bridge-claude` — stateful Claude bridge (SDK 移行済)
-- `agent-hub-bridge-slack`  — Slack relay bridge   (SDK 移行済)
-- `agent-hub-bridge-gemini` — stateful Gemini bridge (旧 HubClient のまま)
-- (bridge-a2a は未起票、 issue で 仕様だけ存在)
+- `agent-hub-bridge-claude` — stateful Claude bridge (SDK 移行済) → **archived**
+- `agent-hub-bridge-slack`  — Slack relay bridge   (SDK 移行済) → **archived**
+- `agent-hub-bridge-gemini` — stateful Gemini bridge (旧 HubClient のまま) → **archived**
+- (bridge-a2a は旧 repo なし、 agent-hub#94 spec から 新規実装)
 
 実装上、 3 つは ほぼ同じ CLI / Config / outer reconnect loop / ExceptionGroup
 ログ整形を 持っていた。 個別 repo に分散させる利点 (= 独立 release) より、
@@ -117,14 +117,14 @@ bridge にしか出ない pattern は その bridge 内に 留める。
 
 ## 6. 段階的移行プラン
 
-| milestone | scope | issue |
-|---|---|---|
-| **M0** | bootstrap (本 doc) | #1 |
-| **M1** | bridge-claude 移植 + `_common` を実コードで磨く | (M0 merge 後に起票) |
-| **M2** | bridge-slack 移植 (SDK 移行済なのでそのまま) | (M1 merge 後に起票) |
-| **M3** | bridge-gemini 移植 + SDK 移行 (= 旧 hub.py 削除) | (M2 merge 後に起票) |
-| **M4** | bridge-a2a 新規実装 (agent-hub#94 spec) | (M3 merge 後に起票) |
-| **M5** | 旧 repo archive + README に 移行案内 | (M1-M4 安定確認後、 operator 判断) |
+| milestone | scope | issue | status |
+|---|---|---|---|
+| **M0** | bootstrap (本 doc) | #1 | ✅ complete |
+| **M1** | bridge-claude 移植 + `_common` を実コードで磨く | #3 | ✅ complete |
+| **M2** | bridge-slack 移植 (SDK 移行済なのでそのまま) | #6 | ✅ complete |
+| **M3** | bridge-gemini 移植 + SDK 移行 (= 旧 hub.py 削除) | #8 | ✅ complete |
+| **M4** | bridge-a2a 新規実装 (agent-hub#94 spec) | #12 | ✅ complete |
+| **M5** | 旧 repo archive + README に 移行案内 | — (operator 判断) | ✅ complete (2026-05-21) |
 
 各 milestone は **1 PR / 1 reviewer LGTM**。 planner / reviewer の運用は
 全社共通ルール (`agent-hub/CLAUDE.md`) に従う。

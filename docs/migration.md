@@ -1,7 +1,6 @@
 # Migration: legacy bridge repos → agent-hub-bridges monorepo
 
-> Status: **skeleton (M0)**. 各 bridge 移植 PR (M1-M3) で 本 doc を 詳しく
-> 埋めていく。
+> Status: **M5 complete**. M1-M4 の全移植完了。旧 `agent-hub-bridge-claude` / `agent-hub-bridge-slack` / `agent-hub-bridge-gemini` は 2026-05-21 に archive 済み。
 
 ## TL;DR (ユーザ向け)
 
@@ -60,9 +59,9 @@ CLI 名 / 引数 / env vars は **変えない**。 ユーザ視点では instal
 - 旧 repo は 存在しない (新規実装)。
 - 仕様は `kishibashi3/agent-hub#94` を 出発点に M4 で 設計を 詰める。
 
-## 旧 repo の archive 手順 (M5)
+## 旧 repo の archive 手順 (M5) — 完了
 
-operator (@ope-ultp1635) 判断で 実行する:
+operator (@ope-ultp1635) により 2026-05-21 に実施済み:
 
 1. 旧 repo の README 冒頭に 「⚠️ This repo is archived. Use
    [agent-hub-bridges](https://github.com/kishibashi3/agent-hub-bridges)
@@ -70,3 +69,8 @@ operator (@ope-ultp1635) 判断で 実行する:
 2. GitHub UI から repo を archive (= read-only)。
 3. 関連 issue / PR の 移動が 必要なら 個別判断 (= label `archived` を 付ける
    などの軽量運用で 済ます方針)。
+
+archive 済み repo 一覧:
+- `kishibashi3/agent-hub-bridge-claude`
+- `kishibashi3/agent-hub-bridge-slack`
+- `kishibashi3/agent-hub-bridge-gemini`
