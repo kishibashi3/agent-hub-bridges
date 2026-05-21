@@ -24,6 +24,7 @@ import logging
 import os
 import sys
 import tempfile
+import time
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -47,6 +48,43 @@ from agent_hub_bridges.claude.config import Config
 from agent_hub_bridges.claude.cursor import load_cursor, save_cursor
 
 logger = logging.getLogger(__name__)
+
+# issue #46: stdout スニフによる busy 判定ウィンドウ (秒)。
+# ASSISTANT: ログが直近この秒数以内に流れていれば /status → "busy"。
+# 60s に設定した根拠:
+#   - Claude の tool use ターンは通常 10〜30s。複数ターンで 60s 超は稀。
+#   - 短すぎると LLM が応答中なのに "idle" に見える誤検知が増える。
+#   - 長すぎると「作業完了済みなのに "busy"」が続く。
+# env AGENT_HUB_BUSY_WINDOW_S (float 秒) で上書き可能。
+_BUSY_WINDOW_S = float(os.environ.get("AGENT_HUB_BUSY_WINDOW_S", "60"))
+
+
+class _ActivityTracker:
+    """ASSISTANT: ログの最終時刻を追跡して ``/status`` の busy 判定に使う.
+
+    issue #46: bridge が Claude LLM を呼び出し中 (ASSISTANT: ログが流れている)
+    にもかかわらず ``/status`` が ``idle`` を返す問題への対処。
+
+    ``set_status()`` による自己申告ではなく、実際に ASSISTANT: メッセージが
+    受信されたタイミングを記録する「stdout スニフ」相当のアプローチ。
+
+    ``_ActivityTracker`` は ``run_worker`` で 1 度だけ作成し、reconnect を
+    またいで共有する (= cursor と同様の扱い)。
+    """
+
+    def __init__(self) -> None:
+        self._last_active: float | None = None
+
+    def mark_active(self) -> None:
+        """ASSISTANT: メッセージを受信するたびに呼ぶ。"""
+        self._last_active = time.monotonic()
+
+    def status(self) -> str:
+        """直近 ``_BUSY_WINDOW_S`` 秒以内にアクティブなら ``"busy"``。"""
+        if self._last_active is None:
+            return "idle"
+        elapsed = time.monotonic() - self._last_active
+        return "busy" if elapsed < _BUSY_WINDOW_S else "idle"
 
 
 @contextlib.contextmanager
@@ -175,6 +213,10 @@ async def run_worker(config: Config) -> None:
     # 共有する (= 再接続しても同じ cursor を使い回す)。
     cursor = load_cursor(config.user)
 
+    # issue #46: stdout スニフによる /status busy 判定。cursor と同様に
+    # reconnect をまたいで 1 インスタンスを共有する。
+    tracker = _ActivityTracker()
+
     with _mcp_config_file(config) as mcp_config_path:
         options = _build_options(config, mcp_config_path)
 
@@ -183,7 +225,7 @@ async def run_worker(config: Config) -> None:
 
             async def _one_session() -> None:
                 nonlocal cursor
-                cursor = await _run_hub_session(config, runner, cursor)
+                cursor = await _run_hub_session(config, runner, cursor, tracker)
 
             await run_with_reconnect(_one_session, name="hub session (claude)")
 
@@ -192,6 +234,7 @@ async def _run_hub_session(
     config: Config,
     runner: ClaudeRunner,
     cursor: str | None,
+    tracker: _ActivityTracker,
 ) -> str | None:
     """1 回分の hub session を最後まで走らせる.
 
@@ -235,8 +278,18 @@ async def _run_hub_session(
     # ``/restart`` built-in は 2-stage reply (= "restarting..." → callback
     # → "ready") を orchestrate するので、 本 bridge 側 では reply 文字列の
     # 管理も不要 (= SDK 内 hardcoded)。
+    #
+    # issue #46: ``/status`` をカスタムハンドラで上書き。SDK 組み込みの
+    # ``hub._status`` (= 常 "idle") ではなく ``_ActivityTracker.status()``
+    # を返す。これにより ASSISTANT: ログが直近流れていれば "busy" を返せる。
     router = CommandRouter()
     router.set_restart_handler(runner.restart)
+
+    @router.command("/status", description="bridge state (idle/busy)")
+    async def _status_handler(
+        _msg: IncomingMessage, _hub: HubSession, _args: str
+    ) -> str:
+        return tracker.status()
 
     async with AgentHub.connect(
         user=config.user,
@@ -275,7 +328,7 @@ async def _run_hub_session(
                     await hub.ack(msg.id)
                     continue
 
-                await _handle_one(hub, runner.client, msg, config)
+                await _handle_one(hub, runner.client, msg, config, tracker)
                 # process → save_cursor → ack の順 (crash-safe)。
                 # save_cursor 後 ack 前にクラッシュしても、 再起動後に
                 # cursor で skip されるので二重 dispatch にならない。
@@ -287,7 +340,11 @@ async def _run_hub_session(
 
 
 async def _handle_one(
-    hub: HubSession, claude: ClaudeSDKClient, msg: IncomingMessage, config: Config
+    hub: HubSession,
+    claude: ClaudeSDKClient,
+    msg: IncomingMessage,
+    config: Config,
+    tracker: _ActivityTracker,
 ) -> None:
     """message 1 件を Claude に流して応答を待つ.
 
@@ -296,6 +353,10 @@ async def _handle_one(
 
     NOTE: `hub.ack(msg.id)` は呼出元 (= `_run_hub_session` の `async for`
     body) で 1 行下に書く (= caller が ack)。
+
+    issue #46: SDK から ``AssistantMessage`` を受信するたびに
+    ``tracker.mark_active()`` を呼ぶ。これにより ``/status`` が
+    ``_handle_one`` 完了直後に処理された際に ``"busy"`` を返せる。
     """
     del hub, config  # unused in M1 path; reserved for future hooks
     logger.info("← message %s from %s: %s", msg.id, msg.sender, msg.body[:120])
@@ -306,5 +367,9 @@ async def _handle_one(
     async for sdk_msg in claude.receive_response():
         formatted = _format_message(sdk_msg)
         logger.info(formatted)
+        # issue #46: ASSISTANT: ログが出るタイミング (= AssistantMessage 受信)
+        # でアクティビティを記録する。stdout スニフと同等の外部観測ベース。
+        if isinstance(sdk_msg, AssistantMessage):
+            tracker.mark_active()
         if isinstance(sdk_msg, ResultMessage):
             break
