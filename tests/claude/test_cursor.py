@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 
 import pytest
@@ -15,7 +14,6 @@ from agent_hub_bridges.claude.cursor import (
     load_cursor,
     save_cursor,
 )
-
 
 # ---------------------------------------------------------------------------
 # cursor_path
