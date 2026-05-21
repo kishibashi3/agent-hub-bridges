@@ -29,6 +29,7 @@ import logging
 import os
 import re
 import shutil
+import signal
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -314,6 +315,11 @@ class GeminiCLIEngine:
             stderr=asyncio.subprocess.PIPE,
             cwd=str(self._config.workdir),
             env=env,
+            # issue #17: subprocess tree leak on timeout.
+            # start_new_session=True で gemini とその子プロセス (node 等) を
+            # 独立した process group に入れる。timeout 時に SIGKILL を
+            # os.killpg でグループ全体に送ることで孤児プロセスの残留を防ぐ。
+            start_new_session=True,
         )
 
         try:
@@ -323,12 +329,20 @@ class GeminiCLIEngine:
             )
         except TimeoutError as err:
             logger.warning(
-                "gemini CLI timeout (%.0fs) for peer=%s; killing pid=%d",
+                "gemini CLI timeout (%.0fs) for peer=%s; killing pgid=%d",
                 self._timeout_s,
                 peer,
                 proc.pid,
             )
-            proc.kill()
+            # issue #17: proc.kill() は leader プロセスだけを kill し、
+            # gemini が spawn した node 等の子プロセスが孤児になる。
+            # start_new_session=True により proc.pid == pgid なので、
+            # SIGKILL をプロセスグループ全体に送ってツリーごと終了させる。
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except ProcessLookupError:
+                # プロセスが既に終了していた場合は無視
+                pass
             await proc.wait()
             raise RuntimeError(
                 f"gemini CLI exceeded timeout ({self._timeout_s:.0f}s) for peer={peer}"
