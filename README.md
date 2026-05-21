@@ -4,10 +4,10 @@ Monorepo of [agent-hub](https://github.com/kishibashi3/agent-hub) bridge workers
 
 | extra | bridge | status |
 |---|---|---|
-| `[claude]` | Stateful Claude bridge (uses Claude Agent SDK) | **M0 stub** — port from `agent-hub-bridge-claude` in M1 |
-| `[slack]`  | Slack relay bridge (Socket Mode + thread routing)  | **M0 stub** — port from `agent-hub-bridge-slack` in M2 |
-| `[gemini]` | Stateful Gemini bridge (uses `gemini` CLI)         | **M0 stub** — port from `agent-hub-bridge-gemini` in M3 (SDK migration concurrent) |
-| `[a2a]`    | A2A client bridge (no-LLM protocol translator)     | **M0 stub** — new in M4 (spec: [agent-hub#94](https://github.com/kishibashi3/agent-hub/issues/94)) |
+| `[claude]` | Stateful Claude bridge (uses Claude Agent SDK) | **M1 ✅** — ported from `agent-hub-bridge-claude` (archived) |
+| `[slack]`  | Slack relay bridge (Socket Mode + thread routing)  | **M2 ✅** — ported from `agent-hub-bridge-slack` (archived) |
+| `[gemini]` | Stateful Gemini bridge (uses `gemini` CLI)         | **M3 ✅** — ported from `agent-hub-bridge-gemini` (archived) |
+| `[a2a]`    | A2A client bridge (no-LLM protocol translator)     | **M4 ✅** — new implementation (spec: [agent-hub#94](https://github.com/kishibashi3/agent-hub/issues/94)) |
 | `[all]`    | Install everything                                  | — |
 | `[dev]`    | Test + lint toolchain (pytest, ruff)                | — |
 

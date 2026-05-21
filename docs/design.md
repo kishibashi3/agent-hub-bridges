@@ -1,6 +1,6 @@
 # agent-hub-bridges — Monorepo Design
 
-> Status: **M0 (bootstrap)**.
+> Status: **M5 complete** — M1 (claude), M2 (slack), M3 (gemini) ported; M4 (a2a) new; M5 = source repos archived.
 > Authors: @bridges-impl with operator @ope-ultp1635.
 > Origin: agent-hub DM thread (proposal `45223c10-...`, answers `88c56e68-...`).
 
