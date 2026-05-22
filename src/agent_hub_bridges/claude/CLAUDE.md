@@ -12,6 +12,9 @@ Claude Agent SDK を使う stateful bridge worker。
 - **reconnect**: `_common.reconnect.run_with_reconnect` で outer loop を担当
 - **restart cursor**: 再起動後のメッセージ重複 dispatch を防ぐ timestamp cursor
   (`cursor.py`) — issue #37 fix
+- **add-dir**: `--add-dir /path/to/dir` (繰り返し可) で workdir 以外の追加ディレクトリを
+  Claude のプロジェクトコンテキストに含めることができる (`ClaudeAgentOptions.add_dirs`
+  に渡す) — issue #20
 
 ## ファイル構成
 
