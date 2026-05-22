@@ -28,6 +28,7 @@ import time
 from collections.abc import Iterator
 from pathlib import Path
 
+import anyio
 from agent_hub_sdk import AgentHub, CommandRouter, HubSession, IncomingMessage
 from claude_agent_sdk import (
     AssistantMessage,
@@ -421,8 +422,36 @@ async def _handle_one(
     issue #46: SDK から ``AssistantMessage`` を受信するたびに
     ``tracker.mark_active()`` を呼ぶ。これにより ``/status`` が
     ``_handle_one`` 完了直後に処理された際に ``"busy"`` を返せる。
+
+    issue #51: ``config.workdir`` の存在確認を tool 実行前に行う。
+    workdir が存在しない場合は ERROR ログ + sender への fallback DM を
+    送って early return する。``hub.ack`` は caller が担当するため、
+    ここで return するだけで ack が実行されて再配信ループを防げる。
+    ``Config.from_env_and_args`` の起動時検証と二重になるが、bridge
+    起動後に workdir が削除される edge case への guard として必要。
     """
-    del hub, config  # unused in M1 path; reserved for future hooks
+    # issue #51: workdir が存在しない場合は early return。
+    # caller (_run_hub_session) が hub.ack を呼ぶので ack は保証される。
+    if not config.workdir.is_dir():
+        logger.error(
+            "workdir does not exist or is not a directory: %s — "
+            "skipping message %s to prevent crash-ack loop (issue #51)",
+            config.workdir,
+            msg.id,
+        )
+        with anyio.move_on_after(10):
+            try:
+                await hub.send(
+                    to=msg.sender,
+                    message=(
+                        f"(自動応答) bridge の workdir が存在しません: "
+                        f"{config.workdir}"
+                    ),
+                )
+            except Exception:
+                logger.exception("workdir-missing fallback DM to %s failed", msg.sender)
+        return
+
     logger.info("← message %s from %s: %s", msg.id, msg.sender, msg.body[:120])
 
     prompt = format_peer_message_prompt(msg)
