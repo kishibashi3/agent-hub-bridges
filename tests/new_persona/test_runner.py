@@ -136,6 +136,21 @@ class TestRewriteSelfAwareness:
         _rewrite_self_awareness(f, name="hoge-coder", workdir=tmp_path / "hoge")
         assert "@agent-hub-coder" not in f.read_text(encoding="utf-8")
 
+    def test_workdir_with_backslash_like_chars(self, tmp_path: Path) -> None:
+        """Critical #1: workdir パスに re.sub グループ参照風の文字が含まれても正しく動作する.
+
+        実際の Unix パスに backslash は現れないが、Path オブジェクトを str にした際に
+        \\1 や \\g<1> が含まれると re.sub が誤解釈する。lambda 置換で回避済みを確認。
+        """
+        f = tmp_path / "CLAUDE.md"
+        f.write_text(self._TEMPLATE, encoding="utf-8")
+        # monkeypatch でバックスラッシュ相当の値を持つ疑似 Path を使う
+        tricky_workdir = Path("/home/user/proj\\1back")
+        _rewrite_self_awareness(f, name="hoge-coder", workdir=tricky_workdir)
+        content = f.read_text(encoding="utf-8")
+        # 置換後に literal な文字列が入っていること (グループ参照展開されていないこと)
+        assert str(tricky_workdir) + "/" in content
+
 
 # ---------------------------------------------------------------------------
 # TestResolveBridgeBinary

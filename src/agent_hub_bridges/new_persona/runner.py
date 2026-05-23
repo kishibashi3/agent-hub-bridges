@@ -108,14 +108,17 @@ def _rewrite_self_awareness(path: Path, *, name: str, workdir: Path) -> None:
       - **workdir**: `<PLACEHOLDER>`
     """
     text = path.read_text(encoding="utf-8")
+    # lambda を使って置換文字列を構築する。
+    # rf"..." に name / workdir を直接埋め込むと、パス中の \1 や \g<n> が
+    # re.sub のグループ参照として誤解釈される (Critical #1)。
     text = re.sub(
         r"(- \*\*handle\*\*: `).*?(`)",
-        rf"\g<1>@{name}\g<2>",
+        lambda m: m.group(1) + "@" + name + m.group(2),
         text,
     )
     text = re.sub(
         r"(- \*\*workdir\*\*: `).*?(`)",
-        rf"\g<1>{workdir}/\g<2>",
+        lambda m: m.group(1) + str(workdir) + "/" + m.group(2),
         text,
     )
     path.write_text(text, encoding="utf-8")
@@ -142,7 +145,7 @@ def _wait_for_listening(log_path: Path, *, name: str, timeout_s: float) -> None:
             else:
                 time.sleep(0.5)
     raise TimeoutError(
-        f"bridge @{name!r} did not reach 'listening on inbox' "
+        f"bridge @{name} did not reach 'listening on inbox' "
         f"within {timeout_s:.0f}s. Check log: {log_path}"
     )
 
@@ -223,7 +226,9 @@ def run_new_persona(
         cwd=workdir,
         check=True,
     )
-    subprocess.run(["git", "push", "origin", "main"], cwd=workdir, check=True)
+    subprocess.run(
+        ["git", "push", "--set-upstream", "origin", "HEAD"], cwd=workdir, check=True
+    )
 
     # ---- 5. bridge spawn ---------------------------------------------------
     print(f"[5/5] Spawning bridge @{name} ({model}) ...", file=sys.stderr)
