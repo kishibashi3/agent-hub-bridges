@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import signal
+from collections.abc import Callable
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -147,7 +148,7 @@ class TestEngineCloseOnShutdown:
         sigterm_callback: list = []
         original_add = loop.add_signal_handler
 
-        def _capture_add(sig: int, handler: object) -> None:
+        def _capture_add(sig: int, handler: Callable[[], None]) -> None:
             if sig == signal.SIGTERM:
                 sigterm_callback.append(handler)
             original_add(sig, handler)
