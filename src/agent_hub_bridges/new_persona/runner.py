@@ -12,12 +12,16 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
+from dataclasses import dataclass
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
@@ -256,3 +260,247 @@ def run_new_persona(
         f"bridge @{name} is ready. log: {log_path}",
         file=sys.stderr,
     )
+
+
+# ---------------------------------------------------------------------------
+# dry-run チェック (issue #61 --dry-run)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _DryRunResult:
+    """dry-run チェック 1 件の結果。"""
+
+    ok: bool
+    label: str
+    detail: str
+
+
+def _check_from_dryrun(from_name: str) -> _DryRunResult:
+    """``--from`` CLAUDE.md が存在・読み取り可能か確認する。"""
+    try:
+        _validate_name(from_name, "--from")
+    except ValueError as exc:
+        return _DryRunResult(ok=False, label="--from", detail=str(exc))
+    try:
+        path = _resolve_claude_md(from_name)
+        return _DryRunResult(ok=True, label="--from", detail=f"{path} (exists)")
+    except (ValueError, FileNotFoundError) as exc:
+        return _DryRunResult(ok=False, label="--from", detail=str(exc))
+
+
+def _check_workdir_dryrun(workdir: Path) -> _DryRunResult:
+    """``--workdir`` の状態を確認する。実 run では既存なら FileExistsError。"""
+    if workdir.exists():
+        return _DryRunResult(
+            ok=False,
+            label="--workdir",
+            detail=f"{workdir} (already exists — real run would fail)",
+        )
+    return _DryRunResult(
+        ok=True,
+        label="--workdir",
+        detail=f"{workdir} (does not exist, will be created)",
+    )
+
+
+def _check_env_dryrun() -> _DryRunResult:
+    """必須 env (AGENT_HUB_URL, GITHUB_PAT) + オプション env (AGENT_HUB_TENANT) を確認する。"""
+    required = ["AGENT_HUB_URL", "GITHUB_PAT"]
+    optional = ["AGENT_HUB_TENANT"]
+
+    missing_required = [k for k in required if not os.environ.get(k)]
+    if missing_required:
+        return _DryRunResult(
+            ok=False,
+            label="env",
+            detail=f"missing required: {', '.join(missing_required)}",
+        )
+
+    set_keys = [k for k in required + optional if os.environ.get(k)]
+    not_set_optional = [k for k in optional if not os.environ.get(k)]
+
+    detail = f"{', '.join(set_keys)} set"
+    if not_set_optional:
+        detail += f" / {', '.join(not_set_optional)} not set (optional)"
+    return _DryRunResult(ok=True, label="env", detail=detail)
+
+
+def _check_repo_dryrun(repos: str) -> _DryRunResult:
+    """``gh repo view`` で同名 repo が既に存在しないか確認する。"""
+    if not shutil.which("gh"):
+        return _DryRunResult(
+            ok=True, label="repo", detail="gh not found, check skipped"
+        )
+    result = subprocess.run(
+        ["gh", "repo", "view", repos],
+        capture_output=True,
+        timeout=15,
+    )
+    if result.returncode == 0:
+        return _DryRunResult(
+            ok=False, label="repo", detail=f"{repos} already exists"
+        )
+    return _DryRunResult(ok=True, label="repo", detail=f"{repos} does not exist")
+
+
+def _fetch_participants_from_hub(
+    hub_url: str, pat: str, tenant: str | None
+) -> list[dict]:
+    """MCP プロトコル経由で agent-hub の ``get_participants`` ツールを呼ぶ.
+
+    干渉を最小化するため initialize → notifications/initialized →
+    tools/call get_participants の 3 ステップのみ実行する。
+
+    Raises:
+        RuntimeError: セッション確立失敗 (mcp-session-id が返らない)
+        Exception: MCP 呼び出しその他のエラー
+    """
+    base_headers: dict[str, str] = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "Authorization": f"Bearer {pat}",
+    }
+    if tenant:
+        base_headers["X-Tenant-Id"] = tenant
+
+    def _post(
+        body_obj: object, extra_headers: dict[str, str] | None = None
+    ) -> tuple[bytes, str | None]:
+        """POST して (レスポンスボディ, mcp-session-id) を返す。"""
+        hdrs = {**base_headers, **(extra_headers or {})}
+        encoded = json.dumps(body_obj).encode()
+        req = urllib.request.Request(hub_url, data=encoded, headers=hdrs, method="POST")
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            resp_body = resp.read()
+            sid = resp.headers.get("Mcp-Session-Id")
+        return resp_body, sid
+
+    # 1. initialize → session ID を取得
+    _, session_id = _post(
+        {
+            "jsonrpc": "2.0",
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {
+                    "name": "agent-hub-new-persona-dry-run",
+                    "version": "1.0",
+                },
+            },
+            "id": 0,
+        }
+    )
+    if not session_id:
+        raise RuntimeError("no mcp-session-id in initialize response")
+
+    sid_header = {"Mcp-Session-Id": session_id}
+
+    # 2. notifications/initialized (202 空ボディでも OK、エラーは無視)
+    try:
+        _post({"jsonrpc": "2.0", "method": "notifications/initialized"}, sid_header)
+    except Exception:
+        pass
+
+    # 3. tools/call get_participants
+    resp_body, _ = _post(
+        {
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "params": {"name": "get_participants", "arguments": {}},
+            "id": 1,
+        },
+        sid_header,
+    )
+    result = json.loads(resp_body.decode())
+    # agent-hub MCP レスポンス: {"result": {"content": [{"text": "<json>"}]}}
+    content = result.get("result", {}).get("content", [])
+    if not content:
+        return []
+    text = content[0].get("text", "[]")
+    if isinstance(text, str):
+        return json.loads(text)
+    return text if isinstance(text, list) else []
+
+
+def _check_handle_dryrun(name: str) -> _DryRunResult:
+    """同名 handle が agent-hub に既に online でないか確認する。
+
+    AGENT_HUB_URL / GITHUB_PAT が未設定の場合や API エラーはスキップ扱い。
+    """
+    hub_url = os.environ.get("AGENT_HUB_URL")
+    pat = os.environ.get("GITHUB_PAT")
+
+    if not hub_url or not pat:
+        return _DryRunResult(
+            ok=True,
+            label="handle",
+            detail=(
+                f"@{name} (check skipped: "
+                "AGENT_HUB_URL or GITHUB_PAT not set)"
+            ),
+        )
+
+    try:
+        participants = _fetch_participants_from_hub(
+            hub_url, pat, os.environ.get("AGENT_HUB_TENANT")
+        )
+        online_ids = {p.get("userId") for p in participants if p.get("is_online")}
+        if name in online_ids:
+            return _DryRunResult(
+                ok=False, label="handle", detail=f"@{name} is already online"
+            )
+        return _DryRunResult(ok=True, label="handle", detail=f"@{name} not online")
+    except Exception as exc:
+        return _DryRunResult(
+            ok=True,
+            label="handle",
+            detail=f"@{name} (check skipped: {exc})",
+        )
+
+
+def run_dry_run(
+    *,
+    from_name: str,
+    name: str,
+    workdir: Path,
+    repos: str,
+) -> int:
+    """``--dry-run`` モード: 事前チェックを全件実行して結果を表示する.
+
+    チェック項目 (issue #61):
+      1. ``--from``  CLAUDE.md の存在
+      2. ``--workdir`` の状態
+      3. env (AGENT_HUB_URL / GITHUB_PAT / AGENT_HUB_TENANT)
+      4. repo 重複 (gh repo view)
+      5. handle 重複 (agent-hub get_participants)
+
+    Returns:
+        0 — 全件 OK
+        1 — 1 件以上 NG
+    """
+    print("[DRY-RUN] agent-hub-new-persona")
+
+    results: list[_DryRunResult] = [
+        _check_from_dryrun(from_name),
+        _check_workdir_dryrun(workdir),
+        _check_env_dryrun(),
+        _check_repo_dryrun(repos),
+        _check_handle_dryrun(name),
+    ]
+
+    for r in results:
+        mark = "✅" if r.ok else "❌"
+        print(f"  {mark} {r.label}: {r.detail}")
+
+    print()
+
+    failed = [r for r in results if not r.ok]
+    if not failed:
+        print("All checks passed. Ready to run.")
+        return 0
+
+    count = len(failed)
+    print(f"{count} check(s) failed. Fix before running without --dry-run.")
+    return 1
