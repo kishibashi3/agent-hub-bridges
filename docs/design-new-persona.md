@@ -1,6 +1,6 @@
 # design: agent-hub-new-persona (issue #61)
 
-Status: **Draft — レビュー待ち**
+Status: **Reviewed — 実装前確定**
 
 ---
 
@@ -10,10 +10,11 @@ Status: **Draft — レビュー待ち**
 手作業で行っていた以下の手順を自動化する。
 
 1. GitHub リポジトリ作成 (`gh repo create`)
-2. meta-persona の CLAUDE.md をコピー
-3. 自己認識セクションを自動書き換え (handle / workdir)
-4. git commit + push
-5. bridge spawn (完了待ち)
+2. リポジトリを `--workdir` に clone
+3. meta-persona の CLAUDE.md をコピー
+4. 自己認識セクションを自動書き換え (handle / workdir)
+5. git commit + push
+6. bridge spawn (完了待ち)
 
 opening ceremony は bridge が CLAUDE.md を読んで自律実行するため、
 コマンド側は spawn するだけ (initial prompt 送信は不要)。
@@ -46,44 +47,100 @@ agent-hub-new-persona \
 
 ---
 
-## 3. AGENT_HUB_ROLES 解決
+## 3. 入力検証 (fail-fast)
 
-`--from <name>` は以下のパスに解決する。
+### 3.1 `--from` / `--name` の値検証 (path traversal 対策)
 
+`--from` と `--name` はファイルシステムパスの一部として使われるため、
+**受け付け前に allowlist regex で検証する**。
+
+```python
+_NAME_RE = re.compile(r'^[a-z0-9][a-z0-9\-_]*$')
+
+def _validate_name(value: str, flag: str) -> None:
+    if not _NAME_RE.fullmatch(value):
+        raise ValueError(
+            f"{flag} must match [a-z0-9][a-z0-9-_]* (got: {value!r})"
+        )
 ```
-$AGENT_HUB_ROLES/<name>/CLAUDE.md
+
+`--from` と `--name` の両方に適用する。
+
+### 3.2 解決パスが AGENT_HUB_ROLES 内に収まることを確認
+
+```python
+roles_root = Path(os.environ["AGENT_HUB_ROLES"]).resolve()
+src = (roles_root / from_name / "CLAUDE.md").resolve()
+
+if not src.is_relative_to(roles_root):
+    raise ValueError(
+        f"Resolved CLAUDE.md path escapes AGENT_HUB_ROLES: {src}"
+    )
+if not src.exists():
+    raise FileNotFoundError(f"CLAUDE.md not found: {src}")
 ```
 
-- `AGENT_HUB_ROLES` 未設定 → `ValueError` で終了 (exit 2)
-- `CLAUDE.md` が存在しない → `FileNotFoundError` で終了 (exit 2)
+### 3.3 AGENT_HUB_ROLES 未設定
+
+```python
+if "AGENT_HUB_ROLES" not in os.environ:
+    raise ValueError("AGENT_HUB_ROLES environment variable is not set")
+```
+
+### 3.4 その他の fail-fast
+
+- `gh` コマンドが PATH にない → `FileNotFoundError`
+- `--model` に対応する bridge binary が PATH にない → `FileNotFoundError`
 
 ---
 
 ## 4. リポジトリ作成とクローン
 
 ```python
-# 1. gh repo create
+visibility = "--public" if public else "--private"
+
+# gh repo create <repos> --clone は cwd に <repos>/ を作成する
 subprocess.run(
-    ["gh", "repo", "create", repos, "--private", "--clone"],
+    ["gh", "repo", "create", repos, visibility, "--clone"],
     cwd=workdir.parent,
     check=True,
 )
+# clone 先は workdir.parent/<repos>/
+# --workdir と --repos の末尾が一致することを事前に検証する (§3 参照)
 ```
 
-`gh repo create <repos> --clone` が `workdir.parent` に `<repos>/` を作成する。
+### 4.1 `--workdir` と `--repos` の整合性検証
 
-- `--public` 指定時は `--private` → `--public` に切り替え
-- `workdir` が既に存在する場合は `--no-clone` を使い clone をスキップ
-  (冪等性のため: 再実行時にエラーにしない)
-- 作成後: `workdir = workdir.parent / repos` として以降の処理に使う
+`gh repo create <repos> --clone` は `cwd/<repos>/` を作成する。
+`--workdir` にはその絶対パスを指定する必要があるため、
+コマンド起動時に `workdir.name == repos` を検証する。
+
+```python
+if workdir.name != repos:
+    raise ValueError(
+        f"--workdir basename ({workdir.name!r}) must match --repos ({repos!r}). "
+        f"Set --workdir to {workdir.parent / repos}"
+    )
+```
+
+これにより `workdir.parent / repos` と `--workdir` が常に一致することが保証される。
+
+### 4.2 既存 workdir はエラー
+
+冪等性よりシンプルさを優先し、`workdir` が既に存在する場合はエラーとして終了する。
+再実行が必要な場合はディレクトリを手動で削除してから再試行する。
+
+```python
+if workdir.exists():
+    raise FileExistsError(f"--workdir already exists: {workdir}")
+```
 
 ---
 
 ## 5. CLAUDE.md コピーと自己認識書き換え
 
 ```python
-# コピー
-src = Path(os.environ["AGENT_HUB_ROLES"]) / from_name / "CLAUDE.md"
+# コピー (§3 で検証済みの src を使う)
 dst = workdir / "CLAUDE.md"
 shutil.copy2(src, dst)
 
@@ -103,10 +160,8 @@ _rewrite_self_awareness(dst, name=name, workdir=workdir)
 正規表現で行単位に置換する。
 
 ```python
-import re
-
 def _rewrite_self_awareness(path: Path, *, name: str, workdir: Path) -> None:
-    text = path.read_text()
+    text = path.read_text(encoding="utf-8")
     text = re.sub(
         r"(- \*\*handle\*\*: `).*?(`)",
         rf"\g<1>@{name}\g<2>",
@@ -117,17 +172,19 @@ def _rewrite_self_awareness(path: Path, *, name: str, workdir: Path) -> None:
         rf"\g<1>{workdir}/\g<2>",
         text,
     )
-    path.write_text(text)
+    path.write_text(text, encoding="utf-8")
 ```
 
 ---
 
 ## 6. git commit + push
 
+commit メッセージには `from_name` を使い、meta-persona 名を明示する。
+
 ```python
 subprocess.run(["git", "add", "CLAUDE.md"], cwd=workdir, check=True)
 subprocess.run(
-    ["git", "commit", "-m", "add: coder CLAUDE.md (agent-hub-new-persona)"],
+    ["git", "commit", "-m", f"add: {from_name} CLAUDE.md (agent-hub-new-persona)"],
     cwd=workdir,
     check=True,
 )
@@ -142,7 +199,7 @@ subprocess.run(["git", "push", "origin", "main"], cwd=workdir, check=True)
 
 ```python
 log_path = Path(f"/tmp/bridge-{name}.log")
-log_path.write_text("")
+log_path.write_text("", encoding="utf-8")
 
 binary = _resolve_bridge_binary(model)
 cmd = [binary, "--user", name, "--workdir", str(workdir)]
@@ -151,41 +208,65 @@ if tenant:
 if display_name:
     cmd += ["--display-name", display_name]
 
-proc = subprocess.Popen(
-    cmd,
-    stdout=log_path.open("a"),
-    stderr=subprocess.STDOUT,
-    start_new_session=True,
-)
+with log_path.open("a") as log_fh:
+    subprocess.Popen(
+        cmd,
+        stdout=log_fh,
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
+    )
 
-# "listening on inbox" を待つ (最大 SPAWN_TIMEOUT_S 秒)
+# "listening on inbox" を待つ
 _wait_for_listening(log_path, timeout_s=SPAWN_TIMEOUT_S)
+print(f"bridge @{name} is ready. log: {log_path}", file=sys.stderr)
 ```
 
 ### 7.1 バイナリ解決
 
 ```python
+# 対応表 (--model → binary 名)
+_BRIDGE_BINARIES = {
+    "bridge-claude":   "agent-hub-bridge-claude",
+    "bridge-gemini":   "agent-hub-bridge-gemini",
+    "bridge-codex":    "agent-hub-bridge-codex",
+    "bridge-claude-p": "agent-hub-bridge-claude-p",
+}
+
 def _resolve_bridge_binary(model: str) -> str:
-    binary_name = f"agent-hub-{model}"   # "agent-hub-bridge-claude" 等
+    binary_name = _BRIDGE_BINARIES.get(model)
+    if binary_name is None:
+        valid = ", ".join(sorted(_BRIDGE_BINARIES))
+        raise ValueError(f"Unknown --model {model!r}. Valid: {valid}")
     resolved = shutil.which(binary_name)
     if not resolved:
-        raise FileNotFoundError(f"binary not found: {binary_name}")
+        raise FileNotFoundError(
+            f"binary not found: {binary_name}. Is agent-hub-bridges installed?"
+        )
     return resolved
 ```
 
 ### 7.2 起動待ち
 
+ファイルをインクリメンタルに読み、行単位で検索する。
+
 ```python
-SPAWN_TIMEOUT_S = 30.0
+# env で override 可能 (単位: 秒)
+SPAWN_TIMEOUT_S = float(os.environ.get("NEW_PERSONA_SPAWN_TIMEOUT_S", "30"))
 
 def _wait_for_listening(log_path: Path, *, timeout_s: float) -> None:
+    """bridge が 'listening on inbox' をログ出力するまで待つ."""
     deadline = time.monotonic() + timeout_s
-    while time.monotonic() < deadline:
-        if "listening on inbox" in log_path.read_text():
-            return
-        time.sleep(0.5)
+    with log_path.open(encoding="utf-8") as f:
+        while time.monotonic() < deadline:
+            line = f.readline()
+            if line:
+                if "listening on inbox" in line:
+                    return
+            else:
+                time.sleep(0.5)
     raise TimeoutError(
-        f"bridge did not reach 'listening on inbox' within {timeout_s:.0f}s"
+        f"bridge @{name!r} did not reach 'listening on inbox' "  # noqa: F821
+        f"within {timeout_s:.0f}s. Check log: {log_path}"
     )
 ```
 
@@ -197,7 +278,7 @@ def _wait_for_listening(log_path: Path, *, timeout_s: float) -> None:
 src/agent_hub_bridges/new_persona/
     __init__.py
     cli.py        # argparse + main()
-    runner.py     # run_new_persona() 本体
+    runner.py     # run_new_persona() + 内部ヘルパー
 pyproject.toml    # console_scripts に agent-hub-new-persona を追加
 tests/new_persona/
     __init__.py
@@ -217,7 +298,7 @@ tests/new_persona/
 agent-hub-new-persona = "agent_hub_bridges.new_persona.cli:main"
 ```
 
-新規 extra は不要 (依存は `subprocess` + `shutil` のみ)。
+新規 extra は不要 (依存は `subprocess` + `shutil` + `re` のみ、全て stdlib)。
 
 ---
 
@@ -227,18 +308,20 @@ subprocess 呼び出しはすべて mock する。
 
 | テストクラス | 確認内容 |
 |---|---|
-| `TestResolveAgentHubRoles` | AGENT_HUB_ROLES 未設定で ValueError / 正常解決 |
+| `TestValidateName` | 有効値通過 / `../evil` や空文字で ValueError |
+| `TestResolveAgentHubRoles` | AGENT_HUB_ROLES 未設定で ValueError / path traversal で ValueError |
 | `TestRewriteSelfAwareness` | handle / workdir の置換が正しく行われる |
+| `TestResolveBridgeBinary` | 有効 model で binary 解決 / 未知 model で ValueError |
+| `TestWaitForListening` | 正常 return / timeout で TimeoutError / インクリメンタル読み取り |
 | `TestRunNewPersona` | gh / git / bridge spawn の各 subprocess が正しい引数で呼ばれる |
-| `TestResolveBridgeBinary` | 有効な model 名で binary が解決される / 未知 model でエラー |
-| `TestWaitForListening` | ログに "listening on inbox" が来たら return / timeout で TimeoutError |
+| `TestWorkdirReposConsistency` | workdir.name != repos で ValueError |
 
 ---
 
 ## 11. 未解決・スコープ外
 
-1. **`--repos` の複数指定**: issue では `--repos hoge` と単数。M1 では 1 つに限定。
+1. **`--repos` の複数指定**: M1 では 1 つに限定。
 2. **GitHub org 指定**: `gh repo create` のデフォルト (個人 namespace) を使う。org 指定は M2 以降。
-3. **既存 repo の場合**: `gh repo create` が失敗するが、`--no-clone` で clone のみ再実行する
-   パスは設けない。エラーとして終了する (冪等性よりシンプルさを優先)。
-4. **SIGTERM temp file**: issue #58 と同様のパターン (spawn した bridge は `nohup` 扱い)。
+3. **SIGTERM temp file**: 本コマンドが spawn した bridge は nohup 扱いのため issue #58 と同様。
+4. **opening ceremony 完了の検知**: bridge が自律実行するため、コマンドは spawn 完了まで
+   しか関与しない。ceremony 完了 (= ready 報告 DM) の検知は本コマンドのスコープ外。
