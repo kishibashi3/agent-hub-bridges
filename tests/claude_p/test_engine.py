@@ -120,6 +120,34 @@ class TestWriteMcpConfig:
         assert "ghp_test" in data["mcpServers"]["agent-hub"]["headers"]["Authorization"]
 
 
+# ---------- env 組み立て ----------
+
+
+class TestBuildEnv:
+    def test_github_pat_in_env(self, tmp_path: Path) -> None:
+        engine = _make_engine(tmp_path)
+        env = engine._build_env()
+        assert env.get("GITHUB_PAT") == "ghp_test"
+
+    def test_anthropic_api_key_excluded(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """ANTHROPIC_API_KEY は親 env にあっても subprocess に渡さない."""
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-should-not-appear")
+        engine = _make_engine(tmp_path)
+        env = engine._build_env()
+        assert "ANTHROPIC_API_KEY" not in env
+
+    def test_anthropic_api_key_absent_stays_absent(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """ANTHROPIC_API_KEY が元々ない場合も正常に動作する."""
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        engine = _make_engine(tmp_path)
+        env = engine._build_env()
+        assert "ANTHROPIC_API_KEY" not in env
+
+
 # ---------- コマンドライン組み立て ----------
 
 

@@ -151,7 +151,7 @@ async def _handle_one(
                 logger.exception("fallback send_message also failed")
         return
 
-    status_emoji = "v" if result.returncode == 0 else "x"
+    status_emoji = "✓" if result.returncode == 0 else "✗"
     logger.info(
         "%s processed %s from %s (exit=%d, %.1fs)",
         status_emoji,

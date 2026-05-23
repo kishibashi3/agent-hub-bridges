@@ -205,14 +205,16 @@ class ClaudePCLIEngine:
     def _build_env(self) -> dict[str, str]:
         """subprocess に渡す env を組み立てる.
 
-        ANTHROPIC_API_KEY は意図的に渡さない (subscription auth を使うため)。
+        ANTHROPIC_API_KEY は意図的に削除する (subscription auth を使うため)。
+        親プロセスに設定されていても subprocess には渡さない。
         GITHUB_PAT は MCP config の `headers.Authorization` で参照される可能性を
         考慮して export する。
         """
         env = os.environ.copy()
         env["GITHUB_PAT"] = self._config.github_pat
-        # ANTHROPIC_API_KEY を意図的に除外 (subscription auth 優先、API billing 回避)。
-        # shell env で明示設定されている場合は caller の責任。
+        # ANTHROPIC_API_KEY を除外: subscription auth 優先、API billing 回避。
+        # 親 env にあっても subprocess には渡さない (設計: design-bridge-claude-p.md §4)。
+        env.pop("ANTHROPIC_API_KEY", None)
         return env
 
 
