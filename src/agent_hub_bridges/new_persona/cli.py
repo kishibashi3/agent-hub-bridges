@@ -16,7 +16,11 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from agent_hub_bridges import __version__
-from agent_hub_bridges.new_persona.runner import _BRIDGE_BINARIES, run_new_persona
+from agent_hub_bridges.new_persona.runner import (
+    _BRIDGE_BINARIES,
+    run_dry_run,
+    run_new_persona,
+)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -80,15 +84,34 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="Bridge display_name.",
     )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        default=False,
+        help=(
+            "事前チェックのみ実行して終了する。"
+            "repo 重複 / --from パス / --workdir 状態 / handle 重複 / env を確認し "
+            "OK/NG をリストで表示する。全件 OK なら終了コード 0、NG があれば 1。"
+        ),
+    )
 
     args = parser.parse_args(argv)
+    workdir = Path(args.workdir).resolve()
+
+    if args.dry_run:
+        return run_dry_run(
+            from_name=args.from_name,
+            name=args.name,
+            workdir=workdir,
+            repos=args.repos,
+        )
 
     try:
         run_new_persona(
             model=args.model,
             from_name=args.from_name,
             name=args.name,
-            workdir=Path(args.workdir).resolve(),
+            workdir=workdir,
             repos=args.repos,
             tenant=args.tenant,
             public=args.public,
