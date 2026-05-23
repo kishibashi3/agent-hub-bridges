@@ -176,6 +176,8 @@ class TestHandleOnePartialChunk:
         assert "second chunk" in sent
         assert "stream interrupted" in sent
         assert "ConnectionError" in sent
+        # str(exc) は含まない (URL/認証情報漏出防止 Minor: PR #68 review)
+        assert "remote closed" not in sent
 
     @pytest.mark.asyncio
     async def test_stream_error_no_partial_sends_error_only(self) -> None:
@@ -200,6 +202,8 @@ class TestHandleOnePartialChunk:
         assert "RuntimeError" in sent
         # partial ではないのでエラー通知のみ (stream interrupted 注記は付かない)
         assert "stream interrupted" not in sent
+        # str(exc) は含まない (URL/認証情報漏出防止 Minor: PR #68 review)
+        assert "connection refused" not in sent
 
     @pytest.mark.asyncio
     async def test_stream_interrupted_only_non_text_sends_interruption_note(

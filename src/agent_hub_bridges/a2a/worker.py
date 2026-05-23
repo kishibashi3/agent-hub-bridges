@@ -297,15 +297,18 @@ async def _handle_one(
                 await hub.send(
                     to=msg.sender,
                     message=(
-                        f"(自動応答) A2A agent でエラー: "
-                        f"{type(exc).__name__}: {exc}"
+                        # str(exc) は A2A エンドポイント URL や認証情報を含む
+                        # 可能性があるため type 名のみ送信する (Minor: PR #68 review)。
+                        # 詳細は logger.exception で ops ログに記録済み。
+                        f"(自動応答) A2A agent でエラー: {type(exc).__name__}"
                     ),
                 )
             except Exception:
                 logger.exception("fallback send to sender also failed")
             return
         # issue #14 item 2: partial text あり → partial + 中断注記を結合して送信。
-        interrupted = f"{type(exc).__name__}: {exc}"
+        # str(exc) は ops ログ (logger.exception) に記録済みのため type 名のみ。
+        interrupted = type(exc).__name__
         logger.warning(
             "A2A stream interrupted after %d chunk(s) for message %s; "
             "sending partial reply with interruption note",
