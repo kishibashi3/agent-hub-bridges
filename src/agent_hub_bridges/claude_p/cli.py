@@ -71,6 +71,12 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         print("\nInterrupted, shutting down.", file=sys.stderr)
         return 130
+    except asyncio.CancelledError:
+        # issue #58: SIGTERM → run_worker の add_signal_handler が task.cancel() を
+        # 注入し、CancelledError が asyncio.run() の外に伝播する。
+        # 標準 SIGTERM 終了コード 143 (= 128 + signal.SIGTERM) を返す。
+        print("\nTerminated, shutting down.", file=sys.stderr)
+        return 143
 
     return 0
 

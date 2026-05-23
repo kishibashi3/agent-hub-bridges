@@ -18,7 +18,10 @@ bridge-gemini / bridge-codex と同一パターン:
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import logging
+import signal
 import sys
 
 import anyio
@@ -47,6 +50,18 @@ async def run_worker(config: Config) -> None:
 
     `ClaudePCLIEngine` は hub 再接続に巻き込まず外側で 1 度だけ立ち上げ、
     再接続時も同じインスタンスを使い回す。engine.close() は finally で 1 回のみ。
+
+    issue #58: SIGTERM グレースフルシャットダウン
+    Python のデフォルト SIGTERM ハンドラはプロセスを即終了させるため、
+    ``finally: engine.close()`` が実行されず MCP config 一時ファイルが残る。
+    ``loop.add_signal_handler(SIGTERM, main_task.cancel)`` を登録することで
+    SIGTERM を CancelledError に変換し、SIGINT と同じく ``finally`` が実行
+    されるようにする。
+
+    systemd workaround: ``KillSignal=SIGINT`` を unit file に設定すれば
+    SIGTERM の代わりに SIGINT が送られるため、この handler なしでも
+    KeyboardInterrupt → finally の経路が使える。ただし handler 追加の方が
+    堅牢なため、両方の対策を講じる (docs/design-bridge-claude-p.md §12 参照)。
     """
     logging.basicConfig(
         level=logging.INFO,
@@ -61,6 +76,18 @@ async def run_worker(config: Config) -> None:
         config.tenant or "default",
     )
 
+    # issue #58: SIGTERM → task.cancel() に変換して finally を確実に実行する。
+    # asyncio.current_task() は asyncio.run() 直下で必ず非 None。
+    loop = asyncio.get_running_loop()
+    main_task = asyncio.current_task()
+
+    def _on_sigterm() -> None:
+        logger.info("SIGTERM received — initiating graceful shutdown (issue #58)")
+        if main_task is not None:
+            main_task.cancel()
+
+    loop.add_signal_handler(signal.SIGTERM, _on_sigterm)
+
     engine = ClaudePCLIEngine.create(config)
     try:
 
@@ -70,6 +97,8 @@ async def run_worker(config: Config) -> None:
         await run_with_reconnect(_one_session, name="hub session (claude-p)")
     finally:
         engine.close()
+        with contextlib.suppress(Exception):
+            loop.remove_signal_handler(signal.SIGTERM)
 
 
 async def _run_hub_session(config: Config, engine: ClaudePCLIEngine) -> None:

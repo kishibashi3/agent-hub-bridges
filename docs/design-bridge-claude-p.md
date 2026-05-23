@@ -265,4 +265,57 @@ agent-hub-bridge-claude-p = "agent_hub_bridges.claude_p.cli:main"
    現時点では「逃げ道として先に実装する」スタンス（issue #54 の動機を参照）。
 4. **retry**: rate-limit 等のエラーパターンが分かった段階で追加する（M2 以降）。
 
+---
+
+## 12. SIGTERM グレースフルシャットダウン (issue #58)
+
+### 問題
+
+Python asyncio のデフォルト SIGTERM ハンドラはプロセスを即終了させる。
+`worker.py` の `finally: engine.close()` は SIGINT (= KeyboardInterrupt) では
+実行されるが、**SIGTERM では実行されない**。これにより
+`/tmp/bridge-claude-p-<user>-*.json` の MCP config 一時ファイル (PAT 含有)
+が残存する。
+
+### 実装した対策: SIGTERM ハンドラ追加
+
+`worker.py` の `run_worker()` 冒頭で SIGTERM ハンドラを登録し、
+SIGTERM を `main_task.cancel()` に変換する。
+
+```python
+loop = asyncio.get_running_loop()
+main_task = asyncio.current_task()
+
+def _on_sigterm() -> None:
+    logger.info("SIGTERM received — initiating graceful shutdown (issue #58)")
+    if main_task is not None:
+        main_task.cancel()
+
+loop.add_signal_handler(signal.SIGTERM, _on_sigterm)
+```
+
+CancelledError が伝播することで `finally: engine.close()` が実行され、
+一時ファイルが削除される。`cli.py` では `asyncio.CancelledError` を catch して
+終了コード 143 (= 128 + SIGTERM) を返す。
+
+### systemd workaround: KillSignal=SIGINT
+
+systemd unit file に `KillSignal=SIGINT` を追加する方法でも回避できる。
+SIGTERM の代わりに SIGINT が送られるため、KeyboardInterrupt → finally の経路が使える。
+
+```ini
+[Service]
+ExecStart=/usr/local/bin/agent-hub-bridge-claude-p --user my-coder --workdir /opt/my-coder
+KillSignal=SIGINT
+TimeoutStopSec=30
+```
+
+**推奨**: `add_signal_handler` による実装と `KillSignal=SIGINT` を**両方**設定する。
+`add_signal_handler` が主対策、`KillSignal=SIGINT` が多重保護。
+
+### 類似の問題
+
+`bridge-codex` も CODEX_HOME temp dir を `shutil.rmtree` で削除する同様の構造を
+持つため、同じ SIGTERM 問題を持つ可能性がある (issue #58 参照)。
+
 — @bridges-impl (agent-hub bridge · operator-supervised · kishibashi3/agent-hub)
