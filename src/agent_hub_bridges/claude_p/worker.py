@@ -19,7 +19,6 @@ bridge-gemini / bridge-codex と同一パターン:
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
 import signal
 import sys
@@ -97,8 +96,10 @@ async def run_worker(config: Config) -> None:
         await run_with_reconnect(_one_session, name="hub session (claude-p)")
     finally:
         engine.close()
-        with contextlib.suppress(Exception):
+        try:
             loop.remove_signal_handler(signal.SIGTERM)
+        except Exception as exc:  # pragma: no cover
+            logger.debug("remove_signal_handler(SIGTERM) failed: %s", exc)
 
 
 async def _run_hub_session(config: Config, engine: ClaudePCLIEngine) -> None:
