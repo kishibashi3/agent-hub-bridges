@@ -1,0 +1,260 @@
+"""Tests for _IdleCompactWatchdog (issue #60: auto-compact on idle).
+
+カバーするケース:
+  - reset() / idle_elapsed() / is_idle() の基本挙動
+  - watch_and_compact(): idle 時に /compact を実行しタイマーリセット
+  - watch_and_compact(): idle でなければ /compact を呼ばない
+  - watch_and_compact(): RuntimeError (runner restart 中) → skip + reset
+  - watch_and_compact(): /compact 失敗 (Exception) → warning log + reset
+  - watch_and_compact(): cancellation は外に伝播する
+
+実装の都合上、watch_and_compact() は while True ループのため、
+anyio.move_on_after() で 1 イテレーション後に cancel する。
+"""
+
+from __future__ import annotations
+
+import time
+from collections.abc import AsyncIterator
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import anyio
+import pytest
+from claude_agent_sdk import ResultMessage
+
+from agent_hub_bridges.claude.worker import (
+    _COMPACT_CHECK_INTERVAL_S,
+    _COMPACT_IDLE_S,
+    _IdleCompactWatchdog,
+)
+
+# ---------------------------------------------------------------------------
+# ヘルパー
+# ---------------------------------------------------------------------------
+
+
+def _make_result_message() -> ResultMessage:
+    return ResultMessage(
+        subtype="success",
+        duration_ms=100,
+        duration_api_ms=80,
+        is_error=False,
+        num_turns=1,
+        session_id="default",
+        stop_reason="end_turn",
+        total_cost_usd=0.001,
+    )
+
+
+async def _async_iter(*items: object) -> AsyncIterator:
+    """items を順に yield する async generator。"""
+    for item in items:
+        yield item
+
+
+def _make_mock_runner(*, compact_raises: Exception | None = None) -> MagicMock:
+    """watch_and_compact が呼ぶ runner.client を返す MagicMock を組み立てる。
+
+    Args:
+        compact_raises: /compact の query() が送出する例外。None なら成功。
+    """
+    mock_client = MagicMock()
+    if compact_raises is not None:
+        mock_client.query = AsyncMock(side_effect=compact_raises)
+    else:
+        mock_client.query = AsyncMock()
+    mock_client.receive_response = lambda: _async_iter(_make_result_message())
+    mock_runner = MagicMock()
+    mock_runner.client = mock_client
+    return mock_runner
+
+
+# ---------------------------------------------------------------------------
+# reset / idle_elapsed / is_idle — 同期テスト
+# ---------------------------------------------------------------------------
+
+
+class TestIdleCompactWatchdogSync:
+    """reset() / idle_elapsed() / is_idle() の基本挙動。"""
+
+    def test_reset_updates_last_activity(self) -> None:
+        wd = _IdleCompactWatchdog(idle_s=60.0, check_interval_s=1.0)
+        with patch("time.monotonic", return_value=9999.0):
+            wd.reset()
+        assert wd._last_activity == 9999.0
+
+    def test_idle_elapsed_returns_diff(self) -> None:
+        wd = _IdleCompactWatchdog(idle_s=60.0, check_interval_s=1.0)
+        wd._last_activity = 1000.0
+        with patch("time.monotonic", return_value=1045.5):
+            elapsed = wd.idle_elapsed()
+        assert elapsed == pytest.approx(45.5)
+
+    def test_is_idle_below_threshold_false(self) -> None:
+        wd = _IdleCompactWatchdog(idle_s=60.0, check_interval_s=1.0)
+        wd._last_activity = 1000.0
+        with patch("time.monotonic", return_value=1059.9):
+            assert not wd.is_idle()
+
+    def test_is_idle_exactly_at_threshold_true(self) -> None:
+        wd = _IdleCompactWatchdog(idle_s=60.0, check_interval_s=1.0)
+        wd._last_activity = 1000.0
+        with patch("time.monotonic", return_value=1060.0):
+            assert wd.is_idle()
+
+    def test_is_idle_above_threshold_true(self) -> None:
+        wd = _IdleCompactWatchdog(idle_s=60.0, check_interval_s=1.0)
+        wd._last_activity = 1000.0
+        with patch("time.monotonic", return_value=1200.0):
+            assert wd.is_idle()
+
+    def test_reset_makes_not_idle(self) -> None:
+        """reset() 直後は is_idle() == False (閾値を超えていない)。"""
+        wd = _IdleCompactWatchdog(idle_s=60.0, check_interval_s=1.0)
+        t = time.monotonic()
+        wd._last_activity = t - 100  # make it idle first
+        assert wd.is_idle()
+        wd.reset()
+        # 直後は elapsed ≈ 0 < 60s
+        assert not wd.is_idle()
+
+
+# ---------------------------------------------------------------------------
+# デフォルト定数値確認
+# ---------------------------------------------------------------------------
+
+
+class TestIdleCompactWatchdogDefaults:
+    def test_default_idle_s(self) -> None:
+        assert _COMPACT_IDLE_S == pytest.approx(30 * 60)
+
+    def test_default_check_interval_s(self) -> None:
+        assert _COMPACT_CHECK_INTERVAL_S == pytest.approx(60.0)
+
+    def test_wd_uses_defaults_when_no_args(self) -> None:
+        wd = _IdleCompactWatchdog()
+        assert wd._idle_s == pytest.approx(_COMPACT_IDLE_S)
+        assert wd._check_interval_s == pytest.approx(_COMPACT_CHECK_INTERVAL_S)
+
+
+# ---------------------------------------------------------------------------
+# watch_and_compact — 非同期テスト
+# ---------------------------------------------------------------------------
+
+
+class TestWatchAndCompact:
+    """watch_and_compact() の非同期挙動。
+
+    check_interval_s=0.0 を渡して sleep をほぼゼロにし、
+    anyio.move_on_after(0.05) で 1 イテレーションを強制終了する。
+    """
+
+    @pytest.mark.asyncio
+    async def test_compact_called_when_idle(self) -> None:
+        """/compact が呼ばれる。"""
+        wd = _IdleCompactWatchdog(idle_s=0.0, check_interval_s=0.001)
+        wd._last_activity = time.monotonic() - 1000.0  # definitely idle
+        runner = _make_mock_runner()
+
+        with anyio.move_on_after(0.05):
+            await wd.watch_and_compact(runner)
+
+        # idle_s=0.0 なので複数回呼ばれる可能性があるが、少なくとも 1 回は呼ばれる
+        runner.client.query.assert_awaited_with("/compact")
+        assert runner.client.query.await_count >= 1
+
+    @pytest.mark.asyncio
+    async def test_compact_not_called_when_not_idle(self) -> None:
+        """idle でなければ /compact を呼ばない。"""
+        wd = _IdleCompactWatchdog(idle_s=9999.0, check_interval_s=0.001)
+        # _last_activity = now なので is_idle() == False
+        runner = _make_mock_runner()
+
+        with anyio.move_on_after(0.05):
+            await wd.watch_and_compact(runner)
+
+        runner.client.query.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_timer_reset_after_compact(self) -> None:
+        """/compact 後にタイマーがリセットされ is_idle() == False になる。"""
+        wd = _IdleCompactWatchdog(idle_s=0.0, check_interval_s=0.001)
+        wd._last_activity = time.monotonic() - 1000.0
+        runner = _make_mock_runner()
+
+        with anyio.move_on_after(0.05):
+            await wd.watch_and_compact(runner)
+
+        # reset() により _last_activity が更新されたはず
+        # idle_s=0.0 なので直後でも is_idle() == True になり得るが、
+        # _last_activity 自体が更新されたことを確認する
+        # (直後は monotonic() ≈ _last_activity なので elapsed ≈ 0 = idle_s)
+        assert wd.idle_elapsed() < 1.0  # reset されていれば elapsed は数ms
+
+    @pytest.mark.asyncio
+    async def test_runtime_error_skipped_timer_reset(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """runner が RuntimeError (restart 中) → /compact を skip し timer reset。"""
+        wd = _IdleCompactWatchdog(idle_s=0.0, check_interval_s=0.001)
+        wd._last_activity = time.monotonic() - 1000.0
+
+        # runner.client が RuntimeError を送出
+        mock_runner = MagicMock()
+        type(mock_runner).client = property(
+            lambda self: (_ for _ in ()).throw(RuntimeError("restart in progress"))
+        )
+
+        import logging
+
+        with caplog.at_level(
+            logging.DEBUG, logger="agent_hub_bridges.claude.worker"
+        ):
+            with anyio.move_on_after(0.05):
+                await wd.watch_and_compact(mock_runner)
+
+        assert "restart in progress" in caplog.text or "not ready" in caplog.text
+        # timer reset を確認
+        assert wd.idle_elapsed() < 1.0
+
+    @pytest.mark.asyncio
+    async def test_generic_exception_logs_warning_and_resets(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """query() が例外 → WARNING ログ + タイマーリセット。bridge は落ちない。"""
+        wd = _IdleCompactWatchdog(idle_s=0.0, check_interval_s=0.001)
+        wd._last_activity = time.monotonic() - 1000.0
+        runner = _make_mock_runner(compact_raises=RuntimeError("fake network error"))
+        # RuntimeError は except RuntimeError で拾われる前に except Exception でも拾う
+        # が、ここでは client.query が RuntimeError を送出 → except RuntimeError に
+        # マッチする (restart 中扱い)。意図的に ValueError を使う。
+        runner = _make_mock_runner(compact_raises=ValueError("compact broke"))
+
+        import logging
+
+        with caplog.at_level(
+            logging.WARNING, logger="agent_hub_bridges.claude.worker"
+        ):
+            with anyio.move_on_after(0.05):
+                await wd.watch_and_compact(runner)
+
+        assert "compact broke" in caplog.text
+        # timer reset を確認
+        assert wd.idle_elapsed() < 1.0
+
+    @pytest.mark.asyncio
+    async def test_cancellation_propagates(self) -> None:
+        """cancel が伝播して watch_and_compact が正常終了する。"""
+        wd = _IdleCompactWatchdog(idle_s=9999.0, check_interval_s=0.001)
+        runner = _make_mock_runner()
+
+        # CancelScope を使って明示的にキャンセルし、例外が外に出ないことを確認
+        cancelled = False
+        try:
+            with anyio.move_on_after(0.02):
+                await wd.watch_and_compact(runner)
+        except Exception:
+            cancelled = True
+
+        # move_on_after は cancel を呑むので Exception は不要
+        assert not cancelled

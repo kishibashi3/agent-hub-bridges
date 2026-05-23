@@ -59,6 +59,13 @@ logger = logging.getLogger(__name__)
 # env AGENT_HUB_BUSY_WINDOW_S (float 秒) で上書き可能。
 _BUSY_WINDOW_S = float(os.environ.get("AGENT_HUB_BUSY_WINDOW_S", "60"))
 
+# issue #60: idle 後の自動 /compact。
+# デフォルト 30 分 idle で /compact を実行してコンテキストを圧縮する。
+# env BRIDGE_COMPACT_IDLE_MINUTES (float 分) で上書き可能。
+# watchdog は _COMPACT_CHECK_INTERVAL_S ごとに idle を確認する。
+_COMPACT_IDLE_S = float(os.environ.get("BRIDGE_COMPACT_IDLE_MINUTES", "30")) * 60
+_COMPACT_CHECK_INTERVAL_S = 60.0
+
 
 class _ActivityTracker:
     """ASSISTANT: ログの最終時刻を追跡して ``/status`` の busy 判定に使う.
@@ -136,6 +143,86 @@ class _MessageGapTracker:
                     _PUSH_SILENT_THRESHOLD_S,
                 )
         self._last_received_at = now
+
+
+class _IdleCompactWatchdog:
+    """idle 後に ``/compact`` を自動実行する watchdog.
+
+    issue #60: bridge が一定時間メッセージを受信しない (idle) 状態になったら
+    ``/compact`` をトリガーしてコンテキストを圧縮する。
+
+    使い方:
+      - メッセージ受信ごとに ``reset()`` を呼ぶ。
+      - ``watch_and_compact(runner)`` を background task として起動する
+        (``anyio.create_task_group`` で並走)。
+
+    ``idle_s`` のデフォルトは ``_COMPACT_IDLE_S`` (= ``BRIDGE_COMPACT_IDLE_MINUTES``
+    環境変数、未設定なら 30 分)。テストでは小さな値を渡して動作を確認できる。
+    ``check_interval_s`` のデフォルトは ``_COMPACT_CHECK_INTERVAL_S`` (60 秒)。
+    """
+
+    def __init__(
+        self,
+        idle_s: float = _COMPACT_IDLE_S,
+        check_interval_s: float = _COMPACT_CHECK_INTERVAL_S,
+    ) -> None:
+        self._idle_s = idle_s
+        self._check_interval_s = check_interval_s
+        self._last_activity: float = time.monotonic()
+
+    def reset(self) -> None:
+        """メッセージ受信時に呼ぶ。idle タイマーをリセットする。"""
+        self._last_activity = time.monotonic()
+
+    def idle_elapsed(self) -> float:
+        """最後にリセットしてから経過した秒数を返す。"""
+        return time.monotonic() - self._last_activity
+
+    def is_idle(self) -> bool:
+        """idle 閾値を超えていれば ``True``。"""
+        return self.idle_elapsed() >= self._idle_s
+
+    async def watch_and_compact(self, runner: ClaudeRunner) -> None:
+        """background task: idle 検知 → ``/compact`` 実行 → タイマーリセット。
+
+        ``anyio.create_task_group`` で ``run_with_reconnect`` と並走させる。
+        以下の例外は安全に読み捨てて継続する (bridge 全体を落とさないため):
+          - ``RuntimeError``: runner が restart 中 (``_client is None``)
+          - それ以外の ``Exception``: /compact 失敗
+
+        ``anyio.get_cancelled_exc_class()`` は伝播する
+        (= task group の tear-down 時に正常終了)。
+        """
+        cancelled_exc = anyio.get_cancelled_exc_class()
+        while True:
+            await anyio.sleep(self._check_interval_s)
+            if not self.is_idle():
+                continue
+            elapsed = self.idle_elapsed()
+            logger.info(
+                "[auto-compact] idle %.0fs >= threshold %.0fs, running /compact ...",
+                elapsed,
+                self._idle_s,
+            )
+            try:
+                client = runner.client  # RuntimeError if restarting
+                await client.query("/compact")
+                async for sdk_msg in client.receive_response():
+                    if isinstance(sdk_msg, ResultMessage):
+                        break
+                logger.info("[auto-compact] /compact completed, timer reset")
+            except cancelled_exc:
+                raise
+            except RuntimeError:
+                # runner が restart 中は /compact を skip して timer だけリセット
+                logger.debug(
+                    "[auto-compact] runner not ready (restart in progress), skip"
+                )
+            except Exception as exc:
+                logger.warning("[auto-compact] /compact failed: %s", exc)
+            finally:
+                # 失敗・skip 問わずタイマーをリセットし、tight retry を防ぐ
+                self.reset()
 
 
 @contextlib.contextmanager
@@ -275,6 +362,10 @@ async def run_worker(config: Config) -> None:
     # reconnect をまたいで 1 インスタンスを共有する。
     gap_tracker = _MessageGapTracker()
 
+    # issue #60: idle 後の自動 /compact watchdog。
+    # reconnect をまたいで 1 インスタンスを共有する (= cursor / tracker と同様)。
+    compact_watchdog = _IdleCompactWatchdog()
+
     with _mcp_config_file(config) as mcp_config_path:
         options = _build_options(config, mcp_config_path)
 
@@ -284,10 +375,19 @@ async def run_worker(config: Config) -> None:
             async def _one_session() -> None:
                 nonlocal cursor
                 cursor = await _run_hub_session(
-                    config, runner, cursor, tracker, gap_tracker
+                    config, runner, cursor, tracker, gap_tracker, compact_watchdog
                 )
 
-            await run_with_reconnect(_one_session, name="hub session (claude)")
+            async def _run_reconnect() -> None:
+                await run_with_reconnect(_one_session, name="hub session (claude)")
+
+            # issue #60: compact_watchdog を run_with_reconnect と並走させる。
+            # どちらか一方が例外で死ぬともう一方も cancel される (anyio 標準挙動)。
+            # compact_watchdog.watch_and_compact は内部で Exception を読み捨てるため
+            # 通常は例外を出さない。
+            async with anyio.create_task_group() as tg:
+                tg.start_soon(_run_reconnect)
+                tg.start_soon(compact_watchdog.watch_and_compact, runner)
 
 
 async def _run_hub_session(
@@ -296,6 +396,7 @@ async def _run_hub_session(
     cursor: str | None,
     tracker: _ActivityTracker,
     gap_tracker: _MessageGapTracker,
+    compact_watchdog: _IdleCompactWatchdog,
 ) -> str | None:
     """1 回分の hub session を最後まで走らせる.
 
@@ -376,6 +477,9 @@ async def _run_hub_session(
                 # issue #26: safety-net 発火推定。cursor skip より前に呼ぶことで
                 # 重複 skip されたメッセージも含む全着信 gap を計測する。
                 gap_tracker.on_message_received(msg.id)
+
+                # issue #60: メッセージ受信で idle タイマーをリセット。
+                compact_watchdog.reset()
 
                 # issue #37: 再起動後の重複 dispatch 防止。
                 # cursor 以前 (cursor と同値含む) は skip + ack して次へ。
