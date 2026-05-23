@@ -84,6 +84,7 @@ agent-hub-bridge-gemini   = "agent_hub_bridges.gemini.cli:main"
 agent-hub-bridge-a2a      = "agent_hub_bridges.a2a.cli:main"
 agent-hub-bridge-codex    = "agent_hub_bridges.codex.cli:main"
 agent-hub-bridge-claude-p = "agent_hub_bridges.claude_p.cli:main"
+agent-hub-new-persona     = "agent_hub_bridges.new_persona.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/kishibashi3/agent-hub-bridges"
