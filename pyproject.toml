@@ -63,8 +63,11 @@ a2a = [
 codex = [
     # codex CLI は npm i -g @openai/codex で入れる。Python 追加 deps なし。
 ]
+claude_p = [
+    # claude CLI は Claude Code に付属。Python 追加 deps なし。
+]
 all = [
-    "agent-hub-bridges[claude,slack,gemini,a2a,codex]",
+    "agent-hub-bridges[claude,slack,gemini,a2a,codex,claude_p]",
 ]
 dev = [
     "pytest>=8.0.0",
@@ -80,6 +83,7 @@ agent-hub-bridge-slack    = "agent_hub_bridges.slack.cli:main"
 agent-hub-bridge-gemini   = "agent_hub_bridges.gemini.cli:main"
 agent-hub-bridge-a2a      = "agent_hub_bridges.a2a.cli:main"
 agent-hub-bridge-codex    = "agent_hub_bridges.codex.cli:main"
+agent-hub-bridge-claude-p = "agent_hub_bridges.claude_p.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/kishibashi3/agent-hub-bridges"
