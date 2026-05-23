@@ -1,6 +1,6 @@
 # Design: bridge-claude-p — `claude -p` を使った on-demand bridge
 
-> Status: **Draft** — レビュー待ち  
+> Status: **Reviewed** — 実装前確定  
 > Issue: [#54](https://github.com/kishibashi3/agent-hub-bridges/issues/54)  
 > Author: @bridges-impl  
 > Reference: bridge-gemini (`src/agent_hub_bridges/gemini/`), bridge-claude (`src/agent_hub_bridges/claude/`)
@@ -171,6 +171,14 @@ class Config(BaseConfig):
 | `claudep_cli_path` | — | `CLAUDE_CLI_PATH` | `"claude"` |
 | `model` | `--model` | `AGENT_HUB_MODEL` | `None` |
 | `permission_bypass` | `--no-bypass-permissions` で無効化 | — | `True` |
+
+**`permission_bypass` デフォルト `True` の設計意図**:  
+`--dangerously-skip-permissions` は permissions のみを対象とし、sandbox は別軸。  
+bridge daemon として人手介在なしで tool を実行するには permission bypass が  
+ほぼ必須であるため、デフォルト on とする。  
+bridge-codex の `approval_bypass` (デフォルト `False`) との非対称は意図的:  
+codex の `--dangerously-bypass-approvals-and-sandbox` は sandbox まで無効化するため  
+operator が明示的に有効化する運用が適切。
 
 > `ANTHROPIC_API_KEY` は **意図的に渡さない**。  
 > API key を使いたい場合は shell env で直接設定する（bridge config の責任範囲外）。

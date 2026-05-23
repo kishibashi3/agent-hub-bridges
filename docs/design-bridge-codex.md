@@ -1,6 +1,6 @@
 # Design: bridge-codex — Codex CLI を使った agent-hub bridge
 
-> Status: **Draft** — レビュー待ち  
+> Status: **Reviewed** — 実装前確定  
 > Issue: [#53](https://github.com/kishibashi3/agent-hub-bridges/issues/53)  
 > Author: @bridges-impl  
 > Reference: bridge-gemini (`src/agent_hub_bridges/gemini/`)
@@ -132,21 +132,8 @@ src/agent_hub_bridges/codex/
 ├── __main__.py             # python -m agent_hub_bridges.codex
 ├── cli.py                  # argparse エントリポイント
 ├── config.py               # Config dataclass (BaseConfig 継承)
-└── engine.py               # CodexCLIEngine (subprocess ラッパー)
-worker.py は不要 — gemini/worker.py と構造が同一のため、
-共通化は M2 以降の future scope とし M1 は gemini worker を参考に独自実装。
-```
-
-実際には `worker.py` も必要（gemini と同じ `_run_hub_session` / `_handle_one` パターン）。
-
-```
-src/agent_hub_bridges/codex/
-├── __init__.py
-├── __main__.py
-├── cli.py
-├── config.py
 ├── worker.py               # _run_hub_session / _handle_one / run_worker
-└── engine.py               # CodexCLIEngine
+└── engine.py               # CodexCLIEngine (subprocess ラッパー)
 ```
 
 ---
@@ -171,6 +158,20 @@ class Config(BaseConfig):
 | `model` | `--model` | `AGENT_HUB_MODEL` | `None` |
 | `sandbox_mode` | `--sandbox` | `CODEX_SANDBOX_MODE` | `"read-only"` |
 | `approval_bypass` | `--bypass-approvals` | `CODEX_APPROVAL_BYPASS` | `False` |
+
+`CODEX_APPROVAL_BYPASS` の parsing ルール: **unset または空文字 → `False` / 任意の non-empty 文字列 → `True`**。  
+`== "1"` や `== "true"` に限定しない（ecosystem convention: 任意の non-empty で有効）。
+
+```python
+approval_bypass = bool(os.environ.get("CODEX_APPROVAL_BYPASS", "").strip())
+```
+
+**`approval_bypass` デフォルト `False` の設計意図**:  
+codex の `--dangerously-bypass-approvals-and-sandbox` は sandbox も同時に無効化するため、  
+デフォルト off とし operator が明示的に有効化する運用にする。  
+bridge-claude-p の `permission_bypass` (デフォルト `True`) との非対称は意図的:  
+claude-p では `--dangerously-skip-permissions` が permissions のみを対象とし、  
+sandbox は別軸なので daemon 運用での安全なデフォルトが異なる。
 
 ---
 
@@ -211,6 +212,21 @@ gemini worker と同一パターン。差分のみ列挙:
 
 workdir missing check (issue #51 で bridge-claude に追加) を codex でも実装する。
 
+### engine.close() と worker の finally
+
+`CodexCLIEngine.close()` は temp CODEX_HOME (`shutil.rmtree`) を削除する。  
+auth.json symlink も config.toml も含めてまとめて削除されるため、個別削除は不要。  
+worker は `run_worker()` の `finally` で必ず `engine.close()` を呼ぶ:
+
+```python
+async def run_worker(config: Config) -> None:
+    engine = CodexCLIEngine.create(config)
+    try:
+        await run_with_reconnect(...)
+    finally:
+        engine.close()  # temp CODEX_HOME を shutil.rmtree で削除
+```
+
 ---
 
 ## 9. pyproject.toml への追加
@@ -249,7 +265,10 @@ agent-hub-bridge-codex = "agent_hub_bridges.codex.cli:main"
    on/off に限定。
 2. **auth.json refresh**: codex が token refresh を行う際、symlink 先の  
    `~/.codex/auth.json` を in-place 更新するか、別ファイルに書き直すかによって  
-   symlink が壊れる可能性がある。実運用で確認し、必要なら copy 方式に変更。
+   symlink が壊れる可能性がある。実運用で確認し、必要なら copy 方式に変更。  
+   確認方法: `strace -e trace=open,openat,rename,unlink codex auth login` で  
+   auth.json への syscall を観察する。`rename()` が出れば atomic replace（symlink が壊れる）、  
+   `write()` のみなら in-place 更新（symlink は安全）。
 3. **複数 bridge の concurrent 起動**: 異なる `--user` で複数 codex bridge を  
    起動した場合、temp CODEX_HOME が衝突しない（mkdtemp で一意）ことは保証できるが、  
    auth.json への symlink 競合は今後の調査事項。
