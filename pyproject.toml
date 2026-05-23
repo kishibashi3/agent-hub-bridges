@@ -60,8 +60,11 @@ a2a = [
     "a2a-sdk>=1.0.3,<2",
     "httpx>=0.27",
 ]
+codex = [
+    # codex CLI は npm i -g @openai/codex で入れる。Python 追加 deps なし。
+]
 all = [
-    "agent-hub-bridges[claude,slack,gemini,a2a]",
+    "agent-hub-bridges[claude,slack,gemini,a2a,codex]",
 ]
 dev = [
     "pytest>=8.0.0",
@@ -72,10 +75,11 @@ dev = [
 [project.scripts]
 # 後方互換: 旧 repo の console script 名 (`agent-hub-bridge-<name>`) を保持。
 # operator (@ope-ultp1635) と DM 合意済 (5 質問 D)。
-agent-hub-bridge-claude = "agent_hub_bridges.claude.cli:main"
-agent-hub-bridge-slack  = "agent_hub_bridges.slack.cli:main"
-agent-hub-bridge-gemini = "agent_hub_bridges.gemini.cli:main"
-agent-hub-bridge-a2a    = "agent_hub_bridges.a2a.cli:main"
+agent-hub-bridge-claude   = "agent_hub_bridges.claude.cli:main"
+agent-hub-bridge-slack    = "agent_hub_bridges.slack.cli:main"
+agent-hub-bridge-gemini   = "agent_hub_bridges.gemini.cli:main"
+agent-hub-bridge-a2a      = "agent_hub_bridges.a2a.cli:main"
+agent-hub-bridge-codex    = "agent_hub_bridges.codex.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/kishibashi3/agent-hub-bridges"
