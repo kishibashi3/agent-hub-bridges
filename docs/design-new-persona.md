@@ -253,7 +253,7 @@ def _resolve_bridge_binary(model: str) -> str:
 # env で override 可能 (単位: 秒)
 SPAWN_TIMEOUT_S = float(os.environ.get("NEW_PERSONA_SPAWN_TIMEOUT_S", "30"))
 
-def _wait_for_listening(log_path: Path, *, timeout_s: float) -> None:
+def _wait_for_listening(log_path: Path, *, name: str, timeout_s: float) -> None:
     """bridge が 'listening on inbox' をログ出力するまで待つ."""
     deadline = time.monotonic() + timeout_s
     with log_path.open(encoding="utf-8") as f:
@@ -265,7 +265,7 @@ def _wait_for_listening(log_path: Path, *, timeout_s: float) -> None:
             else:
                 time.sleep(0.5)
     raise TimeoutError(
-        f"bridge @{name!r} did not reach 'listening on inbox' "  # noqa: F821
+        f"bridge @{name!r} did not reach 'listening on inbox' "
         f"within {timeout_s:.0f}s. Check log: {log_path}"
     )
 ```
