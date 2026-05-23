@@ -138,5 +138,5 @@ def test_config_is_frozen(
     cfg = Config.from_env_and_args(
         user="codex-impl", display_name=None, tenant=None, workdir=str(tmp_path)
     )
-    with pytest.raises((AttributeError, Exception)):
+    with pytest.raises(AttributeError):
         cfg.user = "evil"  # type: ignore[misc]
