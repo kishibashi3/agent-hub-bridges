@@ -20,9 +20,11 @@ from a2a.types.a2a_pb2 import (
 )
 
 from agent_hub_bridges.a2a.worker import (
+    _assemble_reply,
     _build_send_message_request,
     _derive_display_name,
     _extract_reply_text,
+    _extract_reply_text_from_response,
 )
 
 # ---------------------------------------------------------------------------
@@ -81,6 +83,93 @@ def test_extract_reply_text_all_non_text_only_note() -> None:
     out = _extract_reply_text(stream)
     # text が完全に無いケースでも note は残る
     assert "non-text parts omitted: 2" in out
+
+
+# ---------------------------------------------------------------------------
+# _extract_reply_text_from_response (per-chunk, issue #14 item 1)
+# ---------------------------------------------------------------------------
+
+
+def test_extract_from_response_text_part() -> None:
+    msg = Message(parts=[Part(text="hello")])
+    text, skipped = _extract_reply_text_from_response(StreamResponse(message=msg))
+    assert text == "hello"
+    assert skipped == 0
+
+
+def test_extract_from_response_multiple_text_parts_joined() -> None:
+    msg = Message(parts=[Part(text="foo"), Part(text="bar")])
+    text, skipped = _extract_reply_text_from_response(StreamResponse(message=msg))
+    assert text == "foo\nbar"
+    assert skipped == 0
+
+
+def test_extract_from_response_no_message_field() -> None:
+    text, skipped = _extract_reply_text_from_response(StreamResponse())
+    assert text == ""
+    assert skipped == 0
+
+
+def test_extract_from_response_mixed_parts() -> None:
+    msg = Message(parts=[Part(text="visible"), Part(raw=b"binary")])
+    text, skipped = _extract_reply_text_from_response(StreamResponse(message=msg))
+    assert text == "visible"
+    assert skipped == 1
+
+
+def test_extract_from_response_all_non_text() -> None:
+    msg = Message(parts=[Part(raw=b"a"), Part(url="b")])
+    text, skipped = _extract_reply_text_from_response(StreamResponse(message=msg))
+    assert text == ""
+    assert skipped == 2
+
+
+# ---------------------------------------------------------------------------
+# _assemble_reply (issue #14 item 1 & 2)
+# ---------------------------------------------------------------------------
+
+
+def test_assemble_reply_text_only() -> None:
+    assert _assemble_reply(["hello"], 0) == "hello"
+
+
+def test_assemble_reply_multiple_parts_joined() -> None:
+    assert _assemble_reply(["foo", "bar", "baz"], 0) == "foo\nbar\nbaz"
+
+
+def test_assemble_reply_empty() -> None:
+    assert _assemble_reply([], 0) == ""
+
+
+def test_assemble_reply_skipped_with_text() -> None:
+    out = _assemble_reply(["visible"], 1)
+    assert "visible" in out
+    assert "non-text parts omitted: 1" in out
+
+
+def test_assemble_reply_skipped_only() -> None:
+    out = _assemble_reply([], 2)
+    assert "non-text parts omitted: 2" in out
+    assert not out.startswith("\n")
+
+
+def test_assemble_reply_interrupted_with_text() -> None:
+    out = _assemble_reply(["partial"], 0, interrupted="ConnectionError: timeout")
+    assert "partial" in out
+    assert "stream interrupted: ConnectionError: timeout" in out
+
+
+def test_assemble_reply_interrupted_no_text() -> None:
+    out = _assemble_reply([], 0, interrupted="ConnectionError: timeout")
+    assert "stream interrupted: ConnectionError: timeout" in out
+    assert not out.startswith("\n")
+
+
+def test_assemble_reply_interrupted_with_skipped() -> None:
+    out = _assemble_reply(["partial"], 1, interrupted="ConnectionError: timeout")
+    assert "partial" in out
+    assert "non-text parts omitted: 1" in out
+    assert "stream interrupted: ConnectionError: timeout" in out
 
 
 # ---------------------------------------------------------------------------

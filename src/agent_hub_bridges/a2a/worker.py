@@ -42,39 +42,91 @@ from agent_hub_bridges.a2a.config import Config
 logger = logging.getLogger(__name__)
 
 
+def _extract_reply_text_from_response(response: StreamResponse) -> tuple[str, int]:
+    """1 つの StreamResponse から text と non-text skip 数を取り出す.
+
+    issue #14 item 1: streaming aggregation の per-chunk helper。
+    ``_handle_one`` は ``list[StreamResponse]`` を heap に保持せず、
+    chunk が届くたびにこの関数を呼んで text を即時蓄積する。
+
+    Returns:
+        ``(text, skipped)`` — text は chunk 内 text part を ``\\n`` 連結した文字列。
+        message field が unset の場合は ``("", 0)``。
+    """
+    if not response.HasField("message"):
+        return "", 0
+    parts: list[str] = []
+    skipped = 0
+    for part in response.message.parts:
+        if part.text:
+            parts.append(part.text)
+        else:
+            skipped += 1
+    return "\n".join(parts), skipped
+
+
+def _assemble_reply(
+    text_parts: list[str],
+    skipped: int,
+    interrupted: str | None = None,
+) -> str:
+    """集めた text parts・skip 数・中断理由から最終メッセージ文字列を組み立てる.
+
+    issue #14 item 1 & 2: streaming aggregation と partial-chunk 結合の共通ロジック。
+
+    注記の形式:
+      - non-text parts: ``_(non-text parts omitted: N)_``
+      - stream 中断: ``_(stream interrupted: ExcType: msg)_``
+    注記が複数ある場合は改行で連結する。text が空でも注記は残す。
+
+    Args:
+        text_parts: chunk ごとに抽出した text の list。
+        skipped: 全 chunk を通じた non-text part の総スキップ数。
+        interrupted: stream が途中で途切れた場合の理由文字列 (``type(exc).__name__: str(exc)``)。
+            完走した場合は ``None``。
+
+    Returns:
+        agent-hub に ``hub.send`` で流せる文字列。text も注記もない場合は空文字。
+    """
+    text = "\n".join(text_parts)
+    notes: list[str] = []
+    if skipped:
+        notes.append(f"_(non-text parts omitted: {skipped})_")
+    if interrupted:
+        notes.append(f"_(stream interrupted: {interrupted})_")
+    if not notes:
+        return text
+    note_block = "\n".join(notes)
+    return (text + "\n" + note_block) if text else note_block
+
+
 def _extract_reply_text(stream: list[StreamResponse]) -> str:
-    """A2A stream response から 人間向け text を 取り出す.
+    """A2A stream response list から 人間向け text を 取り出す (後方互換 API).
 
     `StreamResponse.message.parts[*].text` を 順に 連結する。 text 以外の
     part (= raw / url / data / file) は 当面 無視し、 後ろに 「(non-text
     parts omitted)」 と 注記を 付ける (= 取りこぼしを ops から 検知できる
     ように)。
 
+    NOTE: ``_handle_one`` では issue #14 item 1 の streaming aggregation を使うため
+    この関数は直接呼ばない。テスト・外部用途のために API を残す。
+    内部実装は ``_extract_reply_text_from_response`` + ``_assemble_reply`` に委譲。
+
     Args:
-        stream: A2A `Client.send_message` から 集めた StreamResponse list
-            (= caller が `async for` で 全件 集めた後 渡す)。
+        stream: A2A ``Client.send_message`` から集めた StreamResponse list。
 
     Returns:
-        agent-hub に そのまま `hub.send` で 流せる text 文字列。 全 part が
-        空でも 空文字を 返す (= 呼出側で 落とす判断は しない)。
+        agent-hub にそのまま ``hub.send`` で流せる text 文字列。全 part が
+        空でも空文字を返す (= 呼出側で落とす判断はしない)。
     """
-    parts: list[str] = []
+    text_parts: list[str] = []
     skipped = 0
     for response in stream:
-        if not response.HasField("message"):
-            continue
-        for part in response.message.parts:
-            if part.text:
-                parts.append(part.text)
-            else:
-                skipped += 1
-    # parts は append 時に既に truthy のみ蓄積されるため `if p` filter は不要
-    # (= PR #13 review Suggestion 1)。
-    text = "\n".join(parts)
-    if skipped:
-        suffix = f"\n_(non-text parts omitted: {skipped})_"
-        text = (text + suffix) if text else suffix.lstrip()
-    return text
+        chunk_text, chunk_skipped = _extract_reply_text_from_response(response)
+        if chunk_text:
+            text_parts.append(chunk_text)
+        skipped += chunk_skipped
+    return _assemble_reply(text_parts, skipped)
 
 
 def _build_send_message_request(body: str) -> SendMessageRequest:
@@ -202,6 +254,17 @@ async def _handle_one(
     自分自身宛の echo (= team broadcast 自己反射) は loop の種なので skip。
     A2A から 返ってきた text が 空文字なら hub.send は 呼ばない (= server
     側で 空 message が reject される + UX 上 ノイズなので)。
+
+    issue #14 item 1 — streaming aggregation:
+      ``list[StreamResponse]`` を heap に保持せず、 chunk 到着ごとに
+      ``_extract_reply_text_from_response`` で text を即時蓄積する。
+      長文 RAG 系 A2A agent が数十 MB の stream を流しても bridge の
+      memory 消費は O(text size) に留まる (protobuf object を保持しない)。
+
+    issue #14 item 2 — partial-chunk 結合:
+      stream 途中で例外が出た場合、それまでに蓄積した text があれば
+      ``_(stream interrupted: ExcType: msg)_`` 注記を付けて送信する。
+      何も届いていない場合は従来通りエラーのみ通知。
     """
     self_handle = f"@{config.user}"
     if msg.sender == self_handle:
@@ -212,28 +275,45 @@ async def _handle_one(
 
     request = _build_send_message_request(msg.body)
 
-    # A2A `send_message` は AsyncIterator[StreamResponse] を返す。 全件
-    # collect してから text 抽出する。 stream 中 例外で 落ちたら 失敗を
-    # sender に通知する (= ops 視点で silent fail させない)。
+    # issue #14 item 1: streaming aggregation。
+    # list に全件集めず、chunk ごとに text を即時抽出して蓄積する。
+    text_parts: list[str] = []
+    skipped_total = 0
+    interrupted: str | None = None
+    chunk_count = 0
+
     try:
-        responses: list[StreamResponse] = []
         async for response in a2a_client.send_message(request):
-            responses.append(response)
+            chunk_text, chunk_skipped = _extract_reply_text_from_response(response)
+            if chunk_text:
+                text_parts.append(chunk_text)
+            skipped_total += chunk_skipped
+            chunk_count += 1
     except Exception as exc:
         logger.exception("A2A send_message failed for message %s: %s", msg.id, exc)
-        try:
-            await hub.send(
-                to=msg.sender,
-                message=(
-                    f"(自動応答) A2A agent でエラー: "
-                    f"{type(exc).__name__}: {exc}"
-                ),
-            )
-        except Exception:
-            logger.exception("fallback send to sender also failed")
-        return
+        if not text_parts and not skipped_total:
+            # partial も何もない → 従来通りエラーのみ通知。
+            try:
+                await hub.send(
+                    to=msg.sender,
+                    message=(
+                        f"(自動応答) A2A agent でエラー: "
+                        f"{type(exc).__name__}: {exc}"
+                    ),
+                )
+            except Exception:
+                logger.exception("fallback send to sender also failed")
+            return
+        # issue #14 item 2: partial text あり → partial + 中断注記を結合して送信。
+        interrupted = f"{type(exc).__name__}: {exc}"
+        logger.warning(
+            "A2A stream interrupted after %d chunk(s) for message %s; "
+            "sending partial reply with interruption note",
+            chunk_count,
+            msg.id,
+        )
 
-    reply_text = _extract_reply_text(responses)
+    reply_text = _assemble_reply(text_parts, skipped_total, interrupted)
     if not reply_text:
         logger.info(
             "✓ processed %s from %s (a2a responded with empty text, skipping hub.send)",
@@ -244,9 +324,10 @@ async def _handle_one(
 
     await hub.send(to=msg.sender, message=reply_text)
     logger.info(
-        "✓ processed %s from %s (%d response chunk(s), %d chars sent)",
+        "✓ processed %s from %s (%d chunk(s), %d chars sent%s)",
         msg.id,
         msg.sender,
-        len(responses),
+        chunk_count,
         len(reply_text),
+        " [partial]" if interrupted else "",
     )
