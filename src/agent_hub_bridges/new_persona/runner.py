@@ -276,6 +276,28 @@ class _DryRunResult:
     detail: str
 
 
+def _check_config_dryrun(workdir: Path, repos: str) -> _DryRunResult:
+    """``--workdir`` のbasename が ``--repos`` と一致するか確認する。
+
+    ``run_new_persona`` は一致しない場合即 ``ValueError`` で失敗するため、
+    dry-run で先に検出して full check を続ける。
+    """
+    if workdir.name != repos:
+        return _DryRunResult(
+            ok=False,
+            label="config",
+            detail=(
+                f"--workdir basename ({workdir.name!r}) must match "
+                f"--repos ({repos!r})"
+            ),
+        )
+    return _DryRunResult(
+        ok=True,
+        label="config",
+        detail=f"--workdir basename matches --repos ({repos!r})",
+    )
+
+
 def _check_from_dryrun(from_name: str) -> _DryRunResult:
     """``--from`` CLAUDE.md が存在・読み取り可能か確認する。"""
     try:
@@ -332,11 +354,16 @@ def _check_repo_dryrun(repos: str) -> _DryRunResult:
         return _DryRunResult(
             ok=True, label="repo", detail="gh not found, check skipped"
         )
-    result = subprocess.run(
-        ["gh", "repo", "view", repos],
-        capture_output=True,
-        timeout=15,
-    )
+    try:
+        result = subprocess.run(
+            ["gh", "repo", "view", repos],
+            capture_output=True,
+            timeout=15,
+        )
+    except subprocess.TimeoutExpired:
+        return _DryRunResult(
+            ok=True, label="repo", detail="gh repo view timed out, check skipped"
+        )
     if result.returncode == 0:
         return _DryRunResult(
             ok=False, label="repo", detail=f"{repos} already exists"
@@ -453,10 +480,12 @@ def _check_handle_dryrun(name: str) -> _DryRunResult:
             )
         return _DryRunResult(ok=True, label="handle", detail=f"@{name} not online")
     except Exception as exc:
+        # exc メッセージに URL や tenant ID が含まれる可能性があるため
+        # type 名のみを出力して機密情報の漏出を防ぐ (Minor #2)。
         return _DryRunResult(
             ok=True,
             label="handle",
-            detail=f"@{name} (check skipped: {exc})",
+            detail=f"@{name} (check skipped: {type(exc).__name__})",
         )
 
 
@@ -470,6 +499,7 @@ def run_dry_run(
     """``--dry-run`` モード: 事前チェックを全件実行して結果を表示する.
 
     チェック項目 (issue #61):
+      0. config  ``--workdir`` basename と ``--repos`` の一致 (Critical fix)
       1. ``--from``  CLAUDE.md の存在
       2. ``--workdir`` の状態
       3. env (AGENT_HUB_URL / GITHUB_PAT / AGENT_HUB_TENANT)
@@ -483,6 +513,7 @@ def run_dry_run(
     print("[DRY-RUN] agent-hub-new-persona")
 
     results: list[_DryRunResult] = [
+        _check_config_dryrun(workdir, repos),
         _check_from_dryrun(from_name),
         _check_workdir_dryrun(workdir),
         _check_env_dryrun(),

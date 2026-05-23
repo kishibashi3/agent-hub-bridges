@@ -1,11 +1,13 @@
 """Tests for run_dry_run() and its individual check helpers (issue #61 --dry-run).
 
 カバーするケース:
+  - _check_config_dryrun: basename 一致 (OK) / 不一致 (NG)
   - _check_from_dryrun: CLAUDE.md 存在 / 不在 / 名前バリデーション失敗
   - _check_workdir_dryrun: workdir 不在 (OK) / 既存 (NG)
   - _check_env_dryrun: 全揃い / TENANT 不在 / 必須不在
-  - _check_repo_dryrun: repo 不在 (OK) / 重複 (NG) / gh なし (skip)
-  - _check_handle_dryrun: env 不在 (skip) / online (NG) / offline (OK) / API エラー (skip)
+  - _check_repo_dryrun: repo 不在 (OK) / 重複 (NG) / gh なし (skip) / タイムアウト (skip)
+  - _check_handle_dryrun: env 不在 (skip) / online (NG) / offline (OK)
+      / API エラー (skip, type のみ)
   - run_dry_run: 全 OK / 一部 NG / 出力フォーマット / 終了コード
   - CLI: --dry-run フラグが run_dry_run を呼ぶことの確認
 """
@@ -13,12 +15,14 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from agent_hub_bridges.new_persona.runner import (
+    _check_config_dryrun,
     _check_env_dryrun,
     _check_from_dryrun,
     _check_handle_dryrun,
@@ -27,6 +31,30 @@ from agent_hub_bridges.new_persona.runner import (
     _fetch_participants_from_hub,
     run_dry_run,
 )
+
+# ---------------------------------------------------------------------------
+# _check_config_dryrun
+# ---------------------------------------------------------------------------
+
+
+class TestCheckConfigDryrun:
+    def test_basename_matches_repos_ok(self, tmp_path: Path) -> None:
+        workdir = tmp_path / "my-repos"
+        result = _check_config_dryrun(workdir, "my-repos")
+
+        assert result.ok
+        assert result.label == "config"
+        assert "my-repos" in result.detail
+
+    def test_basename_mismatch_ng(self, tmp_path: Path) -> None:
+        workdir = tmp_path / "different-name"
+        result = _check_config_dryrun(workdir, "my-repos")
+
+        assert not result.ok
+        assert result.label == "config"
+        assert "different-name" in result.detail
+        assert "my-repos" in result.detail
+
 
 # ---------------------------------------------------------------------------
 # _check_from_dryrun
@@ -195,6 +223,17 @@ class TestCheckRepoDryrun:
         args = mock_run.call_args[0][0]
         assert args == ["gh", "repo", "view", "my-repos"]
 
+    def test_timeout_skipped_ok(self) -> None:
+        with (
+            patch("shutil.which", return_value="/usr/bin/gh"),
+            patch("subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="gh", timeout=15)),
+        ):
+            result = _check_repo_dryrun("any-repo")
+
+        assert result.ok
+        assert result.label == "repo"
+        assert "skipped" in result.detail.lower()
+
 
 # ---------------------------------------------------------------------------
 # _check_handle_dryrun
@@ -251,6 +290,26 @@ class TestCheckHandleDryrun:
 
         assert result.ok
         assert "skipped" in result.detail.lower()
+
+    def test_exception_message_uses_type_name_not_str(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """例外 detail が type 名のみで、str(exc) (URL 等) を含まないことを確認する (Minor #2)。"""
+        monkeypatch.setenv("AGENT_HUB_URL", "http://secret-hub:9999/mcp")
+        monkeypatch.setenv("GITHUB_PAT", "ghp_secret_token")
+
+        sensitive_message = "Connection refused: http://secret-hub:9999/mcp"
+
+        with patch(
+            "agent_hub_bridges.new_persona.runner._fetch_participants_from_hub",
+            side_effect=ConnectionError(sensitive_message),
+        ):
+            result = _check_handle_dryrun("hoge-coder")
+
+        assert result.ok
+        assert "ConnectionError" in result.detail
+        assert sensitive_message not in result.detail
+        assert "secret-hub" not in result.detail
 
 
 # ---------------------------------------------------------------------------
@@ -417,7 +476,7 @@ class TestRunDryRun:
             )
 
         out = capsys.readouterr().out
-        for label in ["--from", "--workdir", "env", "repo", "handle"]:
+        for label in ["config", "--from", "--workdir", "env", "repo", "handle"]:
             assert label in out, f"label {label!r} missing from output"
 
     def test_fail_count_reported(
