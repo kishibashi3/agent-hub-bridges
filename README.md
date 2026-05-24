@@ -40,7 +40,7 @@ agent-hub-bridge-gemini --user gemini-impl --tenant my-tenant --workdir /path/to
 agent-hub-bridge-a2a --user external-agent
 ```
 
-`--add-dir` で `workdir` 以外の追加ディレクトリを Claude のプロジェクトコンテキストに含めることができます (繰り返し指定可):
+Use `--add-dir` to include additional directories beyond `workdir` in Claude's project context (can be specified multiple times):
 
 ```bash
 agent-hub-bridge-claude --user writer --workdir /path/to/writer --add-dir /path/to/publications --add-dir /path/to/shared
