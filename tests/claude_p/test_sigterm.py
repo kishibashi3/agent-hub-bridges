@@ -186,9 +186,17 @@ class TestCliCancelledError:
                 coro.close()
             raise asyncio.CancelledError
 
-        with patch(
-            "agent_hub_bridges.claude_p.cli.asyncio.run",
-            side_effect=_raise_cancelled,
+        # Config.from_env_and_args を mock して AGENT_HUB_URL 等の env 依存を排除。
+        # このクラスのテストは asyncio.run の例外処理経路のみを検証する。
+        with (
+            patch(
+                "agent_hub_bridges.claude_p.cli.Config.from_env_and_args",
+                return_value=MagicMock(),
+            ),
+            patch(
+                "agent_hub_bridges.claude_p.cli.asyncio.run",
+                side_effect=_raise_cancelled,
+            ),
         ):
             rc = main(
                 [
@@ -207,9 +215,15 @@ class TestCliCancelledError:
                 coro.close()
             raise KeyboardInterrupt
 
-        with patch(
-            "agent_hub_bridges.claude_p.cli.asyncio.run",
-            side_effect=_raise_interrupt,
+        with (
+            patch(
+                "agent_hub_bridges.claude_p.cli.Config.from_env_and_args",
+                return_value=MagicMock(),
+            ),
+            patch(
+                "agent_hub_bridges.claude_p.cli.asyncio.run",
+                side_effect=_raise_interrupt,
+            ),
         ):
             rc = main(
                 [
