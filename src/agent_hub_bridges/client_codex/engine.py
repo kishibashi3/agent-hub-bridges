@@ -98,7 +98,7 @@ class CodexCLIEngine:
         timeout_s = float(os.environ.get("CODEX_CLI_TIMEOUT_S", DEFAULT_TIMEOUT_S))
 
         temp_codex_home = Path(
-            tempfile.mkdtemp(prefix=f"bridge-codex-{config.user}-")
+            tempfile.mkdtemp(prefix=f"client-codex-{config.user}-")
         )
         os.chmod(temp_codex_home, 0o700)
 
