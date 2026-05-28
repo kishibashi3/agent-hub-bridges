@@ -66,8 +66,12 @@ def _sep(label: str = "") -> None:
     print(flush=True)
 
 
-def _setup_codex_home(codex_home: Path, agent_hub_url: str, github_pat: str) -> None:
-    """stable CODEX_HOME を初期化する (auth.json symlink + config.toml)."""
+def _setup_codex_home(codex_home: Path, agent_hub_url: str) -> None:
+    """stable CODEX_HOME を初期化する (auth.json symlink + config.toml).
+
+    github_pat は config.toml には書き込まない (codex の bearer_token_env_var に
+    変数名 "GITHUB_PAT" を指定し、実行時に subprocess env 経由で注入する)。
+    """
     codex_home.mkdir(parents=True, exist_ok=True)
     os.chmod(codex_home, 0o700)
 
@@ -201,7 +205,7 @@ async def main_async(args: argparse.Namespace) -> int:
     print(f"  step timeout      : {_STEP_TIMEOUT_S:.0f}s", flush=True)
     print(flush=True)
 
-    _setup_codex_home(codex_home, args.agent_hub_url, args.github_pat)
+    _setup_codex_home(codex_home, args.agent_hub_url)
 
     # ------------------------------------------------------------------ Step 1
     _sep("Step 1 / 2 — 記憶を依頼")
