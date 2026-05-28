@@ -1,4 +1,4 @@
-"""Tests for _handle_one in bridge-codex worker.
+"""Tests for _handle_one in client-codex worker.
 
 workdir missing check (issue #51 パターン) と正常系を確認する。
 """
@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from agent_hub_bridges.codex.worker import _handle_one
+from agent_hub_bridges.client_codex.worker import _handle_one
 
 # ---------- helpers ----------
 
@@ -90,7 +90,7 @@ class TestWorkdirMissing:
         msg = _make_msg()
         config = _make_config(missing)
 
-        with caplog.at_level(logging.ERROR, logger="agent_hub_bridges.codex.worker"):
+        with caplog.at_level(logging.ERROR, logger="agent_hub_bridges.client_codex.worker"):
             await _handle_one(hub, engine, msg, config)
 
         assert "workdir" in caplog.text.lower()
@@ -139,7 +139,7 @@ class TestWorkdirPresent:
         msg = _make_msg()
         config = _make_config(tmp_path)
 
-        _fmt_patch = "agent_hub_bridges.codex.worker.format_peer_message_prompt"
+        _fmt_patch = "agent_hub_bridges.client_codex.worker.format_peer_message_prompt"
         with patch(_fmt_patch, return_value="prompt"):
             await _handle_one(hub, engine, msg, config)
 
@@ -154,7 +154,7 @@ class TestWorkdirPresent:
         msg = _make_msg()
         config = _make_config(tmp_path)
 
-        _fmt_patch = "agent_hub_bridges.codex.worker.format_peer_message_prompt"
+        _fmt_patch = "agent_hub_bridges.client_codex.worker.format_peer_message_prompt"
         with patch(_fmt_patch, return_value="prompt"):
             await _handle_one(hub, engine, msg, config)
 

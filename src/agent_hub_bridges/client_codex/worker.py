@@ -1,4 +1,4 @@
-"""Bridge worker main loop (codex).
+"""Client-codex worker main loop (stateless).
 
 bridge-gemini と同一パターン:
   - `AgentHub.inbox()` で DM を受信
@@ -24,8 +24,8 @@ from agent_hub_sdk import AgentHub, HubSession, IncomingMessage
 
 from agent_hub_bridges._common.prompt import format_peer_message_prompt
 from agent_hub_bridges._common.reconnect import run_with_reconnect
-from agent_hub_bridges.codex.config import Config
-from agent_hub_bridges.codex.engine import CodexCLIEngine
+from agent_hub_bridges.client_codex.config import Config
+from agent_hub_bridges.client_codex.engine import CodexCLIEngine
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +53,7 @@ async def run_worker(config: Config) -> None:
     )
 
     logger.info(
-        "Starting agent-hub-bridge-codex as @%s (workdir=%s, tenant=%s, sandbox=%s)",
+        "Starting agent-hub-client-codex as @%s (workdir=%s, tenant=%s, sandbox=%s)",
         config.user,
         config.workdir,
         config.tenant or "default",

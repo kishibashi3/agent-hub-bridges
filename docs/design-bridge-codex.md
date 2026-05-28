@@ -41,7 +41,7 @@ bridge は gemini bridge の "isolated HOME" パターンを踏襲し、per-brid
 一時 CODEX_HOME を作成して `CODEX_HOME` 環境変数で指定する。
 
 ```
-/tmp/bridge-codex-<user>-XXXXXX/   ← mkdtemp (mode 0700)
+/tmp/client-codex-<user>-XXXXXX/   ← mkdtemp (mode 0700)
 ├── auth.json                        ← ~/.codex/auth.json からシンボリックリンク
 └── config.toml                      ← bridge 固有の設定を書き込む
 ```
@@ -127,9 +127,9 @@ prompt に shell の特殊文字が含まれる可能性があるため、subpro
 ## 5. ファイル構成
 
 ```
-src/agent_hub_bridges/codex/
+src/agent_hub_bridges/client_codex/
 ├── __init__.py
-├── __main__.py             # python -m agent_hub_bridges.codex
+├── __main__.py             # python -m agent_hub_bridges.client_codex
 ├── cli.py                  # argparse エントリポイント
 ├── config.py               # Config dataclass (BaseConfig 継承)
 ├── worker.py               # _run_hub_session / _handle_one / run_worker
@@ -233,21 +233,21 @@ async def run_worker(config: Config) -> None:
 
 ```toml
 [project.optional-dependencies]
-codex = [
-    # codex CLI は npm i -g @openai/codex-cli で入れる。Python 追加 deps なし。
+client_codex = [
+    # codex CLI は npm i -g @openai/codex で入れる。Python 追加 deps なし。
 ]
 
 [project.scripts]
-agent-hub-bridge-codex = "agent_hub_bridges.codex.cli:main"
+agent-hub-client-codex = "agent_hub_bridges.client_codex.cli:main"
 ```
 
-`[all]` extra にも `codex` を追加する。
+`[all]` extra にも `client_codex` を追加する。
 
 ---
 
 ## 10. テスト計画
 
-`tests/codex/` を新設。最低限:
+`tests/client_codex/` を新設。最低限:
 
 | テストクラス | 内容 |
 |---|---|

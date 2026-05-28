@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from agent_hub_bridges.codex.engine import (
+from agent_hub_bridges.client_codex.engine import (
     _ENV_TENANT_ID,
     _ENV_USER_ID,
     CodexCLIEngine,
