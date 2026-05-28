@@ -1,6 +1,6 @@
-"""Codex CLI engine wrapper.
+"""Codex CLI engine wrapper (client-codex, stateless).
 
-bridge-codex の "LLM engine" 部分。`codex exec` を非対話モードで subprocess
+client-codex の "LLM engine" 部分。`codex exec` を非対話モードで subprocess
 起動し、codex が MCP tool 経由で agent-hub に返信するまで待機する。
 
 設計の核心 (docs/design-bridge-codex.md §3 参照):
@@ -26,7 +26,7 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from agent_hub_bridges.codex.config import Config
+from agent_hub_bridges.client_codex.config import Config
 
 logger = logging.getLogger(__name__)
 

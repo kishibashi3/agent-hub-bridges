@@ -1,4 +1,4 @@
-"""CLI entry point: `agent-hub-bridge-codex --user <name>` で bridge を起動.
+"""CLI entry point: `agent-hub-client-codex --user <name>` で client を起動.
 
   - `--user` required
   - `--display-name` / `--tenant` / `--workdir` optional (env で上書き可)
@@ -15,8 +15,8 @@ from dotenv import load_dotenv
 
 from agent_hub_bridges import __version__
 from agent_hub_bridges._common.base_cli import build_common_parser
-from agent_hub_bridges.codex.config import VALID_SANDBOX_MODES, Config
-from agent_hub_bridges.codex.worker import run_worker
+from agent_hub_bridges.client_codex.config import VALID_SANDBOX_MODES, Config
+from agent_hub_bridges.client_codex.worker import run_worker
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -24,8 +24,8 @@ def main(argv: list[str] | None = None) -> int:
     load_dotenv()
 
     parser = build_common_parser(
-        prog="agent-hub-bridge-codex",
-        description="On-demand bridge worker that runs OpenAI Codex CLI as an agent-hub peer.",
+        prog="agent-hub-client-codex",
+        description="Stateless client worker that runs OpenAI Codex CLI as an agent-hub peer.",
         version=__version__,
     )
     parser.add_argument(

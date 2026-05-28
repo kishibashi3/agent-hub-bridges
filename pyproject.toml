@@ -60,14 +60,19 @@ a2a = [
     "a2a-sdk>=1.0.3,<2",
     "httpx>=0.27",
 ]
+client_codex = [
+    # codex CLI は npm i -g @openai/codex で入れる。Python 追加 deps なし。
+    # stateless (1 message = 1 subprocess)。常駐型は [codex] extra を参照。
+]
 codex = [
+    # 新 bridge-codex (resident-process, 会話コンテキスト保持)。
     # codex CLI は npm i -g @openai/codex で入れる。Python 追加 deps なし。
 ]
 claude_p = [
     # claude CLI は Claude Code に付属。Python 追加 deps なし。
 ]
 all = [
-    "agent-hub-bridges[claude,slack,gemini,a2a,codex,claude_p]",
+    "agent-hub-bridges[claude,slack,gemini,a2a,client_codex,codex,claude_p]",
 ]
 dev = [
     "pytest>=8.0.0",
@@ -82,7 +87,7 @@ agent-hub-bridge-claude   = "agent_hub_bridges.claude.cli:main"
 agent-hub-bridge-slack    = "agent_hub_bridges.slack.cli:main"
 agent-hub-bridge-gemini   = "agent_hub_bridges.gemini.cli:main"
 agent-hub-bridge-a2a      = "agent_hub_bridges.a2a.cli:main"
-agent-hub-bridge-codex    = "agent_hub_bridges.codex.cli:main"
+agent-hub-client-codex    = "agent_hub_bridges.client_codex.cli:main"
 agent-hub-bridge-claude-p = "agent_hub_bridges.claude_p.cli:main"
 
 [project.urls]

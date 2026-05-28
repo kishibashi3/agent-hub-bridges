@@ -1,4 +1,4 @@
-"""Bridge runtime configuration (codex-specific).
+"""Client-codex runtime configuration (codex-specific, stateless).
 
 `_common.base_config.BaseConfig` に codex 固有の field を足した dataclass。
 設計詳細は docs/design-bridge-codex.md §6 を参照。

@@ -1,4 +1,4 @@
-"""Unit tests for `agent_hub_bridges.codex.config`."""
+"""Unit tests for `agent_hub_bridges.client_codex.config`."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from agent_hub_bridges.codex.config import DEFAULT_SANDBOX_MODE, Config
+from agent_hub_bridges.client_codex.config import DEFAULT_SANDBOX_MODE, Config
 
 
 @pytest.fixture
