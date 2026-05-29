@@ -38,9 +38,9 @@ def test_format_prompt_contains_sender() -> None:
 
 def test_format_prompt_contains_message_body() -> None:
     """プロンプトにメッセージ本文が含まれること。"""
-    msg = _make_msg(body="今日の天気は？")
+    msg = _make_msg(body="今日の天気は?")
     prompt = _format_prompt("@bridge-codex", msg)
-    assert "今日の天気は？" in prompt
+    assert "今日の天気は?" in prompt
 
 
 def test_format_prompt_contains_self_handle() -> None:
