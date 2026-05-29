@@ -1,10 +1,16 @@
-"""Client-codex runtime configuration (codex-specific, stateless).
+"""Bridge-codex runtime configuration.
 
-`_common.base_config.BaseConfig` に codex 固有の field を足した dataclass。
-設計詳細は docs/design-bridge-codex.md §6 を参照。
+`client_codex.Config` と同じ構造だが、デーモン bridge 用に sandbox と
+approval_bypass のデフォルトを変更している。
 
-必須 env: `GITHUB_PAT` / `AGENT_HUB_URL`(BaseConfig 経由)。
-codex auth は `~/.codex/auth.json` の idtoken を使うため `OPENAI_API_KEY` は不要。
+差分 (vs client_codex):
+  - DEFAULT_SANDBOX_MODE: "danger-full-access"
+    → codex が MCP 経由で get_user_history / send_message を呼ぶため
+      ネットワーク完全開放が必要。
+  - approval_bypass デフォルト: True (client_codex と同じ)
+
+設計: docs/design-bridge-codex.md §6
+Issue: #77
 """
 
 from __future__ import annotations
@@ -22,10 +28,9 @@ from agent_hub_bridges._common.base_config import (
 # `codex` CLI 本体の path。env `CODEX_CLI_PATH` で override 可能。
 DEFAULT_CODEX_CLI_PATH = "codex"
 
-# sandbox モードのデフォルト: workdir 書き込み許可 + ネットワーク許可。
-# read-only はネットワークアクセスをブロックするため、codex が MCP 経由で
-# send_message を呼べない (issue #77)。デーモン bridge 運用では workspace-write 以上が必要。
-DEFAULT_SANDBOX_MODE = "workspace-write"
+# sandbox モードのデフォルト: bridge-codex は MCP ネットワーク全開放が必要。
+# client-codex (workspace-write) より一段緩い。
+DEFAULT_SANDBOX_MODE = "danger-full-access"
 
 # 許容する sandbox_mode 値。
 VALID_SANDBOX_MODES = frozenset({"read-only", "workspace-write", "danger-full-access"})
@@ -33,12 +38,12 @@ VALID_SANDBOX_MODES = frozenset({"read-only", "workspace-write", "danger-full-ac
 
 @dataclass(frozen=True)
 class Config(BaseConfig):
-    """codex bridge の runtime config.
+    """bridge-codex の runtime config.
 
     Attributes:
-        workdir: 作業対象 project root(required)。
+        workdir: 作業対象 project root (required)。
         codex_cli_path: `codex` CLI binary の path / 名前。
-        model: 使用する model(None で codex デフォルト)。
+        model: 使用する model (None で codex デフォルト)。
         sandbox_mode: codex exec の `-s` オプション値。
         approval_bypass: True なら `--dangerously-bypass-approvals-and-sandbox` を追加。
     """
@@ -63,9 +68,13 @@ class Config(BaseConfig):
     ) -> Config:
         """CLI 引数 + env から `Config` を組み立てる.
 
-        必須 env: `GITHUB_PAT` / `AGENT_HUB_URL`(BaseConfig 側で fail-fast)。
+        必須 env: `GITHUB_PAT` / `AGENT_HUB_URL` (BaseConfig 側で fail-fast)。
         `workdir` は None で `os.getcwd()` に fallback。
-        `approval_bypass` の env 解決: CODEX_APPROVAL_BYPASS が non-empty なら True。
+
+        approval_bypass 解決ルール:
+          CODEX_APPROVAL_BYPASS 未設定 → True (デーモン運用に必要)
+          CODEX_APPROVAL_BYPASS="" (空文字) → False (明示的に無効化)
+          CODEX_APPROVAL_BYPASS="1" 等 non-empty → True
         """
         base = load_base_config(
             user=user,
@@ -91,10 +100,6 @@ class Config(BaseConfig):
             )
 
         # approval_bypass: CLI > env > True (デーモン bridge デフォルト)
-        # env 解決ルール:
-        #   CODEX_APPROVAL_BYPASS 未設定 → True (デーモン運用に必要)
-        #   CODEX_APPROVAL_BYPASS="" (空文字) → False  (明示的に無効化)
-        #   CODEX_APPROVAL_BYPASS="1" 等 non-empty → True
         if approval_bypass is None:
             env_val = os.environ.get("CODEX_APPROVAL_BYPASS")
             if env_val is None:

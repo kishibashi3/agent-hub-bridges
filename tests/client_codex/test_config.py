@@ -34,7 +34,7 @@ def test_config_happy_path(
     assert cfg.user == "codex-impl"
     assert cfg.workdir == tmp_path.resolve()
     assert cfg.sandbox_mode == DEFAULT_SANDBOX_MODE
-    assert cfg.approval_bypass is False
+    assert cfg.approval_bypass is True  # デーモンデフォルト (issue #77)
     assert cfg.model is None
 
 
@@ -99,7 +99,7 @@ def test_approval_bypass_env_non_empty(
 def test_approval_bypass_env_empty(
     monkeypatch: pytest.MonkeyPatch, _hub_env: None, tmp_path: Path
 ) -> None:
-    """CODEX_APPROVAL_BYPASS が空文字 → False."""
+    """CODEX_APPROVAL_BYPASS="" (空文字) → False (明示的無効化)。unset と異なる。"""
     monkeypatch.setenv("CODEX_APPROVAL_BYPASS", "")
     cfg = Config.from_env_and_args(
         user="codex-impl", display_name=None, tenant=None, workdir=str(tmp_path)
