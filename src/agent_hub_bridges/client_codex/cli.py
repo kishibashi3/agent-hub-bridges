@@ -15,7 +15,7 @@ from dotenv import load_dotenv
 
 from agent_hub_bridges import __version__
 from agent_hub_bridges._common.base_cli import build_common_parser
-from agent_hub_bridges.client_codex.config import VALID_SANDBOX_MODES, Config
+from agent_hub_bridges.client_codex.config import DEFAULT_SANDBOX_MODE, VALID_SANDBOX_MODES, Config
 from agent_hub_bridges.client_codex.worker import run_worker
 
 
@@ -44,7 +44,7 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         choices=sorted(VALID_SANDBOX_MODES),
         help=(
-            "sandbox モード (default: read-only)。"
+            f"sandbox モード (default: {DEFAULT_SANDBOX_MODE})。"
             "env CODEX_SANDBOX_MODE でも設定可能。"
         ),
     )
