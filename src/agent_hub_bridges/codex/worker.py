@@ -69,7 +69,7 @@ async def run_worker(config: Config) -> None:
         config.sandbox_mode,
     )
 
-    engine = CodexCLIEngine.create(config)
+    engine = CodexCLIEngine.create(config)  # type: ignore[arg-type]  # codex.Config is structurally compatible with client_codex.Config
     try:
 
         async def _one_session() -> None:

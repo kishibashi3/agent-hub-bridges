@@ -85,6 +85,17 @@ def test_invalid_sandbox_mode_raises(
         )
 
 
+def test_approval_bypass_unset_defaults_true(
+    monkeypatch: pytest.MonkeyPatch, _hub_env: None, tmp_path: Path
+) -> None:
+    """CODEX_APPROVAL_BYPASS 未設定 → True (デーモンデフォルト)。"""
+    monkeypatch.delenv("CODEX_APPROVAL_BYPASS", raising=False)
+    cfg = Config.from_env_and_args(
+        user="codex-impl", display_name=None, tenant=None, workdir=str(tmp_path)
+    )
+    assert cfg.approval_bypass is True
+
+
 def test_approval_bypass_env_non_empty(
     monkeypatch: pytest.MonkeyPatch, _hub_env: None, tmp_path: Path
 ) -> None:

@@ -65,7 +65,11 @@ class Config(BaseConfig):
 
         必須 env: `GITHUB_PAT` / `AGENT_HUB_URL`(BaseConfig 側で fail-fast)。
         `workdir` は None で `os.getcwd()` に fallback。
-        `approval_bypass` の env 解決: CODEX_APPROVAL_BYPASS が non-empty なら True。
+
+        `approval_bypass` env 解決ルール (issue #77):
+          CODEX_APPROVAL_BYPASS 未設定 → True  (デーモン bridge デフォルト)
+          CODEX_APPROVAL_BYPASS=""    → False (明示的無効化)
+          CODEX_APPROVAL_BYPASS="1"  → True  (任意の non-empty 文字列)
         """
         base = load_base_config(
             user=user,
