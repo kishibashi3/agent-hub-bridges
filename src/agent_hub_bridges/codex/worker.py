@@ -44,6 +44,7 @@ def _format_prompt(self_handle: str, msg: IncomingMessage) -> str:
         f"1. `mcp__agent-hub__get_user_history` を呼び、{reply_to} との会話履歴を確認する\n"
         f"2. 履歴の文脈を踏まえて返答内容を決定する\n"
         f"3. `mcp__agent-hub__send_message` で {reply_to} へ DM を送信する\n"
+        f"   (caused_by='{msg.id}' を設定すること — 因果チェーン追跡 issue #162)\n"
         f"team 宛 broadcast は避け、送信者個人へ DM で返すこと。"
     )
 
@@ -130,6 +131,7 @@ async def _handle_one(
                     message=(
                         f"(自動応答) bridge の workdir が存在しません: {config.workdir}"
                     ),
+                    caused_by=msg.id,
                 )
             except Exception:
                 logger.exception("workdir-missing fallback DM to %s failed", msg.sender)
@@ -154,6 +156,7 @@ async def _handle_one(
                         f"(自動応答) codex CLI engine でエラー: "
                         f"{type(exc).__name__}: {exc}"
                     ),
+                    caused_by=msg.id,
                 )
             except Exception:
                 logger.exception("fallback send_message also failed")

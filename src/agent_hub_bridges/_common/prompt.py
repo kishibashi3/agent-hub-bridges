@@ -56,5 +56,7 @@ def format_peer_message_prompt(
         f"宛先: {msg.to}\n"
         f"本文:\n{msg.body}\n\n"
         f"内容に応じて作業し、返答が必要なら "
-        f"`mcp__agent-hub__send_message` で {reply_to} へ送り返してください。"
+        f"`mcp__agent-hub__send_message` で {reply_to} へ送り返してください。\n"
+        f"その際、`caused_by` に今回の受信メッセージ ID `{msg.id}` を設定してください"
+        f" (因果チェーン追跡 — issue #162)。"
     )
