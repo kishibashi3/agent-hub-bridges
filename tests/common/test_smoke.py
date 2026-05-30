@@ -39,7 +39,7 @@ def test_summarize_exc_group() -> None:
     assert "RuntimeError: b" in summary
 
 
-def _make_msg(*, sender: str, to: str, body: str) -> IncomingMessage:
+def _make_msg(*, sender: str, to: str, body: str, msg_id: str = "test-id") -> IncomingMessage:
     """`agent_hub_sdk.IncomingMessage` を test 用に組み立てる helper.
 
     M3 で `_IncomingMessageLike` Protocol を削除した結果、 prompt formatter
@@ -47,7 +47,7 @@ def _make_msg(*, sender: str, to: str, body: str) -> IncomingMessage:
     インスタンス化する。
     """
     return IncomingMessage(
-        id="test-id", sender=sender, to=to, body=body, timestamp="2026-05-19T22:00:00Z"
+        id=msg_id, sender=sender, to=to, body=body, timestamp="2026-05-19T22:00:00Z"
     )
 
 
@@ -71,6 +71,16 @@ def test_format_peer_message_prompt_reply_target_override() -> None:
     out = format_peer_message_prompt(msg, reply_target="@team")
     # reply target が 明示上書きされて使われていること
     assert "send_message` で @team へ" in out
+
+
+def test_format_peer_message_prompt_includes_caused_by_instruction() -> None:
+    """プロンプトに caused_by 設定指示と受信メッセージ ID が含まれること (issue #80 / #162)."""
+    msg = _make_msg(
+        sender="@alice", to="@bob", body="hello", msg_id="aaaaaaaa-0000-0000-0000-000000000001"
+    )
+    out = format_peer_message_prompt(msg)
+    assert "caused_by" in out
+    assert "aaaaaaaa-0000-0000-0000-000000000001" in out
 
 
 def test_load_base_config_missing_required(monkeypatch: pytest.MonkeyPatch) -> None:

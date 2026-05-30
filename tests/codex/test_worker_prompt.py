@@ -7,11 +7,17 @@ from unittest.mock import MagicMock
 from agent_hub_bridges.codex.worker import _format_prompt
 
 
-def _make_msg(sender: str = "@alice", body: str = "hello", to: str = "@bridge-codex") -> MagicMock:
+def _make_msg(
+    sender: str = "@alice",
+    body: str = "hello",
+    to: str = "@bridge-codex",
+    msg_id: str = "test-id",
+) -> MagicMock:
     msg = MagicMock()
     msg.sender = sender
     msg.body = body
     msg.to = to
+    msg.id = msg_id
     return msg
 
 
@@ -57,3 +63,11 @@ def test_format_prompt_history_before_send() -> None:
     idx_history = prompt.index("get_user_history")
     idx_send = prompt.index("send_message")
     assert idx_history < idx_send, "history instruction should precede send_message instruction"
+
+
+def test_format_prompt_includes_caused_by_instruction() -> None:
+    """プロンプトに caused_by 設定指示と受信メッセージ ID が含まれること (issue #80 / #162)."""
+    msg = _make_msg(msg_id="bbbbbbbb-0000-0000-0000-000000000001")
+    prompt = _format_prompt("@bridge-codex", msg)
+    assert "caused_by" in prompt
+    assert "bbbbbbbb-0000-0000-0000-000000000001" in prompt

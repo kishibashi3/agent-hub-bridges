@@ -551,6 +551,7 @@ async def _handle_one(
                         f"(自動応答) bridge の workdir が存在しません: "
                         f"{config.workdir}"
                     ),
+                    caused_by=msg.id,
                 )
             except Exception:
                 logger.exception("workdir-missing fallback DM to %s failed", msg.sender)
