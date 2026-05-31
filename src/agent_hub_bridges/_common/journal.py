@@ -187,7 +187,9 @@ class Journal:
                         # JournalEntry.__dataclass_fields__ で既知フィールドをフィルタし
                         # TypeError を防ぐ (issue #183 reviewer Minor 2)。
                         known = JournalEntry.__dataclass_fields__.keys()
-                        entries.append(JournalEntry(**{k: v for k, v in data.items() if k in known}))
+                        entries.append(
+                            JournalEntry(**{k: v for k, v in data.items() if k in known})
+                        )
                     except (json.JSONDecodeError, TypeError) as exc:
                         logger.warning(
                             "Skipping corrupt journal line %d in %s: %s",

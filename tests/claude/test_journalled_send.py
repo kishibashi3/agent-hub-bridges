@@ -10,13 +10,12 @@ Critical invariant:
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, call, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from agent_hub_bridges._common.journal import Journal
 from agent_hub_bridges.claude.worker import _journalled_send, _replay_journal
-
 
 # ---------- helpers ----------
 
@@ -188,8 +187,6 @@ class TestReplayJournal:
         """
         # 呼び出し順を記録するリスト
         call_order: list[str] = []
-
-        hub = MagicMock()
 
         async def fake_replay(h: object, j: object) -> None:
             call_order.append("replay")
