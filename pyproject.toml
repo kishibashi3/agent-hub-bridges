@@ -42,6 +42,11 @@ dependencies = [
 # 開発者は `[all]` を使う。 `[dev]` は test / lint toolchain。
 claude = [
     "claude-agent-sdk>=0.1.0",
+    # issue #90: OTLP span emit (observability #1)。
+    # AGENT_HUB_TELEMETRY_URL 未設定時は使われない (opt-in) が、
+    # インストール済みであることで bridge 起動後に動的に有効化できる。
+    "opentelemetry-sdk>=1.25.0",
+    "opentelemetry-exporter-otlp-proto-http>=1.25.0",
 ]
 slack = [
     "slack-bolt>=1.18.0",

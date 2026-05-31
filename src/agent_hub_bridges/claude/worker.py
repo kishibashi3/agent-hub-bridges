@@ -49,6 +49,7 @@ from agent_hub_bridges._common.reconnect import run_with_reconnect
 from agent_hub_bridges.claude.claude_runner import ClaudeRunner
 from agent_hub_bridges.claude.config import Config
 from agent_hub_bridges.claude.cursor import load_cursor, save_cursor
+from agent_hub_bridges.claude.telemetry import emit_span
 
 logger = logging.getLogger(__name__)
 
@@ -703,6 +704,7 @@ async def _handle_one(
     prompt = format_peer_message_prompt(msg)
     await claude.query(prompt, session_id=msg.sender)
 
+    result_msg: ResultMessage | None = None
     async for sdk_msg in claude.receive_response():
         formatted = _format_message(sdk_msg)
         logger.info(formatted)
@@ -711,4 +713,11 @@ async def _handle_one(
         if isinstance(sdk_msg, AssistantMessage):
             tracker.mark_active()
         if isinstance(sdk_msg, ResultMessage):
+            result_msg = sdk_msg
             break
+
+    # issue #90: OTLP span emit (opt-in — AGENT_HUB_TELEMETRY_URL で有効化)。
+    # ResultMessage が得られた場合のみ span を emit する。
+    # emit_span は内部で例外を読み捨てるため bridge を停止させない。
+    if result_msg is not None:
+        emit_span(msg_id=msg.id, model=config.model, result=result_msg)
