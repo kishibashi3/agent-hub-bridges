@@ -42,6 +42,7 @@ from claude_agent_sdk import (
     UserMessage,
 )
 
+from agent_hub_bridges._common.inventory import write_dead_marker, write_lost_hub_to_inventory
 from agent_hub_bridges._common.journal import Journal
 from agent_hub_bridges._common.prompt import format_peer_message_prompt
 from agent_hub_bridges._common.reconnect import run_with_reconnect
@@ -383,8 +384,28 @@ async def run_worker(config: Config) -> None:
                     config, runner, cursor, tracker, gap_tracker, compact_watchdog, journal
                 )
 
+            async def _on_circuit_open() -> None:
+                """circuit breaker 発火時コールバック: dead marker + inventory 更新.
+
+                issue #82: hub 接続が N 回連続で失敗したら graceful shutdown する前に
+                dead marker file を書いて operator の stop-bridge.sh --dead に通知する。
+                BRIDGE_INVENTORY が設定されていれば inventory に lost-hub エントリを追記。
+                """
+                pid = os.getpid()
+                write_dead_marker(config.user)
+                write_lost_hub_to_inventory(config.user, pid=pid)
+                logger.critical(
+                    "[circuit-breaker] ALERT: @%s hub connection lost. "
+                    "Dead marker written. Run 'stop-bridge.sh --dead' to clean up.",
+                    config.user,
+                )
+
             async def _run_reconnect() -> None:
-                await run_with_reconnect(_one_session, name="hub session (claude)")
+                await run_with_reconnect(
+                    _one_session,
+                    name="hub session (claude)",
+                    on_circuit_open=_on_circuit_open,
+                )
 
             # issue #60: compact_watchdog を run_with_reconnect と並走させる。
             # どちらか一方が例外で死ぬともう一方も cancel される (anyio 標準挙動)。

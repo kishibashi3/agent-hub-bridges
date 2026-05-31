@@ -8,11 +8,17 @@
 NOTE: 「reconnect は SDK 内部ではなく caller の責務」 という 設計判断は
 agent-hub-sdk 0.3.0 (M2.1) でも 同じ (M2 PR #11 で意図的に deferred)。
 SDK 側 reconnect は 将来の milestone 案件。
+
+circuit breaker (issue #82):
+  連続 N 回失敗で hub 接続断とみなし graceful shutdown する。
+  N は env `AGENT_HUB_BRIDGE_MAX_RETRIES` (default 10)、
+  `AGENT_HUB_BRIDGE_MAX_RETRIES=0` で無効化 (= 旧来の無限 retry)。
 """
 
 from __future__ import annotations
 
 import logging
+import os
 from collections.abc import Awaitable, Callable
 
 import anyio
@@ -26,12 +32,56 @@ logger = logging.getLogger(__name__)
 # 短すぎると 連続失敗時に 過負荷、 長すぎると 復旧が遅れる。 中庸の値。
 DEFAULT_RECONNECT_BACKOFF_S = 5.0
 
+# circuit breaker: 連続失敗上限。AGENT_HUB_BRIDGE_MAX_RETRIES=0 で無効化。
+_ENV_MAX_RETRIES = "AGENT_HUB_BRIDGE_MAX_RETRIES"
+_DEFAULT_MAX_RETRIES = 10
+
+
+class CircuitBreakerOpenError(Exception):
+    """連続 reconnect 失敗が max_retries に達したときに raise される.
+
+    bridge はこの例外を受け取ったら graceful shutdown する。
+    hub 接続が断たれた (= hub が落ちている) と判断してよい。
+    """
+
+
+def _resolve_max_retries(override: int | None) -> int | None:
+    """circuit breaker の effective max_retries を解決する.
+
+    解決優先順位:
+      1. caller が明示的に `max_retries=<N>` を渡した場合はそれを使う。
+      2. 未指定 (= None) なら env `AGENT_HUB_BRIDGE_MAX_RETRIES` を読む。
+      3. env も未設定なら `_DEFAULT_MAX_RETRIES` (= 10) を使う。
+
+    戻り値が ``None`` の場合は circuit breaker 無効 (= 旧来の無限 retry)。
+    0 以下を指定した場合も ``None`` (= 無効) として扱う。
+    """
+    if override is not None:
+        return override if override > 0 else None
+
+    env_val = os.environ.get(_ENV_MAX_RETRIES)
+    if env_val is not None:
+        try:
+            v = int(env_val)
+            return v if v > 0 else None
+        except ValueError:
+            logger.warning(
+                "Invalid %s=%r (must be integer), using default %d",
+                _ENV_MAX_RETRIES,
+                env_val,
+                _DEFAULT_MAX_RETRIES,
+            )
+
+    return _DEFAULT_MAX_RETRIES
+
 
 async def run_with_reconnect(
     session_fn: Callable[[], Awaitable[None]],
     *,
     backoff_s: float = DEFAULT_RECONNECT_BACKOFF_S,
     name: str = "hub session",
+    max_retries: int | None = None,
+    on_circuit_open: Callable[[], Awaitable[None]] | None = None,
 ) -> None:
     """`session_fn` を outer `while True` で 走らせる reconnect loop.
 
@@ -44,27 +94,82 @@ async def run_with_reconnect(
     呼出側に伝播する (= 通常終了 / cancel scope による正規 cancel)。 それ
     以外の例外は 一律 retry 対象。
 
+    **circuit breaker (issue #82)**:
+      連続失敗回数が `max_retries` に達すると :exc:`CircuitBreakerOpenError`
+      を raise して loop を抜ける。成功 (= session_fn が例外なく return)
+      すると連続失敗カウンタをリセットする。
+      `on_circuit_open` が指定されていれば raise 前に await する
+      (10 秒 タイムアウト付き; 失敗しても raise は続行)。
+
     Args:
         session_fn: 1 回分の hub session を走らせる no-arg coroutine factory。
         backoff_s: 失敗後の sleep 秒数 (default 5.0)。
         name: ログに出す session の名前 (例 `"hub session"`)。
+        max_retries: 連続失敗の上限。``None`` (default) なら env
+            ``AGENT_HUB_BRIDGE_MAX_RETRIES`` を読む (デフォルト 10)。
+            ``0`` を渡すと circuit breaker 無効 (= 旧来の無限 retry)。
+        on_circuit_open: circuit が開いたとき (raise 直前) に呼ぶ
+            async callback (任意)。inventory 更新や dead marker 書き込みに使う。
 
     Raises:
         KeyboardInterrupt: Ctrl-C などで終了したい場合は そのまま伝播。
         BaseException (cancelled): anyio が cancel を伝播してきた場合も
             そのまま伝播。
+        CircuitBreakerOpenError: 連続失敗が max_retries を超えたとき。
     """
+    effective_max = _resolve_max_retries(max_retries)
+    consecutive_failures = 0
+
     while True:
         try:
             await session_fn()
+            # 正常 return → 連続失敗カウントをリセット
+            consecutive_failures = 0
         except (KeyboardInterrupt, anyio.get_cancelled_exc_class()):
             raise
         except BaseException as exc:  # TaskGroup 経由の例外も拾うため意図的に広く取る
+            consecutive_failures += 1
+
+            # circuit breaker: 連続失敗が上限に達したら graceful shutdown
+            if effective_max is not None and consecutive_failures >= effective_max:
+                logger.critical(
+                    "[circuit-breaker] %s: %d consecutive reconnect failure(s) "
+                    ">= max_retries=%d — ALERT: hub connection assumed lost, "
+                    "shutting down gracefully. "
+                    "(set %s=0 to disable circuit breaker)",
+                    name,
+                    consecutive_failures,
+                    effective_max,
+                    _ENV_MAX_RETRIES,
+                )
+                if on_circuit_open is not None:
+                    try:
+                        with anyio.move_on_after(10):
+                            await on_circuit_open()
+                    except Exception as cb_exc:
+                        logger.warning(
+                            "[circuit-breaker] on_circuit_open callback failed "
+                            "(ignoring): %s",
+                            cb_exc,
+                        )
+                raise CircuitBreakerOpenError(
+                    f"{name}: circuit open after {consecutive_failures} "
+                    f"consecutive failure(s)"
+                ) from exc
+
+            remaining = (
+                effective_max - consecutive_failures
+                if effective_max is not None
+                else "∞"
+            )
             logger.warning(
-                "%s ended (%s: %s); reconnecting in %.0fs",
+                "%s ended (%s: %s); reconnecting in %.0fs "
+                "[consecutive_failures=%d, retries_left=%s]",
                 name,
                 type(exc).__name__,
                 summarize_exc(exc),
                 backoff_s,
+                consecutive_failures,
+                remaining,
             )
             await anyio.sleep(backoff_s)

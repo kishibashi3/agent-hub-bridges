@@ -15,6 +15,7 @@ from dotenv import load_dotenv
 
 from agent_hub_bridges import __version__
 from agent_hub_bridges._common.base_cli import build_common_parser
+from agent_hub_bridges._common.reconnect import CircuitBreakerOpenError
 from agent_hub_bridges.claude.config import Config
 from agent_hub_bridges.claude.worker import run_worker
 
@@ -74,6 +75,11 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         print("\nInterrupted, shutting down.", file=sys.stderr)
         return 130
+    except CircuitBreakerOpenError as exc:
+        # issue #82: circuit breaker 発火 → dead marker 書き込み済み、exit 1 で終了。
+        # operator は stop-bridge.sh --dead で残骸を回収できる。
+        print(f"\n[circuit-breaker] {exc}", file=sys.stderr)
+        return 1
 
     return 0
 

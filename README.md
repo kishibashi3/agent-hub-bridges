@@ -83,6 +83,36 @@ Use labels `bridge:<name>` + `type:<kind>` (= `feat` / `bug` / `doc` / `refactor
 
 ## Observability
 
+### Circuit Breaker (all bridges)
+
+All bridges share a reconnect loop that opens a circuit after N consecutive hub
+connection failures and shuts down gracefully (issue
+[#82](https://github.com/kishibashi3/agent-hub-bridges/issues/82)).
+
+| env var | default | description |
+|---|---|---|
+| `AGENT_HUB_BRIDGE_MAX_RETRIES` | `10` | Consecutive reconnect failures before circuit opens. Set to `0` to disable (infinite retry). |
+
+When the circuit opens the bridge:
+1. Logs a `CRITICAL [circuit-breaker]` alert.
+2. Writes `/tmp/agent-hub-bridge-<user>.dead` (dead marker).
+3. Appends a `**lost-hub**` entry to `BRIDGE_INVENTORY` (if env is set).
+4. Exits with code 1.
+
+Operator cleanup:
+
+```bash
+# kill all circuit-broken bridges at once
+BRIDGE_INVENTORY=~/.claude/projects/<key>/bridge-inventory.md \
+  ./scripts/stop-bridge.sh --dead
+```
+
+Log signal to watch:
+
+```
+CRITICAL [circuit-breaker] hub session (claude): 10 consecutive reconnect failure(s) >= max_retries=10 — ALERT: hub connection assumed lost, shutting down gracefully.
+```
+
 ### gemini bridge — rate-limit retry log signals
 
 The gemini bridge emits grep-able log markers for rate-limit retry events (issue #19):
