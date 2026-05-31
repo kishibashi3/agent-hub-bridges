@@ -42,6 +42,7 @@ from claude_agent_sdk import (
     UserMessage,
 )
 
+from agent_hub_bridges._common.journal import Journal
 from agent_hub_bridges._common.prompt import format_peer_message_prompt
 from agent_hub_bridges._common.reconnect import run_with_reconnect
 from agent_hub_bridges.claude.claude_runner import ClaudeRunner
@@ -354,6 +355,10 @@ async def run_worker(config: Config) -> None:
     # 共有する (= 再接続しても同じ cursor を使い回す)。
     cursor = load_cursor(config.user)
 
+    # issue #183 / agent-hub#168: bridge が直接呼ぶ hub.send() を journal で保護。
+    # cursor と同様に outer reconnect loop を跨いで 1 インスタンスを共有する。
+    journal = Journal(config.user)
+
     # issue #46: stdout スニフによる /status busy 判定。cursor と同様に
     # reconnect をまたいで 1 インスタンスを共有する。
     tracker = _ActivityTracker()
@@ -375,7 +380,7 @@ async def run_worker(config: Config) -> None:
             async def _one_session() -> None:
                 nonlocal cursor
                 cursor = await _run_hub_session(
-                    config, runner, cursor, tracker, gap_tracker, compact_watchdog
+                    config, runner, cursor, tracker, gap_tracker, compact_watchdog, journal
                 )
 
             async def _run_reconnect() -> None:
@@ -397,6 +402,7 @@ async def _run_hub_session(
     tracker: _ActivityTracker,
     gap_tracker: _MessageGapTracker,
     compact_watchdog: _IdleCompactWatchdog,
+    journal: Journal,
 ) -> str | None:
     """1 回分の hub session を最後まで走らせる.
 
@@ -466,6 +472,10 @@ async def _run_hub_session(
             config.user,
         )
 
+        # issue #183 / agent-hub#168: 前回クラッシュ時の pending entry を replay。
+        # hub 接続確立直後に行うことで、送信先が online になってから再送できる。
+        await _replay_journal(hub, journal)
+
         async with hub.inbox(commands=router) as messages:
             async for msg in messages:
                 # ``commands=router`` が ``/ping`` / ``/status`` / ``/help``
@@ -497,7 +507,7 @@ async def _run_hub_session(
                     await hub.ack(msg.id)
                     continue
 
-                await _handle_one(hub, runner.client, msg, config, tracker)
+                await _handle_one(hub, runner.client, msg, config, tracker, journal)
                 # process → save_cursor → ack の順 (crash-safe)。
                 # save_cursor 後 ack 前にクラッシュしても、 再起動後に
                 # cursor で skip されるので二重 dispatch にならない。
@@ -508,12 +518,88 @@ async def _run_hub_session(
     return cursor
 
 
+async def _journalled_send(
+    hub: HubSession,
+    journal: Journal,
+    *,
+    to: str,
+    message: str,
+    caused_by: str | None = None,
+) -> None:
+    """journal write → hub.send → journal delete の順で送信を永続化する。
+
+    bridge が直接呼ぶ ``hub.send()`` を wrap するヘルパー。
+
+    フロー::
+
+        1. journal.write(entry)  ← クラッシュしても次回起動時に replay される
+        2. hub.send(...)
+        3. journal.delete(entry.id)  ← 送信成功時のみ削除
+
+    hub.send が失敗した場合、 entry は journal に残り次回起動時に
+    :func:`_replay_journal` で再送される。
+
+    NOTE: 冪等性 (idempotency_key) は TODO (issue #183)。
+          現時点では at-least-once セマンティクス (replay 時に重複送信の可能性あり)。
+    """
+    entry = journal.make_entry(to=to, message=message, caused_by=caused_by)
+    journal.write(entry)
+    try:
+        await hub.send(to=to, message=message, caused_by=caused_by)
+    except Exception:
+        logger.warning(
+            "hub.send failed for journal entry %s (to=%s); "
+            "entry kept in journal for replay on next startup",
+            entry.id,
+            to,
+        )
+        raise
+    journal.delete(entry.id)
+
+
+async def _replay_journal(hub: HubSession, journal: Journal) -> None:
+    """起動時に pending journal entries を replay する (issue #183 / agent-hub#168)。
+
+    bridge クラッシュ時に送信できなかったメッセージを再送する。
+    失敗したエントリは journal に残し、次回起動時に再試行する。
+
+    NOTE: 冪等性 (idempotency_key) は TODO (issue #183)。
+          現時点では at-least-once セマンティクス (重複送信の可能性あり)。
+    """
+    entries = journal.load_all()
+    if not entries:
+        return
+    logger.warning(
+        "Journal replay: %d pending entry(ies) found — replaying (crash recovery)",
+        len(entries),
+    )
+    for entry in entries:
+        logger.info(
+            "Replaying journal entry %s (to=%s, created_at=%s)",
+            entry.id,
+            entry.to,
+            entry.created_at,
+        )
+        try:
+            await hub.send(to=entry.to, message=entry.message, caused_by=entry.caused_by)
+            journal.delete(entry.id)
+            logger.info("Journal entry %s replayed successfully", entry.id)
+        except Exception:
+            logger.exception(
+                "Failed to replay journal entry %s (to=%s); will retry on next startup",
+                entry.id,
+                entry.to,
+            )
+            # 失敗しても次のエントリを試みる
+
+
 async def _handle_one(
     hub: HubSession,
     claude: ClaudeSDKClient,
     msg: IncomingMessage,
     config: Config,
     tracker: _ActivityTracker,
+    journal: Journal,
 ) -> None:
     """message 1 件を Claude に流して応答を待つ.
 
@@ -533,6 +619,11 @@ async def _handle_one(
     ここで return するだけで ack が実行されて再配信ループを防げる。
     ``Config.from_env_and_args`` の起動時検証と二重になるが、bridge
     起動後に workdir が削除される edge case への guard として必要。
+
+    issue #183 / agent-hub#168: bridge が直接呼ぶ hub.send() は
+    ``_journalled_send()`` 経由にして crash-safe にする。
+    Claude が MCP tool 経由で呼ぶ ``mcp__agent-hub__send_message`` は
+    bridge 側でインターセプトできないため対象外 (server 側 WAL で保護 = PR #182)。
     """
     # issue #51: workdir が存在しない場合は early return。
     # caller (_run_hub_session) が hub.ack を呼ぶので ack は保証される。
@@ -545,7 +636,10 @@ async def _handle_one(
         )
         with anyio.move_on_after(10):
             try:
-                await hub.send(
+                # issue #183: _journalled_send で crash-safe に送信
+                await _journalled_send(
+                    hub,
+                    journal,
                     to=msg.sender,
                     message=(
                         f"(自動応答) bridge の workdir が存在しません: "
