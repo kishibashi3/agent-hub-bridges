@@ -146,11 +146,11 @@ async def test_circuit_breaker_resets_on_success(
     """成功すると連続失敗カウンタがリセットされ、再び N 回失敗で circuit が開く."""
     monkeypatch.setattr(anyio, "sleep", _noop_sleep)
 
-    # フェーズ: fail×2 → success → fail×3 → CircuitBreakerOpenError
+    # フェーズ: failx2 → success → failx3 → CircuitBreakerOpenError
     # max_retries=3 で設定すると:
-    #   - 最初の fail×2 では circuit は開かない (consecutive_failures=2 < 3)
+    #   - 最初の failx2 では circuit は開かない (consecutive_failures=2 < 3)
     #   - success で consecutive_failures が 0 にリセット
-    #   - 次の fail×3 で circuit が開く (consecutive_failures=3 >= 3)
+    #   - 次の failx3 で circuit が開く (consecutive_failures=3 >= 3)
     events: list[str] = []
 
     async def session_fn() -> None:

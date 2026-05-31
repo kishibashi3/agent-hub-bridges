@@ -13,7 +13,6 @@ from agent_hub_bridges._common.inventory import (
     write_lost_hub_to_inventory,
 )
 
-
 # ---------------------------------------------------------------------------
 # dead_marker_path
 # ---------------------------------------------------------------------------
@@ -122,7 +121,7 @@ def test_write_lost_hub_to_inventory_inserts_after_marker(
     lines = content.splitlines()
 
     # マーカー行の次の行が lost-hub エントリになっているはず
-    marker_idx = next(i for i, l in enumerate(lines) if "新しいエントリを上に追加" in l)
+    marker_idx = next(i for i, line in enumerate(lines) if "新しいエントリを上に追加" in line)
     inserted = lines[marker_idx + 1]
     assert "**lost-hub**" in inserted, f"inserted line: {inserted!r}"
     assert "`@bridges-impl`" in inserted
