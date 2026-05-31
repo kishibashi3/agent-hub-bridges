@@ -64,14 +64,33 @@ while [[ $# -gt 0 ]]; do
 done
 
 # ---------------------------------------------------------------------------
+# helper: handle の形式を検証する (Minor #2: sed injection 防止)
+# handle は英数字・ハイフン・アンダースコアのみ許可する。
+# ---------------------------------------------------------------------------
+_validate_handle() {
+    local h="$1"
+    if [[ -z "$h" ]]; then
+        echo "error: handle is empty" >&2
+        return 1
+    fi
+    if [[ ! "$h" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+        echo "error: invalid handle format: '${h}' (must match [a-zA-Z0-9_-]+)" >&2
+        return 1
+    fi
+}
+
+# ---------------------------------------------------------------------------
 # helper: bridge を 1 件停止して inventory を更新する
 # ---------------------------------------------------------------------------
 _stop_one() {
     local handle="$1"
-    local reason="${2:-manual}"
+    local reason="${2:-manual}"  # Minor #3: :-fallback で空文字も "manual" に正規化
+
+    # handle の形式検証 (sed injection 防止)
+    _validate_handle "$handle" || return 1
 
     # pgrep で PID を取得 (末尾スペースで部分一致を防ぐ)
-    local PID
+    local PID=""
     PID=$(pgrep -f "agent-hub-bridge-claude --user ${handle} " | head -1 || true)
 
     if [[ -z "$PID" ]]; then
@@ -89,12 +108,18 @@ _stop_one() {
         local NOW
         NOW=$(date '+%Y-%m-%d %H:%M')
 
+        # Critical #1 (BSD sed 互換): -i.bak で macOS/BSD sed に対応し、
+        # 即座に .bak を削除することで副作用ファイルを残さない。
+        # 参考: kishibashi3/agent-hub-roles#11
+
         # Currently running テーブルから該当行を削除
-        sed -i "/\`@${handle}\`/d" "$BRIDGE_INVENTORY"
+        sed -i.bak "/\`@${handle}\`/d" "$BRIDGE_INVENTORY" \
+            && rm -f "${BRIDGE_INVENTORY}.bak"
 
         # Activity log に stop エントリを追加
-        sed -i "/^新しいエントリを上に追加/a - ${NOW} — **stop** \`@${handle}\` — ${reason} (pid=${PID:-unknown})" \
-            "$BRIDGE_INVENTORY"
+        sed -i.bak "/^新しいエントリを上に追加/a - ${NOW} — **stop** \`@${handle}\` — ${reason} (pid=${PID:-unknown})" \
+            "$BRIDGE_INVENTORY" \
+            && rm -f "${BRIDGE_INVENTORY}.bak"
 
         echo "inventory updated: $BRIDGE_INVENTORY" >&2
     fi
@@ -111,7 +136,7 @@ _stop_one() {
 # --dead モード: dead marker を持つ bridge を一括終了
 # ---------------------------------------------------------------------------
 if [[ "$mode" == "dead" ]]; then
-    # /tmp/agent-hub-bridge-*.dead を glob
+    # /tmp/agent-hub-bridge-*.dead を glob (nullglob で 0 件でもエラーにしない)
     shopt -s nullglob
     dead_files=(/tmp/agent-hub-bridge-*.dead)
     shopt -u nullglob
@@ -131,7 +156,10 @@ if [[ "$mode" == "dead" ]]; then
         local_handle="${local_handle#agent-hub-bridge-}"
 
         echo "processing dead bridge: @${local_handle} (marker=${dead_file})" >&2
-        _stop_one "$local_handle" "dead bridge cleanup"
+        _stop_one "$local_handle" "dead bridge cleanup" || {
+            echo "warning: failed to stop @${local_handle}, skipping" >&2
+            continue
+        }
         (( count++ )) || true
     done
 
