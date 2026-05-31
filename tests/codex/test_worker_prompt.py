@@ -21,11 +21,11 @@ def _make_msg(
     return msg
 
 
-def test_format_prompt_contains_get_user_history() -> None:
-    """プロンプトに get_user_history の呼び出し指示が含まれること。"""
+def test_format_prompt_no_get_user_history() -> None:
+    """issue #79: セッション永続化により get_user_history への依存を廃止."""
     msg = _make_msg()
     prompt = _format_prompt("@bridge-codex", msg)
-    assert "get_user_history" in prompt
+    assert "get_user_history" not in prompt
 
 
 def test_format_prompt_contains_send_message() -> None:
@@ -56,13 +56,11 @@ def test_format_prompt_contains_self_handle() -> None:
     assert "@bridge-codex" in prompt
 
 
-def test_format_prompt_history_before_send() -> None:
-    """get_user_history の指示が send_message の指示より先に現れること。"""
+def test_format_prompt_contains_send_message_instruction() -> None:
+    """プロンプトに send_message の呼び出し指示が含まれること。"""
     msg = _make_msg()
     prompt = _format_prompt("@bridge-codex", msg)
-    idx_history = prompt.index("get_user_history")
-    idx_send = prompt.index("send_message")
-    assert idx_history < idx_send, "history instruction should precede send_message instruction"
+    assert "send_message" in prompt
 
 
 def test_format_prompt_includes_caused_by_instruction() -> None:

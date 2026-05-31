@@ -1,4 +1,4 @@
-"""Codex CLI engine wrapper (client-codex, stateless).
+"""Codex CLI engine wrapper (client-codex, session-persistent).
 
 client-codex の "LLM engine" 部分。`codex exec` を非対話モードで subprocess
 起動し、codex が MCP tool 経由で agent-hub に返信するまで待機する。
@@ -9,6 +9,12 @@ client-codex の "LLM engine" 部分。`codex exec` を非対話モードで sub
   - bridge 固有の config.toml を書き込み、agent-hub MCP を CODEX_HOME から解決
   - subprocess env に CODEX_HOME=<temp> + identity env vars をセット
 
+セッション永続化 (issue #79):
+  - --ephemeral フラグを廃止し、セッションを CODEX_HOME に保存する
+  - --json フラグで JSONL 出力から session_meta イベントの id を取得
+  - 2 回目以降は `codex exec resume <session_id>` で会話を継続
+  - peer ごとに session_id を _session_ids dict で管理
+
 返信は codex 自身が `mcp__agent-hub__send_message` を呼ぶ。worker は
 subprocess 完了を待つだけ(gemini bridge と同一パターン)。
 
@@ -18,6 +24,7 @@ retry は M1 では実装しない(issue #53 design §7)。
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import shutil
@@ -47,6 +54,7 @@ class EngineResult:
     stdout: str
     stderr: str
     duration_s: float
+    session_id: str | None = None
 
 
 class CodexCLIEngine:
@@ -57,6 +65,8 @@ class CodexCLIEngine:
         `create()` で作成、`close()` で `shutil.rmtree` 削除。
       - `_cli_path`: 実行する codex binary path。
       - `_timeout_s`: 1 ターンあたりの timeout。
+      - `_session_ids`: peer ごとのセッション ID (peer handle → UUID)。
+        issue #79 — セッション永続化。
     """
 
     def __init__(
@@ -70,6 +80,7 @@ class CodexCLIEngine:
         self._temp_codex_home = temp_codex_home
         self._cli_path = cli_path
         self._timeout_s = timeout_s
+        self._session_ids: dict[str, str] = {}
 
     @classmethod
     def create(cls, config: Config) -> CodexCLIEngine:
@@ -127,7 +138,9 @@ class CodexCLIEngine:
     def close(self) -> None:
         """一時 CODEX_HOME を片付ける(worker 終了時の finally で呼ぶ)。
 
-        auth.json symlink も config.toml も含めてまとめて削除される。
+        auth.json symlink も config.toml も、セッションファイルも含めてまとめて削除される。
+        セッションはプロセス生存期間中のみ有効。bridge 再起動後は新規セッションとなる。
+        (_session_ids も失われるため、次回起動時は全 peer について初回扱いになる。)
         """
         shutil.rmtree(self._temp_codex_home, ignore_errors=True)
 
@@ -141,15 +154,21 @@ class CodexCLIEngine:
         return await self._invoke_once(peer=peer, prompt=prompt)
 
     async def _invoke_once(self, *, peer: str, prompt: str) -> EngineResult:
-        """`codex exec` を 1 回起動して結果を返す."""
-        cmd = self._build_cmd(prompt)
+        """`codex exec` を 1 回起動して結果を返す.
+
+        issue #79: 既知の session_id があれば `codex exec resume <id>` で継続、
+        なければ新規セッションとして `codex exec` を起動する。
+        """
+        session_id = self._session_ids.get(peer)
+        cmd = self._build_cmd(prompt, session_id=session_id)
         env = self._build_env()
 
         logger.info(
-            "→ spawning codex for peer=%s (sandbox=%s, cwd=%s)",
+            "-> spawning codex for peer=%s (sandbox=%s, cwd=%s, session=%s)",
             peer,
             self._config.sandbox_mode,
             self._config.workdir,
+            session_id or "new",
         )
 
         loop = asyncio.get_running_loop()
@@ -187,11 +206,24 @@ class CodexCLIEngine:
             ) from err
 
         duration = loop.time() - start
+        stdout_str = stdout_bytes.decode("utf-8", errors="replace")
+        stderr_str = stderr_bytes.decode("utf-8", errors="replace")
+
+        # issue #79: --json フラグ経由で session_meta イベントから session id を取得。
+        extracted_id = _extract_session_id(stdout_str)
+        if extracted_id:
+            if peer not in self._session_ids:
+                logger.info(
+                    "[SESSION] new session %s for peer=%s", extracted_id, peer
+                )
+            self._session_ids[peer] = extracted_id
+
         result = EngineResult(
             returncode=proc.returncode or 0,
-            stdout=stdout_bytes.decode("utf-8", errors="replace"),
-            stderr=stderr_bytes.decode("utf-8", errors="replace"),
+            stdout=stdout_str,
+            stderr=stderr_str,
             duration_s=duration,
+            session_id=extracted_id,
         )
 
         if result.returncode != 0:
@@ -204,25 +236,42 @@ class CodexCLIEngine:
             )
         else:
             logger.info(
-                "codex CLI done (peer=%s, %.1fs, %d stdout bytes)",
+                "codex CLI done (peer=%s, %.1fs, %d stdout bytes, session=%s)",
                 peer,
                 duration,
                 len(result.stdout),
+                extracted_id or "unknown",
             )
         return result
 
-    def _build_cmd(self, prompt: str) -> list[str]:
-        """codex exec コマンドライン(設計: docs/design-bridge-codex.md §4)."""
-        cmd = [
-            self._cli_path,
-            "exec",
-            "-s",
-            self._config.sandbox_mode,
-            "-C",
-            str(self._config.workdir),
-            "--skip-git-repo-check",
-            "--ephemeral",
-        ]
+    def _build_cmd(self, prompt: str, *, session_id: str | None = None) -> list[str]:
+        """codex exec コマンドライン(設計: docs/design-bridge-codex.md §4).
+
+        issue #79: セッション永続化のため --ephemeral を廃止し --json を追加。
+          - session_id なし (初回):
+              codex exec -s <sandbox> -C <workdir> --skip-git-repo-check --json ...
+          - session_id あり (継続):
+              codex exec resume <id> -s <sandbox> --skip-git-repo-check --json ...
+              (resume サブコマンドに -C フラグはないが、subprocess の cwd= で
+              workdir を指定するため実害なし)
+        """
+        if session_id is None:
+            cmd: list[str] = [
+                self._cli_path,
+                "exec",
+                "-s", self._config.sandbox_mode,
+                "-C", str(self._config.workdir),
+                "--skip-git-repo-check",
+                "--json",
+            ]
+        else:
+            cmd = [
+                self._cli_path,
+                "exec", "resume", session_id,
+                "-s", self._config.sandbox_mode,
+                "--skip-git-repo-check",
+                "--json",
+            ]
         if self._config.approval_bypass:
             cmd.append("--dangerously-bypass-approvals-and-sandbox")
         if self._config.model:
@@ -247,6 +296,28 @@ class CodexCLIEngine:
         else:
             env.pop(_ENV_TENANT_ID, None)
         return env
+
+
+def _extract_session_id(stdout: str) -> str | None:
+    """--json JSONL 出力から session_meta イベントの id を取得する.
+
+    `codex exec --json` は各イベントを 1 行の JSON で出力する。
+    最初の `session_meta` イベントの `payload.id` がセッション UUID。
+
+    issue #79: セッション永続化のためにセッション ID を取得する。
+    """
+    for line in stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if event.get("type") == "session_meta":
+            # payload が null の場合も安全に処理する (S2: `or {}` で null guard)
+            return (event.get("payload") or {}).get("id")
+    return None
 
 
 def _setup_codex_home(temp_codex_home: Path, config: Config) -> None:

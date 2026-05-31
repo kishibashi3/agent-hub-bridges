@@ -1,12 +1,10 @@
-"""Bridge-codex worker main loop (resident-process, MCP history).
+"""Bridge-codex worker main loop (resident-process, session-persistent).
 
-client_codex worker と同じ骨格だが、会話履歴のある返答を実現するため
-prompt に「get_user_history を呼んでから send_message で返信する」手順を
-明示する。履歴取得・返信ともに codex が MCP tool 経由で行うため bridge 側の
-ルーティング実装は不要。
+client_codex worker と同じ骨格。セッション永続化 (issue #79) により
+codex が会話状態をネイティブに管理するため、get_user_history への依存を廃止。
 
 設計: docs/design-bridge-codex.md §8
-Issue: #77
+Issue: #77, #79
 """
 
 from __future__ import annotations
@@ -25,14 +23,10 @@ logger = logging.getLogger(__name__)
 
 
 def _format_prompt(self_handle: str, msg: IncomingMessage) -> str:
-    """受信 message を bridge-codex の prompt に整形 (会話履歴付き手順を指示).
+    """受信 message を bridge-codex の prompt に整形.
 
-    codex に以下の手順を指示する:
-    1. get_user_history で送信者との会話履歴を取得
-    2. 履歴を踏まえた返答内容を決定
-    3. send_message で送信者個人へ DM 返信
-
-    client_codex._format_prompt との差分: 手順 1 (get_user_history) を追加。
+    issue #79: セッション永続化により codex が会話状態をネイティブに保持するため、
+    get_user_history への依存を廃止。send_message で直接返信する。
     """
     reply_to = msg.sender
     return (
@@ -40,11 +34,8 @@ def _format_prompt(self_handle: str, msg: IncomingMessage) -> str:
         f"agent-hub 経由で {msg.sender} から以下の message が届きました。\n"
         f"宛先: {msg.to}\n"
         f"本文:\n{msg.body}\n\n"
-        f"以下の手順で対応してください:\n"
-        f"1. `mcp__agent-hub__get_user_history` を呼び、{reply_to} との会話履歴を確認する\n"
-        f"2. 履歴の文脈を踏まえて返答内容を決定する\n"
-        f"3. `mcp__agent-hub__send_message` で {reply_to} へ DM を送信する\n"
-        f"   (caused_by='{msg.id}' を設定すること — 因果チェーン追跡 issue #162)\n"
+        f"`mcp__agent-hub__send_message` で {reply_to} へ DM を送信してください。\n"
+        f"(caused_by='{msg.id}' を設定すること — 因果チェーン追跡 issue #162)\n"
         f"team 宛 broadcast は避け、送信者個人へ DM で返すこと。"
     )
 
