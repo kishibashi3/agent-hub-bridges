@@ -104,22 +104,27 @@ def test_write_creates_parent_dir(tmp_path: Path) -> None:
     assert journal.path.exists()
 
 
-def test_write_does_not_raise_on_unwritable_path(
+def test_write_returns_true_on_success(tmp_path: Path) -> None:
+    """write が成功したとき True を返す."""
+    journal = Journal("success-check", base_dir=tmp_path)
+    entry = journal.make_entry(to="@alice", message="hello")
+    result = journal.write(entry)
+    assert result is True
+
+
+def test_write_returns_false_on_unwritable_path(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """書き込み不可のパスでも例外を上げない (warning ログのみ)."""
-    journal = Journal("test", base_dir=tmp_path / "nonexistent_deeply_nested" / "path")
-    # 親ディレクトリ作成を mock して失敗させる
-    import os
+    """書き込み不可のパスでは False を返し、例外を上げない (warning ログのみ)."""
+    from pathlib import Path as _Path
+    from unittest.mock import patch
 
-    original_mkdir = os.makedirs
-
-    def bad_mkdir(*args, **kwargs):
-        raise PermissionError("mocked permission error")
-
-    monkeypatch.setattr("os.makedirs", bad_mkdir)
+    journal = Journal("test", base_dir=tmp_path / "nested")
     entry = journal.make_entry(to="@alice", message="hello")
-    journal.write(entry)  # 例外が上がらないことを確認
+    # Path.mkdir を mock して PermissionError を起こす
+    with patch.object(_Path, "mkdir", side_effect=PermissionError("mocked")):
+        result = journal.write(entry)  # 例外が上がらないことを確認
+    assert result is False
 
 
 # ---------------------------------------------------------------------------
@@ -173,6 +178,28 @@ def test_load_all_skips_corrupt_lines(tmp_path: Path) -> None:
     assert len(loaded) == 2  # corrupt line はスキップ
     assert loaded[0].message == "valid"
     assert loaded[1].message == "also valid"
+
+
+def test_load_all_ignores_unknown_fields(tmp_path: Path) -> None:
+    """未来バージョンで追加された未知フィールドを含む行でも TypeError にならず読み込める (前方互換)."""
+    journal = Journal("compat-check", base_dir=tmp_path)
+    # known フィールド + 未知フィールド "unknown_field_v2"
+    journal.path.write_text(
+        json.dumps({
+            "id": "abc-123",
+            "to": "@alice",
+            "message": "hello",
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "unknown_field_v2": "extra-data",  # 未来バージョンで追加された仮想フィールド
+        })
+        + "\n"
+    )
+
+    loaded = journal.load_all()
+    assert len(loaded) == 1
+    assert loaded[0].id == "abc-123"
+    assert loaded[0].to == "@alice"
+    assert loaded[0].message == "hello"
 
 
 # ---------------------------------------------------------------------------
@@ -279,6 +306,8 @@ def test_caused_by_none_roundtrip(tmp_path: Path) -> None:
 
 def test_delete_is_atomic_via_rename(tmp_path: Path) -> None:
     """delete 後に tmp ファイルが残らないことを確認 (atomic rename の副作用チェック)."""
+    import os
+
     journal = Journal("atomic", base_dir=tmp_path)
     e1 = journal.make_entry(to="@a", message="stay")
     e2 = journal.make_entry(to="@b", message="go")
@@ -287,6 +316,8 @@ def test_delete_is_atomic_via_rename(tmp_path: Path) -> None:
 
     journal.delete(e2.id)
 
-    # .journal.tmp が残っていないこと
-    tmp_file = journal.path.with_suffix(".journal.tmp")
-    assert not tmp_file.exists()
+    # PID-based .journal.tmp が残っていないこと (reviewer Minor 1: PID suffix)
+    pid_tmp = journal.path.with_name(f"{journal.path.stem}.{os.getpid()}.journal.tmp")
+    assert not pid_tmp.exists()
+    # ディレクトリ全体に .tmp ファイルが残っていないこと
+    assert not list(tmp_path.glob("*.tmp"))

@@ -543,7 +543,14 @@ async def _journalled_send(
           現時点では at-least-once セマンティクス (replay 時に重複送信の可能性あり)。
     """
     entry = journal.make_entry(to=to, message=message, caused_by=caused_by)
-    journal.write(entry)
+    # write → send → delete の順。write 失敗時は send を中止して不変式を守る
+    # (reviewer Critical: issue #183)。
+    # 「journal に書いてから send」が crash-safety の核心であり、
+    # write 失敗のまま send すると crash 後にメッセージが消失する。
+    if not journal.write(entry):
+        raise RuntimeError(
+            f"Journal write failed for entry {entry.id} (to={to}); send aborted"
+        )
     try:
         await hub.send(to=to, message=message, caused_by=caused_by)
     except Exception:

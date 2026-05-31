@@ -123,25 +123,32 @@ class Journal:
             caused_by=caused_by,
         )
 
-    def write(self, entry: JournalEntry) -> None:
+    def write(self, entry: JournalEntry) -> bool:
         """journal に entry を末尾 append する。
 
-        ``os.fsync`` で即時ディスク反映。失敗しても例外を上げない (warning ログのみ)。
+        ``os.fsync`` で即時ディスク反映。
+
+        Returns:
+            True  — 書き込み成功。
+            False — 書き込み失敗 (warning ログのみ、例外は上げない)。
+                    呼び出し側は False を受け取ったら送信を中止すること。
         """
         try:
-            self._path.parent.mkdir(parents=True, exist_ok=True)
+            self._path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
             with open(self._path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(asdict(entry), ensure_ascii=False) + "\n")
                 f.flush()
                 os.fsync(f.fileno())
             logger.debug("Journal write: entry %s → %s", entry.id, self._path)
+            return True
         except Exception:
             logger.warning(
-                "Failed to write journal entry %s to %s — send proceeds without journal",
+                "Failed to write journal entry %s to %s — send will be aborted",
                 entry.id,
                 self._path,
                 exc_info=True,
             )
+            return False
 
     def delete(self, entry_id: str) -> None:
         """entry_id に一致するエントリを journal から削除する。
@@ -176,7 +183,11 @@ class Journal:
                         continue
                     try:
                         data = json.loads(raw)
-                        entries.append(JournalEntry(**data))
+                        # 前方互換: 未知フィールド (将来バージョンで追加) を無視する。
+                        # JournalEntry.__dataclass_fields__ で既知フィールドをフィルタし
+                        # TypeError を防ぐ (issue #183 reviewer Minor 2)。
+                        known = JournalEntry.__dataclass_fields__.keys()
+                        entries.append(JournalEntry(**{k: v for k, v in data.items() if k in known}))
                     except (json.JSONDecodeError, TypeError) as exc:
                         logger.warning(
                             "Skipping corrupt journal line %d in %s: %s",
@@ -204,7 +215,9 @@ class Journal:
             logger.debug("Journal cleared (empty), file removed: %s", self._path)
             return
 
-        tmp_path = self._path.with_suffix(".journal.tmp")
+        # PID を含めることでマルチプロセス環境での tmp ファイル衝突を防ぐ
+        # (reviewer Minor 1: issue #183)
+        tmp_path = self._path.with_name(f"{self._path.stem}.{os.getpid()}.journal.tmp")
         try:
             with open(tmp_path, "w", encoding="utf-8") as f:
                 for e in entries:
