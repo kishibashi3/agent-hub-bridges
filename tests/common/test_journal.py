@@ -10,10 +10,8 @@ import pytest
 from agent_hub_bridges._common.journal import (
     _JOURNAL_DIR_ENV,
     Journal,
-    JournalEntry,
     journal_dir,
 )
-
 
 # ---------------------------------------------------------------------------
 # journal_dir
@@ -170,7 +168,9 @@ def test_load_all_skips_corrupt_lines(tmp_path: Path) -> None:
         json.dumps({"id": e1.id, "to": e1.to, "message": e1.message, "created_at": e1.created_at})
         + "\n"
         + "NOT VALID JSON {{{{\n"
-        + json.dumps({"id": "other-id", "to": "@bob", "message": "also valid", "created_at": e1.created_at})
+        + json.dumps(
+            {"id": "other-id", "to": "@bob", "message": "also valid", "created_at": e1.created_at}
+        )
         + "\n"
     )
 
@@ -181,7 +181,10 @@ def test_load_all_skips_corrupt_lines(tmp_path: Path) -> None:
 
 
 def test_load_all_ignores_unknown_fields(tmp_path: Path) -> None:
-    """未来バージョンで追加された未知フィールドを含む行でも TypeError にならず読み込める (前方互換)."""
+    """未来バージョンで追加された未知フィールドを含む行でも TypeError にならず読み込める (前方互換).
+
+    forward compatibility check.
+    """
     journal = Journal("compat-check", base_dir=tmp_path)
     # known フィールド + 未知フィールド "unknown_field_v2"
     journal.path.write_text(
