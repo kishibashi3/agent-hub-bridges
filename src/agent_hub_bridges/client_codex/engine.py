@@ -138,7 +138,9 @@ class CodexCLIEngine:
     def close(self) -> None:
         """一時 CODEX_HOME を片付ける(worker 終了時の finally で呼ぶ)。
 
-        auth.json symlink も config.toml も含めてまとめて削除される。
+        auth.json symlink も config.toml も、セッションファイルも含めてまとめて削除される。
+        セッションはプロセス生存期間中のみ有効。bridge 再起動後は新規セッションとなる。
+        (_session_ids も失われるため、次回起動時は全 peer について初回扱いになる。)
         """
         shutil.rmtree(self._temp_codex_home, ignore_errors=True)
 
@@ -313,7 +315,8 @@ def _extract_session_id(stdout: str) -> str | None:
         except json.JSONDecodeError:
             continue
         if event.get("type") == "session_meta":
-            return event.get("payload", {}).get("id")
+            # payload が null の場合も安全に処理する (S2: `or {}` で null guard)
+            return (event.get("payload") or {}).get("id")
     return None
 
 

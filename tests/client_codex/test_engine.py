@@ -384,3 +384,8 @@ class TestExtractSessionId:
             '{"type":"session_meta","payload":{"id":"valid-id"}}\n'
         )
         assert _extract_session_id(stdout) == "valid-id"
+
+    def test_returns_none_when_payload_is_null(self) -> None:
+        """S2: payload が null でも KeyError / AttributeError を起こさない."""
+        stdout = '{"type":"session_meta","payload":null}\n'
+        assert _extract_session_id(stdout) is None
