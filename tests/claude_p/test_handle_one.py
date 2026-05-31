@@ -76,6 +76,7 @@ class TestWorkdirMissing:
         hub.send.assert_called_once()
         call_kwargs = hub.send.call_args.kwargs
         assert call_kwargs["to"] == "@alice"
+        assert call_kwargs["caused_by"] == "msg-001"  # issue #84
 
     @pytest.mark.asyncio
     async def test_error_logged_when_workdir_missing(
@@ -120,6 +121,32 @@ class TestWorkdirMissing:
         await _handle_one(hub, engine, msg, config)
 
         engine.run.assert_not_called()
+
+
+# ---------- engine error fallback ----------
+
+
+class TestEngineErrorFallback:
+    @pytest.mark.asyncio
+    async def test_fallback_dm_sent_when_engine_raises(
+        self, tmp_path: Path
+    ) -> None:
+        """engine.run が例外を上げたとき fallback DM が送られる (caused_by 付き)。
+        issue #84: caused_by=msg.id が設定されることを確認する。"""
+        hub = _make_hub()
+        engine = _make_engine()
+        engine.run = AsyncMock(side_effect=RuntimeError("engine crashed"))
+        msg = _make_msg()
+        config = _make_config(tmp_path)
+
+        _fmt_patch = "agent_hub_bridges.claude_p.worker.format_peer_message_prompt"
+        with patch(_fmt_patch, return_value="prompt"):
+            await _handle_one(hub, engine, msg, config)
+
+        hub.send.assert_called_once()
+        call_kwargs = hub.send.call_args.kwargs
+        assert call_kwargs["to"] == "@alice"
+        assert call_kwargs["caused_by"] == "msg-001"  # issue #84
 
 
 # ---------- workdir present ----------

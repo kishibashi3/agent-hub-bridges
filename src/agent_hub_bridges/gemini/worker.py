@@ -149,6 +149,7 @@ async def _handle_one(
                         f"(自動応答) gemini CLI engine でエラー: "
                         f"{type(exc).__name__}: {exc}"
                     ),
+                    caused_by=msg.id,  # issue #84: caused_by 因果チェーン
                 )
             except Exception:
                 logger.exception("fallback send_message also failed")
@@ -177,6 +178,7 @@ async def _handle_one(
                         f"{result.attempts} 回 retry しましたが失敗しました。"
                         f"しばらく時間をおいて再送をお願いします。"
                     ),
+                    caused_by=msg.id,  # issue #84: caused_by 因果チェーン
                 )
             except Exception:
                 logger.exception(

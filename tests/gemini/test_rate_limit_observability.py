@@ -235,6 +235,7 @@ class TestRateLimitFallbackDM:
         hub.send.assert_called_once()
         call_kwargs = hub.send.call_args
         assert call_kwargs.kwargs["to"] == "@alice"
+        assert call_kwargs.kwargs["caused_by"] == "msg-001"  # issue #84
         body = call_kwargs.kwargs["message"].lower()
         assert "rate-limit" in body or "rate-limited" in body
 
@@ -335,6 +336,48 @@ class TestRateLimitFallbackDM:
 
         engine.run.assert_not_called()
         hub.send.assert_not_called()
+
+
+# ---------- issue #84: caused_by on engine exception fallback ----------
+
+
+class TestEngineExceptionFallback:
+    """engine.run が例外を上げたとき fallback DM に caused_by が設定される (issue #84)。"""
+
+    def _make_msg(self, msg_id: str = "msg-exc-001", sender: str = "@alice") -> MagicMock:
+        msg = MagicMock()
+        msg.id = msg_id
+        msg.sender = sender
+        msg.body = "test"
+        msg.timestamp = "2026-05-22T00:00:00.000Z"
+        return msg
+
+    def _make_hub(self) -> AsyncMock:
+        hub = AsyncMock()
+        hub.send = AsyncMock()
+        return hub
+
+    @pytest.mark.asyncio
+    async def test_engine_exception_fallback_dm_has_caused_by(self) -> None:
+        """engine.run が例外 → fallback DM に caused_by=msg.id が設定される。"""
+        from agent_hub_bridges.gemini.config import Config
+        from agent_hub_bridges.gemini.worker import _handle_one
+
+        config = MagicMock(spec=Config)
+        config.user = "bridge-gemini"
+        hub = self._make_hub()
+        msg = self._make_msg()
+        engine = MagicMock()
+        engine.run = AsyncMock(side_effect=RuntimeError("engine crash"))
+
+        _fmt_patch = "agent_hub_bridges.gemini.worker.format_peer_message_prompt"
+        with patch(_fmt_patch, return_value="prompt"):
+            await _handle_one(hub, engine, msg, config)
+
+        hub.send.assert_called_once()
+        call_kwargs = hub.send.call_args.kwargs
+        assert call_kwargs["to"] == "@alice"
+        assert call_kwargs["caused_by"] == "msg-exc-001"  # issue #84
 
 
 # ---------- is_rate_limit_error public API ----------
