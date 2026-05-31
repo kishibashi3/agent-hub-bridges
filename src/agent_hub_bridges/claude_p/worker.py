@@ -152,6 +152,7 @@ async def _handle_one(
                     message=(
                         f"(auto) bridge workdir does not exist: {config.workdir}"
                     ),
+                    caused_by=msg.id,  # issue #84: caused_by 因果チェーン
                 )
             except Exception:
                 logger.exception("workdir-missing fallback DM to %s failed", msg.sender)
@@ -176,6 +177,7 @@ async def _handle_one(
                         f"(auto) claude -p engine error: "
                         f"{type(exc).__name__}: {exc}"
                     ),
+                    caused_by=msg.id,  # issue #84: caused_by 因果チェーン
                 )
             except Exception:
                 logger.exception("fallback send_message also failed")
