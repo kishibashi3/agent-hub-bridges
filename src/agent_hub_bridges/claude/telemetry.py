@@ -1,7 +1,15 @@
 """OTLP span emit for bridge-claude (issue #90).
 
 ``AGENT_HUB_TELEMETRY_URL`` が未設定の場合は全操作がサイレント skip (opt-in)。
-設定されている場合は OTLP/HTTP+JSON 形式で span を emit する。
+設定されている場合は OTLP/HTTP (`Content-Type: application/x-protobuf`) で span emit する。
+
+**送信フォーマット**:
+  ``opentelemetry-exporter-otlp-proto-http`` v1.42.1 は protobuf のみをサポートする
+  (``encode_spans().SerializePartialToString()``、 ``Content-Type: application/x-protobuf``)。
+  issue #90 の仕様は "JSON" を指定しているが、otelite (Grafana Alloy) は
+  protobuf も受け付け、スパンは正常に届く。真の JSON が必要な場合は
+  将来の SDK バージョンアップ、または `requests.Session` ベースのカスタム
+  exporter への差し替えを検討する。
 
 span 属性 (GenAI semantic conventions + custom):
   - ``msg_id``: agent-hub message ID (custom)
@@ -10,7 +18,7 @@ span 属性 (GenAI semantic conventions + custom):
   - ``gen_ai.usage.output_tokens``: output tokens
   - ``gen_ai.usage.cache_read.input_tokens``: cache read tokens (ドット区切り)
 
-送信先: ``${AGENT_HUB_TELEMETRY_URL}/v1/traces`` (OTLP/HTTP+JSON)
+送信先: ``${AGENT_HUB_TELEMETRY_URL}/v1/traces``
 """
 
 from __future__ import annotations
@@ -27,6 +35,10 @@ logger = logging.getLogger(__name__)
 # module-level singleton: TracerProvider / Tracer の遅延初期化。
 # None   = 未初期化 or 初期化済みだが無効 (URL 未設定 / import 失敗)。
 # object = 有効な opentelemetry Tracer インスタンス。
+#
+# スレッド安全性: bridge-claude は asyncio single-threaded で動作するため
+# GIL を超えた concurrent write は発生しない。複数スレッドから呼ぶ場合は
+# Lock を追加すること。
 _tracer: Any = None
 _TRACER_INIT: bool = False
 
@@ -57,11 +69,11 @@ def _get_tracer() -> Any:
         from opentelemetry.sdk.trace import TracerProvider
         from opentelemetry.sdk.trace.export import BatchSpanProcessor
 
-        # OTLP/HTTP+JSON を要求 (issue #90: Content-Type: application/json)。
-        # ユーザーが OTEL_EXPORTER_OTLP_PROTOCOL を明示指定していれば尊重する。
-        if "OTEL_EXPORTER_OTLP_PROTOCOL" not in os.environ:
-            os.environ["OTEL_EXPORTER_OTLP_PROTOCOL"] = "http/json"
-
+        # opentelemetry-exporter-otlp-proto-http v1.42.1 は常に protobuf を使う。
+        # OTEL_EXPORTER_OTLP_PROTOCOL は OTLPSpanExporter コンストラクタで
+        # 読まれないため、env var を書き換えても効果がない (reviewer Minor 対応)。
+        # Content-Type は "application/x-protobuf" で固定される。
+        # otelite は protobuf を受け付け、スパンは正常に届くことを実機確認済み。
         endpoint = url.rstrip("/") + "/v1/traces"
         exporter = OTLPSpanExporter(endpoint=endpoint)
         provider = TracerProvider()
@@ -69,9 +81,8 @@ def _get_tracer() -> Any:
         trace.set_tracer_provider(provider)
         _tracer = trace.get_tracer("agent-hub-bridge-claude")
         logger.info(
-            "[telemetry] OTLP span emit enabled: endpoint=%s protocol=%s",
+            "[telemetry] OTLP span emit enabled: endpoint=%s (protobuf)",
             endpoint,
-            os.environ.get("OTEL_EXPORTER_OTLP_PROTOCOL", "default"),
         )
     except ImportError:
         logger.warning(

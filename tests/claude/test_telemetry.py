@@ -193,15 +193,22 @@ class TestSpanAttributes:
         telemetry.emit_span(msg_id="x", model="m", result=_make_result())
 
 
-# ---------- JSON protocol 設定 ----------
+# ---------- env var 非汚染の確認 ----------
 
 
-class TestJsonProtocol:
+class TestNoEnvMutation:
+    """reviewer Minor 対応 (#91): _get_tracer が os.environ を書き換えないことを確認する。
+
+    opentelemetry-exporter-otlp-proto-http v1.42.1 は OTLPSpanExporter
+    コンストラクタで OTEL_EXPORTER_OTLP_PROTOCOL を読まないため、
+    env var を注入しても効果がない。本クラスはその非汚染を回帰テストとして保持する。
+    """
+
     def setup_method(self) -> None:
         telemetry.reset_for_testing()
 
-    def test_sets_json_protocol_env_when_not_set(self, monkeypatch) -> None:
-        """OTEL_EXPORTER_OTLP_PROTOCOL 未設定時は 'http/json' を注入する。"""
+    def test_does_not_set_protocol_env(self, monkeypatch) -> None:
+        """_get_tracer が OTEL_EXPORTER_OTLP_PROTOCOL を書き込まない。"""
         monkeypatch.setenv("AGENT_HUB_TELEMETRY_URL", "http://localhost:4318")
         monkeypatch.delenv("OTEL_EXPORTER_OTLP_PROTOCOL", raising=False)
 
@@ -216,10 +223,11 @@ class TestJsonProtocol:
         ):
             telemetry._get_tracer()
 
-        assert os.environ.get("OTEL_EXPORTER_OTLP_PROTOCOL") == "http/json"
+        # env var を書き換えていないこと
+        assert "OTEL_EXPORTER_OTLP_PROTOCOL" not in os.environ
 
-    def test_preserves_existing_protocol_env(self, monkeypatch) -> None:
-        """ユーザーが OTEL_EXPORTER_OTLP_PROTOCOL を設定済みならそれを尊重する。"""
+    def test_does_not_overwrite_user_protocol_env(self, monkeypatch) -> None:
+        """ユーザーが OTEL_EXPORTER_OTLP_PROTOCOL を設定済みでも書き換えない。"""
         monkeypatch.setenv("AGENT_HUB_TELEMETRY_URL", "http://localhost:4318")
         monkeypatch.setenv("OTEL_EXPORTER_OTLP_PROTOCOL", "http/protobuf")
 
@@ -234,4 +242,5 @@ class TestJsonProtocol:
         ):
             telemetry._get_tracer()
 
+        # ユーザーの値が変わっていないこと
         assert os.environ.get("OTEL_EXPORTER_OTLP_PROTOCOL") == "http/protobuf"
