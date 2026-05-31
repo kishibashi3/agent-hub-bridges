@@ -170,3 +170,53 @@ def test_cli_keyboard_interrupt_returns_130(
 
     rc = claude_cli.main(["--user", "claude-impl", "--workdir", str(tmp_path)])
     assert rc == 130
+
+
+# --- issue #83: --mode flag ---
+
+
+def test_cli_mode_default_stateful(
+    monkeypatch: pytest.MonkeyPatch, _hub_env: None, tmp_path: Path
+) -> None:
+    """``--mode`` 未指定なら config.mode == 'stateful' (default)."""
+    captured: dict[str, Any] = {}
+
+    async def fake_run_worker(config: Any) -> None:
+        captured["config"] = config
+
+    monkeypatch.setattr(claude_cli, "run_worker", fake_run_worker)
+    monkeypatch.delenv("AGENT_HUB_MODE", raising=False)
+
+    rc = claude_cli.main(["--user", "claude-impl", "--workdir", str(tmp_path)])
+    assert rc == 0
+    assert captured["config"].mode == "stateful"
+
+
+def test_cli_mode_explicit(
+    monkeypatch: pytest.MonkeyPatch, _hub_env: None, tmp_path: Path
+) -> None:
+    """``--mode stateless`` が config.mode に届く."""
+    captured: dict[str, Any] = {}
+
+    async def fake_run_worker(config: Any) -> None:
+        captured["config"] = config
+
+    monkeypatch.setattr(claude_cli, "run_worker", fake_run_worker)
+
+    rc = claude_cli.main(
+        ["--user", "claude-impl", "--workdir", str(tmp_path), "--mode", "stateless"]
+    )
+    assert rc == 0
+    assert captured["config"].mode == "stateless"
+
+
+def test_cli_mode_invalid_rejected(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``--mode`` に無効な値を渡すと argparse が exit 2 で拒否する."""
+    with pytest.raises(SystemExit) as exc_info:
+        claude_cli.main(
+            ["--user", "claude-impl", "--workdir", str(tmp_path), "--mode", "invalid"]
+        )
+    assert exc_info.value.code == 2

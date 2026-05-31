@@ -446,13 +446,11 @@ async def _run_hub_session(
       - 失敗時は SDK が generic warning を送信 + ack (= どちらも ack 必ず走る)
 
     SDK M5 (agent-hub-sdk#27, merge ``fc4a4cd``) auto-registers as part
-    of ``AgentHub.connect``. The explicit ``registered = await
-    hub.register()`` that used to live here is now a harmless duplicate
-    (= server-side ``register`` is idempotent), so we drop it. The log
-    message previously printed the server's registration confirmation
-    text (e.g. ``registered: @claude-bridge``); now that the return
-    value is gone, we log the user handle from the already-resolved
-    ``config.user`` — same operator-facing signal that the bridge is up.
+    of ``AgentHub.connect``. We additionally call ``hub.register()``
+    explicitly after connect (issue #83) to log the confirmed
+    display_name/mode for operator visibility, and to ensure the
+    registration is reflected immediately even when SDK auto-register
+    timing varies. Server-side ``register`` is idempotent.
 
     issue #37: ``cursor`` は再起動をまたいで最後に処理した message の
     timestamp を保持する。 ``msg.timestamp <= cursor`` のメッセージは
@@ -482,12 +480,33 @@ async def _run_hub_session(
 
     async with AgentHub.connect(
         user=config.user,
-        mode="stateful",
+        mode=config.mode,  # issue #83: --mode flag (stateful/stateless/global)
         tenant=config.tenant,
         display_name=config.display_name,
         url=config.agent_hub_url,
         pat=config.github_pat,
     ) as hub:
+        # issue #83: SDK M5 auto-registers in connect(), but we call register()
+        # again explicitly to surface the confirmed display_name/mode in the log
+        # so operators can verify the registration at a glance.
+        # server-side register is idempotent.
+        try:
+            confirmed = await hub.register()
+            logger.info(
+                "Registered @%s (mode=%s, display_name=%r): %s",
+                config.user,
+                config.mode,
+                config.display_name,
+                confirmed,
+            )
+        except Exception:
+            logger.warning(
+                "Explicit register() after connect failed for @%s — "
+                "auto-register from connect() should still be active",
+                config.user,
+                exc_info=True,
+            )
+
         logger.info(
             "Hub session ready (@%s), listening on inbox...",
             config.user,

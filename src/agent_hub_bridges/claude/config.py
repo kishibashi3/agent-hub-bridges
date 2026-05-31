@@ -49,6 +49,7 @@ class Config(BaseConfig):
     anthropic_api_key: str | None
     workdir: Path  # type: ignore[assignment]  # base の Optional を required に絞る
     model: str
+    mode: str = "stateful"  # issue #83: --mode flag; stateful/stateless/global
     add_dirs: tuple[Path, ...] = ()  # issue #20: --add-dir で追加するディレクトリ
 
     @classmethod
@@ -60,6 +61,7 @@ class Config(BaseConfig):
         tenant: str | None,
         workdir: str | None,
         model: str | None = None,
+        mode: str | None = None,
         add_dirs: list[str] | None = None,
     ) -> Config:
         """CLI 引数 + env から `Config` を組み立てる.
@@ -73,19 +75,39 @@ class Config(BaseConfig):
 
         ``model`` の解決順位は CLI ``--model`` > env ``AGENT_HUB_MODEL`` >
         :data:`DEFAULT_MODEL` (= ``claude-sonnet-4-6``)。
+
+        ``mode`` の解決順位は CLI ``--mode`` > env ``AGENT_HUB_MODE`` >
+        ``"stateful"`` (issue #83)。
+
+        ``display_name`` が未指定 (CLI も env も未設定) の場合は
+        ``"{user} — claude bridge"`` を自動生成する (issue #83)。
+        これにより ``get_participants`` で表示名が常に `<役名> — <要約>` 形式に
+        なることを保証する。
         """
         import os
 
-        # 共通 env (USER/PAT/URL/TENANT/DISPLAY_NAME) は base loader に委譲
+        # issue #83: display_name が未設定なら "{user} — claude bridge" を自動生成。
+        # 解決順位: CLI --display-name > env AGENT_HUB_DISPLAY_NAME > 自動生成。
+        effective_display = (
+            display_name
+            or load_optional_env("AGENT_HUB_DISPLAY_NAME")
+            or f"{user} — claude bridge"
+        )
+
+        # 共通 env (USER/PAT/URL/TENANT) は base loader に委譲。
+        # display_name は上で解決済みなので effective_display を渡す。
         base = load_base_config(
             user=user,
-            display_name=display_name,
+            display_name=effective_display,
             tenant=tenant,
             workdir=workdir if workdir is not None else os.getcwd(),
         )
         assert base.workdir is not None  # workdir をデフォルト cwd で渡したため
 
         resolved_model = model or load_optional_env("AGENT_HUB_MODEL") or DEFAULT_MODEL
+
+        # issue #83: mode の解決順位: CLI --mode > env AGENT_HUB_MODE > "stateful"
+        resolved_mode = mode or load_optional_env("AGENT_HUB_MODE") or "stateful"
 
         # issue #20: --add-dir を Path に変換 (resolve して絶対パス化)。
         # 呼出元が argparse の action=append を使っている場合、add_dirs は
@@ -103,5 +125,6 @@ class Config(BaseConfig):
             workdir=base.workdir,
             anthropic_api_key=load_optional_env("ANTHROPIC_API_KEY"),
             model=resolved_model,
+            mode=resolved_mode,
             add_dirs=resolved_add_dirs,
         )

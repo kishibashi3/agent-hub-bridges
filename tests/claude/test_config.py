@@ -188,6 +188,83 @@ def test_model_empty_string_treated_as_unset(
 _ = os
 
 
+# --- issue #83: mode + display_name auto-generation ---
+
+
+def test_mode_default_stateful(
+    monkeypatch: pytest.MonkeyPatch, _hub_env: None, tmp_path: Path
+) -> None:
+    """CLI ``--mode`` 未指定 + env ``AGENT_HUB_MODE`` 未設定 → ``"stateful"``."""
+    monkeypatch.delenv("AGENT_HUB_MODE", raising=False)
+    cfg = Config.from_env_and_args(
+        user="claude-impl", display_name=None, tenant=None, workdir=str(tmp_path)
+    )
+    assert cfg.mode == "stateful"
+
+
+def test_mode_env_overrides_default(
+    monkeypatch: pytest.MonkeyPatch, _hub_env: None, tmp_path: Path
+) -> None:
+    """env ``AGENT_HUB_MODE`` が default を上書きする (CLI 未指定時)."""
+    monkeypatch.setenv("AGENT_HUB_MODE", "stateless")
+    cfg = Config.from_env_and_args(
+        user="claude-impl", display_name=None, tenant=None, workdir=str(tmp_path)
+    )
+    assert cfg.mode == "stateless"
+
+
+def test_mode_cli_overrides_env(
+    monkeypatch: pytest.MonkeyPatch, _hub_env: None, tmp_path: Path
+) -> None:
+    """CLI ``--mode`` が env を上書きする (優先順位 CLI > env > default)."""
+    monkeypatch.setenv("AGENT_HUB_MODE", "stateless")
+    cfg = Config.from_env_and_args(
+        user="claude-impl",
+        display_name=None,
+        tenant=None,
+        workdir=str(tmp_path),
+        mode="global",
+    )
+    assert cfg.mode == "global"
+
+
+def test_display_name_auto_generated_when_unset(
+    monkeypatch: pytest.MonkeyPatch, _hub_env: None, tmp_path: Path
+) -> None:
+    """``--display-name`` 未指定 + env ``AGENT_HUB_DISPLAY_NAME`` 未設定 →
+    ``"{user} — claude bridge"`` が自動生成される (issue #83)."""
+    monkeypatch.delenv("AGENT_HUB_DISPLAY_NAME", raising=False)
+    cfg = Config.from_env_and_args(
+        user="bridges-impl", display_name=None, tenant=None, workdir=str(tmp_path)
+    )
+    assert cfg.display_name == "bridges-impl — claude bridge"
+
+
+def test_display_name_cli_takes_priority(
+    monkeypatch: pytest.MonkeyPatch, _hub_env: None, tmp_path: Path
+) -> None:
+    """CLI ``--display-name`` が env や自動生成より優先される."""
+    monkeypatch.setenv("AGENT_HUB_DISPLAY_NAME", "env-name")
+    cfg = Config.from_env_and_args(
+        user="bridges-impl",
+        display_name="bridges-impl — Custom Role",
+        tenant=None,
+        workdir=str(tmp_path),
+    )
+    assert cfg.display_name == "bridges-impl — Custom Role"
+
+
+def test_display_name_env_overrides_auto(
+    monkeypatch: pytest.MonkeyPatch, _hub_env: None, tmp_path: Path
+) -> None:
+    """env ``AGENT_HUB_DISPLAY_NAME`` が自動生成より優先される (CLI 未指定時)."""
+    monkeypatch.setenv("AGENT_HUB_DISPLAY_NAME", "bridges-impl — env override")
+    cfg = Config.from_env_and_args(
+        user="bridges-impl", display_name=None, tenant=None, workdir=str(tmp_path)
+    )
+    assert cfg.display_name == "bridges-impl — env override"
+
+
 # --- issue #20: add_dirs ---
 
 
