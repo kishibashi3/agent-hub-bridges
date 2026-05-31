@@ -265,6 +265,44 @@ def test_display_name_env_overrides_auto(
     assert cfg.display_name == "bridges-impl — env override"
 
 
+def test_mode_invalid_env_raises(
+    monkeypatch: pytest.MonkeyPatch, _hub_env: None, tmp_path: Path
+) -> None:
+    """env ``AGENT_HUB_MODE`` に無効な値をセットすると `ValueError` (fail-fast)。
+    (reviewer Critical: argparse choices= は CLI のみを保護するため env は別途検証)"""
+    monkeypatch.setenv("AGENT_HUB_MODE", "invalid_value")
+    with pytest.raises(ValueError, match="invalid mode="):
+        Config.from_env_and_args(
+            user="claude-impl", display_name=None, tenant=None, workdir=str(tmp_path)
+        )
+
+
+def test_mode_invalid_env_error_message(
+    monkeypatch: pytest.MonkeyPatch, _hub_env: None, tmp_path: Path
+) -> None:
+    """エラーメッセージに無効な値と有効な値一覧が含まれる。"""
+    monkeypatch.setenv("AGENT_HUB_MODE", "bad_mode")
+    with pytest.raises(ValueError, match=r"global.*stateful.*stateless"):
+        Config.from_env_and_args(
+            user="claude-impl", display_name=None, tenant=None, workdir=str(tmp_path)
+        )
+
+
+def test_display_name_empty_string_falls_to_auto(
+    monkeypatch: pytest.MonkeyPatch, _hub_env: None, tmp_path: Path
+) -> None:
+    """``display_name=""`` (空文字) は意味をなさないため auto-gen に fallthrough する。
+    (reviewer Minor #3: `is not None` チェック後に `or` fallback で空文字を処理)"""
+    monkeypatch.delenv("AGENT_HUB_DISPLAY_NAME", raising=False)
+    cfg = Config.from_env_and_args(
+        user="bridges-impl",
+        display_name="",  # 空文字
+        tenant=None,
+        workdir=str(tmp_path),
+    )
+    assert cfg.display_name == "bridges-impl — claude bridge"
+
+
 # --- issue #20: add_dirs ---
 
 

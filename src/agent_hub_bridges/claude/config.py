@@ -28,6 +28,10 @@ from agent_hub_bridges._common.base_config import BaseConfig, load_base_config, 
 #   too; we use the family alias for forward-compat with point releases.
 DEFAULT_MODEL = "claude-sonnet-4-6"
 
+# issue #83: mode allowlist。argparse の choices= は CLI のみを保護するため、
+# env AGENT_HUB_MODE にも同じ allowlist を適用して fail-fast で検証する。
+VALID_MODES: frozenset[str] = frozenset({"stateful", "stateless", "global"})
+
 
 @dataclass(frozen=True)
 class Config(BaseConfig):
@@ -83,14 +87,23 @@ class Config(BaseConfig):
         ``"{user} — claude bridge"`` を自動生成する (issue #83)。
         これにより ``get_participants`` で表示名が常に `<役名> — <要約>` 形式に
         なることを保証する。
+
+        ``mode`` の検証: CLI ``--mode`` は argparse ``choices=`` が保護するが、
+        env ``AGENT_HUB_MODE`` は argparse を経由しないため
+        :data:`VALID_MODES` による fail-fast 検証を行う (reviewer Critical)。
         """
         import os
 
-        # issue #83: display_name が未設定なら "{user} — claude bridge" を自動生成。
-        # 解決順位: CLI --display-name > env AGENT_HUB_DISPLAY_NAME > 自動生成。
+        # issue #83: display_name の解決順位: CLI --display-name > env > 自動生成。
+        # reviewer Minor #3: `is not None` チェックにより空文字 ("") を
+        #   CLI 指定値として尊重せず auto-gen に fallthrough させる
+        #   (空文字の display_name は意味をなさないため)。
+        # reviewer Minor #4: env AGENT_HUB_DISPLAY_NAME は自分で 1 度だけ読み、
+        #   load_base_config には解決済みの effective_display を渡す。
+        #   load_base_config 内の二重読みを防ぐ。
+        _env_display = load_optional_env("AGENT_HUB_DISPLAY_NAME")
         effective_display = (
-            display_name
-            or load_optional_env("AGENT_HUB_DISPLAY_NAME")
+            (display_name if display_name is not None else _env_display)
             or f"{user} — claude bridge"
         )
 
@@ -106,8 +119,17 @@ class Config(BaseConfig):
 
         resolved_model = model or load_optional_env("AGENT_HUB_MODEL") or DEFAULT_MODEL
 
-        # issue #83: mode の解決順位: CLI --mode > env AGENT_HUB_MODE > "stateful"
-        resolved_mode = mode or load_optional_env("AGENT_HUB_MODE") or "stateful"
+        # issue #83: mode の解決順位: CLI --mode > env AGENT_HUB_MODE > "stateful"。
+        # reviewer Critical: env AGENT_HUB_MODE は argparse choices= を経由しないため
+        #   VALID_MODES で fail-fast 検証する。
+        # reviewer Minor #2: 末尾 fallback を `or "stateful"` の暗黙連鎖でなく
+        #   明示的な `if ... is not None else` で表現する。
+        _raw_mode = mode if mode is not None else load_optional_env("AGENT_HUB_MODE")
+        if _raw_mode is not None and _raw_mode not in VALID_MODES:
+            raise ValueError(
+                f"invalid mode={_raw_mode!r}: must be one of {sorted(VALID_MODES)}"
+            )
+        resolved_mode = _raw_mode if _raw_mode is not None else "stateful"
 
         # issue #20: --add-dir を Path に変換 (resolve して絶対パス化)。
         # 呼出元が argparse の action=append を使っている場合、add_dirs は
