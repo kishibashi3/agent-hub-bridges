@@ -16,6 +16,7 @@ from agent_hub_bridges.client_codex.engine import (
     _ENV_USER_ID,
     CodexCLIEngine,
     EngineResult,
+    _extract_session_id,
     _write_config_toml,
 )
 
@@ -142,10 +143,40 @@ class TestBuildCmd:
         cmd = engine._build_cmd("hello")
         assert "--skip-git-repo-check" in cmd
 
-    def test_cmd_ephemeral(self, tmp_path: Path) -> None:
+    def test_cmd_no_ephemeral(self, tmp_path: Path) -> None:
+        """issue #79: --ephemeral を廃止してセッションを永続化する."""
         engine = _make_engine(tmp_path)
         cmd = engine._build_cmd("hello")
-        assert "--ephemeral" in cmd
+        assert "--ephemeral" not in cmd
+
+    def test_cmd_json_flag(self, tmp_path: Path) -> None:
+        """issue #79: --json フラグで JSONL 出力からセッション ID を取得する."""
+        engine = _make_engine(tmp_path)
+        cmd = engine._build_cmd("hello")
+        assert "--json" in cmd
+
+    def test_cmd_resume_when_session_id_given(self, tmp_path: Path) -> None:
+        """issue #79: session_id 指定時は `exec resume <id>` 形式になる."""
+        engine = _make_engine(tmp_path)
+        sid = "019e5218-142c-74d0-aae3-9c681465eb80"
+        cmd = engine._build_cmd("hello", session_id=sid)
+        assert cmd[1] == "exec"
+        assert cmd[2] == "resume"
+        assert cmd[3] == sid
+
+    def test_cmd_no_workdir_flag_on_resume(self, tmp_path: Path) -> None:
+        """issue #79: resume サブコマンドには -C フラグがない (subprocess cwd= で設定)."""
+        engine = _make_engine(tmp_path)
+        sid = "019e5218-142c-74d0-aae3-9c681465eb80"
+        cmd = engine._build_cmd("hello", session_id=sid)
+        assert "-C" not in cmd
+
+    def test_cmd_no_resume_when_no_session_id(self, tmp_path: Path) -> None:
+        """issue #79: session_id なしは通常の `codex exec` 形式."""
+        engine = _make_engine(tmp_path)
+        cmd = engine._build_cmd("hello")
+        assert "resume" not in cmd
+        assert cmd[1] == "exec"
 
     def test_cmd_model_absent_when_none(self, tmp_path: Path) -> None:
         engine = _make_engine(tmp_path, model=None)
@@ -239,3 +270,117 @@ class TestRun:
 
         assert result.returncode == 1
         assert "error output" in result.stderr
+
+    @pytest.mark.asyncio
+    async def test_run_stores_session_id(self, tmp_path: Path) -> None:
+        """issue #79: 実行後にセッション ID が _session_ids に保存される."""
+        engine = _make_engine(tmp_path)
+        session_meta_line = (
+            b'{"timestamp":"2026-05-31T00:00:00Z","type":"session_meta",'
+            b'"payload":{"id":"aaaaaaaa-0000-0000-0000-000000000001"}}\n'
+        )
+        mock_proc = AsyncMock()
+        mock_proc.returncode = 0
+        mock_proc.communicate = AsyncMock(return_value=(session_meta_line, b""))
+
+        with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
+            await engine.run(peer="@alice", prompt="hello")
+
+        assert engine._session_ids.get("@alice") == "aaaaaaaa-0000-0000-0000-000000000001"
+
+    @pytest.mark.asyncio
+    async def test_run_uses_resume_on_second_call(self, tmp_path: Path) -> None:
+        """issue #79: 2 回目の呼び出しでは exec resume <session_id> が使われる."""
+        engine = _make_engine(tmp_path)
+        sid = "bbbbbbbb-0000-0000-0000-000000000002"
+        session_meta_line = (
+            f'{{"type":"session_meta","payload":{{"id":"{sid}"}}}}\n'
+        ).encode()
+
+        mock_proc = AsyncMock()
+        mock_proc.returncode = 0
+        mock_proc.communicate = AsyncMock(return_value=(session_meta_line, b""))
+
+        captured_cmds: list[tuple] = []
+
+        async def _fake_exec(*args, **kwargs):
+            captured_cmds.append(args)
+            return mock_proc
+
+        with patch("asyncio.create_subprocess_exec", side_effect=_fake_exec):
+            # 1st call: new session
+            await engine.run(peer="@alice", prompt="first")
+            # 2nd call: should use resume
+            await engine.run(peer="@alice", prompt="second")
+
+        assert len(captured_cmds) == 2
+        first_cmd = captured_cmds[0]
+        second_cmd = captured_cmds[1]
+        # 1st: codex exec -s ...
+        assert "resume" not in first_cmd
+        # 2nd: codex exec resume <sid> ...
+        assert "resume" in second_cmd
+        assert sid in second_cmd
+
+    @pytest.mark.asyncio
+    async def test_session_id_in_result(self, tmp_path: Path) -> None:
+        """issue #79: EngineResult.session_id にセッション ID が入る."""
+        engine = _make_engine(tmp_path)
+        sid = "cccccccc-0000-0000-0000-000000000003"
+        stdout = f'{{"type":"session_meta","payload":{{"id":"{sid}"}}}}\n'.encode()
+
+        mock_proc = AsyncMock()
+        mock_proc.returncode = 0
+        mock_proc.communicate = AsyncMock(return_value=(stdout, b""))
+
+        with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
+            result = await engine.run(peer="@alice", prompt="hello")
+
+        assert result.session_id == sid
+
+
+# ---------- _extract_session_id ----------
+
+
+class TestExtractSessionId:
+    """_extract_session_id のユニットテスト (issue #79)."""
+
+    def test_extracts_id_from_session_meta(self) -> None:
+        stdout = (
+            '{"type":"session_meta","payload":{"id":"019e5218-142c-74d0-aae3-9c681465eb80"}}\n'
+            '{"type":"event","payload":{}}\n'
+        )
+        assert _extract_session_id(stdout) == "019e5218-142c-74d0-aae3-9c681465eb80"
+
+    def test_extracts_id_with_extra_fields(self) -> None:
+        stdout = (
+            '{"timestamp":"2026-05-31T00:00:00Z","type":"session_meta",'
+            '"payload":{"id":"aaaaaaaa-0000-0000-0000-000000000001","cwd":"/tmp"}}\n'
+        )
+        assert _extract_session_id(stdout) == "aaaaaaaa-0000-0000-0000-000000000001"
+
+    def test_returns_none_when_no_session_meta(self) -> None:
+        stdout = '{"type":"event","payload":{}}\n'
+        assert _extract_session_id(stdout) is None
+
+    def test_returns_none_on_empty_stdout(self) -> None:
+        assert _extract_session_id("") is None
+
+    def test_returns_none_on_non_json(self) -> None:
+        assert _extract_session_id("not json output\nmore text\n") is None
+
+    def test_returns_first_session_meta(self) -> None:
+        """複数の session_meta がある場合は最初のものを返す."""
+        stdout = (
+            '{"type":"session_meta","payload":{"id":"first-id"}}\n'
+            '{"type":"session_meta","payload":{"id":"second-id"}}\n'
+        )
+        assert _extract_session_id(stdout) == "first-id"
+
+    def test_skips_malformed_lines(self) -> None:
+        """途中に壊れた JSON があっても後続の session_meta を見つける."""
+        stdout = (
+            'not-json\n'
+            '{"type":"session_meta","payload":{"id":"valid-id"}}\n'
+        )
+        assert _extract_session_id(stdout) == "valid-id"
