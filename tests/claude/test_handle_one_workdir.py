@@ -17,6 +17,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from agent_hub_bridges._common.journal import Journal
 from agent_hub_bridges.claude.worker import _ActivityTracker, _handle_one
 
 # ---------- helpers ----------
@@ -27,6 +28,11 @@ def _make_config(workdir: Path) -> MagicMock:
     cfg.workdir = workdir
     cfg.user = "bridge-claude"
     return cfg
+
+
+def _make_journal(tmp_path: Path) -> Journal:
+    """テスト用 Journal (tmp_path に保存)。"""
+    return Journal("test-bridge", base_dir=tmp_path / "journals")
 
 
 def _make_msg(sender: str = "@alice") -> MagicMock:
@@ -77,7 +83,7 @@ class TestWorkdirMissing:
         config = _make_config(missing)
         tracker = _ActivityTracker()
 
-        await _handle_one(hub, claude, msg, config, tracker)
+        await _handle_one(hub, claude, msg, config, tracker, _make_journal(tmp_path))
 
         claude.query.assert_not_called()
 
@@ -93,7 +99,7 @@ class TestWorkdirMissing:
         config = _make_config(missing)
         tracker = _ActivityTracker()
 
-        await _handle_one(hub, claude, msg, config, tracker)
+        await _handle_one(hub, claude, msg, config, tracker, _make_journal(tmp_path))
 
         hub.send.assert_called_once()
         call_kwargs = hub.send.call_args.kwargs
@@ -114,7 +120,7 @@ class TestWorkdirMissing:
         tracker = _ActivityTracker()
 
         with caplog.at_level(logging.ERROR, logger="agent_hub_bridges.claude.worker"):
-            await _handle_one(hub, claude, msg, config, tracker)
+            await _handle_one(hub, claude, msg, config, tracker, _make_journal(tmp_path))
 
         assert "workdir does not exist" in caplog.text.lower() or "workdir" in caplog.text
 
@@ -130,7 +136,7 @@ class TestWorkdirMissing:
         config = _make_config(missing)
         tracker = _ActivityTracker()
 
-        await _handle_one(hub, claude, msg, config, tracker)
+        await _handle_one(hub, claude, msg, config, tracker, _make_journal(tmp_path))
 
         # receive_response が呼ばれていない (= early return 確認)
         claude.receive_response.assert_not_called()
@@ -149,7 +155,7 @@ class TestWorkdirMissing:
         tracker = _ActivityTracker()
 
         # should not raise
-        await _handle_one(hub, claude, msg, config, tracker)
+        await _handle_one(hub, claude, msg, config, tracker, _make_journal(tmp_path))
 
     @pytest.mark.asyncio
     async def test_file_instead_of_dir_treated_as_missing(
@@ -167,7 +173,7 @@ class TestWorkdirMissing:
         config = _make_config(file_path)
         tracker = _ActivityTracker()
 
-        await _handle_one(hub, claude, msg, config, tracker)
+        await _handle_one(hub, claude, msg, config, tracker, _make_journal(tmp_path))
 
         claude.query.assert_not_called()
 
@@ -191,7 +197,7 @@ class TestWorkdirPresent:
 
         _fmt_patch = "agent_hub_bridges.claude.worker.format_peer_message_prompt"
         with patch(_fmt_patch, return_value="prompt"):
-            await _handle_one(hub, claude, msg, config, tracker)
+            await _handle_one(hub, claude, msg, config, tracker, _make_journal(tmp_path))
 
         claude.query.assert_called_once()
 
@@ -208,6 +214,6 @@ class TestWorkdirPresent:
 
         _fmt_patch = "agent_hub_bridges.claude.worker.format_peer_message_prompt"
         with patch(_fmt_patch, return_value="prompt"):
-            await _handle_one(hub, claude, msg, config, tracker)
+            await _handle_one(hub, claude, msg, config, tracker, _make_journal(tmp_path))
 
         hub.send.assert_not_called()
