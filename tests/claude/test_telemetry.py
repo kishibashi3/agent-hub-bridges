@@ -462,9 +462,6 @@ class TestSpanContextInjection:
         caused_by_id = "550e8400-e29b-41d4-a716-446655440000"
         sent_msg_id = "cafebabe-dead-beef-1234-567890abcdef"
 
-        # Capture span via context manager override
-        captured_spans: list = []
-
         from opentelemetry.sdk.trace.export import SimpleSpanProcessor
         from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
             InMemorySpanExporter,
