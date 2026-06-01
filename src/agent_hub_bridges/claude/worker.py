@@ -719,8 +719,13 @@ async def _handle_one(
         if isinstance(sdk_msg, AssistantMessage):
             tracker.mark_active()
             # issue #92: send_message tool_use_id を追跡する。
+            # 完全一致で "mcp__agent-hub__send_message" のみを対象にする
+            # (部分一致だと将来追加されるツールで誤検知するリスクがある — reviewer Minor)。
             for block in sdk_msg.content:
-                if isinstance(block, ToolUseBlock) and "send_message" in block.name:
+                if (
+                    isinstance(block, ToolUseBlock)
+                    and block.name == "mcp__agent-hub__send_message"
+                ):
                     _send_msg_tool_ids.add(block.id)
         elif isinstance(sdk_msg, UserMessage):
             # issue #92: 最初の成功した send_message 結果から送信 msg_id を取得。
