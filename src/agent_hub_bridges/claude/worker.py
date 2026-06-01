@@ -49,6 +49,7 @@ from agent_hub_bridges._common.reconnect import run_with_reconnect
 from agent_hub_bridges.claude.claude_runner import ClaudeRunner
 from agent_hub_bridges.claude.config import Config
 from agent_hub_bridges.claude.cursor import load_cursor, save_cursor
+from agent_hub_bridges.claude.telemetry import configure as configure_telemetry
 from agent_hub_bridges.claude.telemetry import emit_span
 
 logger = logging.getLogger(__name__)
@@ -343,6 +344,10 @@ async def run_worker(config: Config) -> None:
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         stream=sys.stderr,
     )
+
+    # issue #96: telemetry service.name を @handle 名に設定する。
+    # _get_tracer() の遅延初期化より前に呼ぶ必要があるため、 run_worker 先頭で設定する。
+    configure_telemetry(service_name=f"@{config.user}")
 
     logger.info(
         "Starting agent-hub-bridge-claude as @%s (workdir=%s, tenant=%s, model=%s)",

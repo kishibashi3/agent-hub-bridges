@@ -550,3 +550,78 @@ class TestNoEnvMutation:
 
         # ユーザーの値が変わっていないこと
         assert os.environ.get("OTEL_EXPORTER_OTLP_PROTOCOL") == "http/protobuf"
+
+
+# ---------- service.name 設定 (issue #96) ----------
+
+
+class TestServiceNameConfig:
+    """issue #96: configure() による service.name 設定と TracerProvider への反映を確認する。
+
+    otelite ダッシュボードで ``Service: unknown_service`` になっていた問題の修正。
+    ``configure(service_name=f"@{config.user}")`` を ``run_worker`` 先頭で呼ぶことで
+    ``Resource({"service.name": "@<handle>"})`` が ``TracerProvider`` に渡される。
+    """
+
+    def setup_method(self) -> None:
+        telemetry.reset_for_testing()
+
+    def test_default_service_name_is_bridge_claude(self) -> None:
+        """configure() 未呼び出し時の _SERVICE_NAME デフォルト値は 'bridge-claude'。"""
+        assert telemetry._SERVICE_NAME == "bridge-claude"
+
+    def test_configure_sets_service_name(self) -> None:
+        """configure() で _SERVICE_NAME が指定値に更新される。"""
+        telemetry.configure(service_name="@planner")
+        assert telemetry._SERVICE_NAME == "@planner"
+
+    def test_reset_for_testing_resets_service_name(self) -> None:
+        """reset_for_testing() で _SERVICE_NAME がデフォルト値にリセットされる。"""
+        telemetry.configure(service_name="@reviewer")
+        telemetry.reset_for_testing()
+        assert telemetry._SERVICE_NAME == "bridge-claude"
+
+    def test_tracer_provider_receives_resource_with_configured_service_name(
+        self, monkeypatch
+    ) -> None:
+        """configure() 後に _get_tracer() を呼ぶと TracerProvider に service.name が渡る。"""
+        monkeypatch.setenv("AGENT_HUB_TELEMETRY_URL", "http://localhost:4318")
+        telemetry.configure(service_name="@bridge-test")
+
+        with (
+            patch("opentelemetry.sdk.trace.TracerProvider") as mock_provider_cls,
+            patch(
+                "opentelemetry.exporter.otlp.proto.http.trace_exporter.OTLPSpanExporter"
+            ),
+            patch("opentelemetry.sdk.trace.export.BatchSpanProcessor"),
+            patch("opentelemetry.trace.set_tracer_provider"),
+            patch("opentelemetry.trace.get_tracer", return_value=MagicMock()),
+        ):
+            telemetry._get_tracer()
+
+        call_kwargs = mock_provider_cls.call_args.kwargs
+        assert "resource" in call_kwargs
+        resource = call_kwargs["resource"]
+        assert resource.attributes.get("service.name") == "@bridge-test"
+
+    def test_default_service_name_used_when_not_configured(
+        self, monkeypatch
+    ) -> None:
+        """configure() 未呼び出し時は 'bridge-claude' が service.name として使われる。"""
+        monkeypatch.setenv("AGENT_HUB_TELEMETRY_URL", "http://localhost:4318")
+        # configure() を呼ばない
+
+        with (
+            patch("opentelemetry.sdk.trace.TracerProvider") as mock_provider_cls,
+            patch(
+                "opentelemetry.exporter.otlp.proto.http.trace_exporter.OTLPSpanExporter"
+            ),
+            patch("opentelemetry.sdk.trace.export.BatchSpanProcessor"),
+            patch("opentelemetry.trace.set_tracer_provider"),
+            patch("opentelemetry.trace.get_tracer", return_value=MagicMock()),
+        ):
+            telemetry._get_tracer()
+
+        call_kwargs = mock_provider_cls.call_args.kwargs
+        resource = call_kwargs["resource"]
+        assert resource.attributes.get("service.name") == "bridge-claude"
