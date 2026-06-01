@@ -1,4 +1,4 @@
-"""OTLP span emit for bridge-claude (issue #90).
+"""OTLP span emit for bridge-claude (issue #90, #92).
 
 ``AGENT_HUB_TELEMETRY_URL`` が未設定の場合は全操作がサイレント skip (opt-in)。
 設定されている場合は OTLP/HTTP (`Content-Type: application/x-protobuf`) で span emit する。
@@ -11,8 +11,19 @@
   将来の SDK バージョンアップ、または `requests.Session` ベースのカスタム
   exporter への差し替えを検討する。
 
+**span 文脈 (issue #92)**:
+  ``caused_by_id`` (= 受信した ``IncomingMessage.id``) を
+  ``parent_span_id`` (64bit hex) として設定。
+  ``sent_msg_id`` (= ``send_message`` 返却の ``id`` フィールド) を
+  ``span_id`` (64bit hex) として設定。
+  UUID → 64bit hex 変換: UUID の先頭 16 hex 文字 (= 高位 64bit) を使う。
+
+  これにより otelite 上で caused_by の連鎖が trace の親子関係として見えるようになる。
+  ``root_message_id`` が bridge に届かないため各ホップは別 trace_id だが、
+  ``parent_span_id`` → ``span_id`` の連鎖で辿れる (1 ホップずつ)。
+
 span 属性 (GenAI semantic conventions + custom):
-  - ``msg_id``: agent-hub message ID (custom)
+  - ``msg_id``: 受信した agent-hub message ID (caused_by_id; custom)
   - ``gen_ai.request.model``: model name
   - ``gen_ai.usage.input_tokens``: input tokens
   - ``gen_ai.usage.output_tokens``: output tokens
@@ -32,15 +43,116 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# module-level singleton: TracerProvider / Tracer の遅延初期化。
+# module-level singletons: TracerProvider / Tracer / IdGenerator の遅延初期化。
 # None   = 未初期化 or 初期化済みだが無効 (URL 未設定 / import 失敗)。
-# object = 有効な opentelemetry Tracer インスタンス。
+# object = 有効な opentelemetry Tracer / _FixedNextSpanIdGenerator インスタンス。
 #
 # スレッド安全性: bridge-claude は asyncio single-threaded で動作するため
 # GIL を超えた concurrent write は発生しない。複数スレッドから呼ぶ場合は
 # Lock を追加すること。
 _tracer: Any = None
 _TRACER_INIT: bool = False
+_id_generator: Any = None  # _FixedNextSpanIdGenerator | None (issue #92)
+
+
+# ---------------------------------------------------------------------------
+# UUID → OTel ID 変換ユーティリティ (issue #92)
+# ---------------------------------------------------------------------------
+
+
+def _uuid_to_span_id_int(uuid_str: str) -> int:
+    """UUID 文字列を 64-bit 整数に変換する (先頭 16 hex 文字 = 高位 64bit を使用).
+
+    OTel の span_id / parent_span_id は 64bit。UUID は 128bit なので
+    先頭 16 hex 文字 (= 高位 64bit) を int に変換する。
+
+    Args:
+        uuid_str: ハイフン付き or なしの UUID 文字列
+                  (例: ``"550e8400-e29b-41d4-a716-446655440000"``)。
+
+    Returns:
+        64-bit unsigned integer。
+
+    Raises:
+        ValueError: hex 文字列が 32 文字でない (= 有効な UUID ではない)。
+    """
+    hex_str = uuid_str.replace("-", "")
+    if len(hex_str) != 32:
+        raise ValueError(
+            f"Invalid UUID hex length ({len(hex_str)} chars): {uuid_str!r}"
+        )
+    return int(hex_str[:16], 16)
+
+
+def _uuid_to_trace_id_int(uuid_str: str) -> int:
+    """UUID 文字列を 128-bit 整数に変換する (OTel trace_id 用).
+
+    Args:
+        uuid_str: ハイフン付き or なしの UUID 文字列。
+
+    Returns:
+        128-bit unsigned integer。
+
+    Raises:
+        ValueError: hex 文字列が 32 文字でない (= 有効な UUID ではない)。
+    """
+    hex_str = uuid_str.replace("-", "")
+    if len(hex_str) != 32:
+        raise ValueError(
+            f"Invalid UUID hex length ({len(hex_str)} chars): {uuid_str!r}"
+        )
+    return int(hex_str, 16)
+
+
+# ---------------------------------------------------------------------------
+# _FixedNextSpanIdGenerator (issue #92)
+# ---------------------------------------------------------------------------
+
+
+class _FixedNextSpanIdGenerator:
+    """OTel IdGenerator の duck-type 互換実装: 次の span_id に固定値を one-shot 注入できる.
+
+    ``set_next_span_id(span_id)`` で予約した値を次の ``generate_span_id()`` で返す。
+    一度返したら ``None`` にリセットして以降はランダム生成に戻る (one-shot)。
+
+    用途 (issue #92): send_message が返した ``id`` を OTel span の span_id として
+    設定するために、span 開始直前に ``set_next_span_id`` で予約しておく。
+
+    スレッド安全性: bridge-claude は asyncio single-threaded なので Lock 不要。
+    duck-type で ``opentelemetry.sdk.trace.id_generator.IdGenerator`` の
+    ``generate_span_id()`` / ``generate_trace_id()`` インタフェースを満たす。
+    """
+
+    def __init__(self) -> None:
+        self._next_span_id: int | None = None
+        self._inner: Any = None  # RandomIdGenerator, lazy init
+
+    def _ensure_inner(self) -> None:
+        if self._inner is None:
+            from opentelemetry.sdk.trace.id_generator import RandomIdGenerator
+
+            self._inner = RandomIdGenerator()
+
+    def set_next_span_id(self, span_id: int) -> None:
+        """次の ``generate_span_id()`` が返す値を予約する (one-shot)."""
+        self._next_span_id = span_id
+
+    def generate_span_id(self) -> int:
+        if self._next_span_id is not None:
+            sid = self._next_span_id
+            self._next_span_id = None
+            return sid
+        self._ensure_inner()
+        return self._inner.generate_span_id()
+
+    def generate_trace_id(self) -> int:
+        self._ensure_inner()
+        return self._inner.generate_trace_id()
+
+
+# ---------------------------------------------------------------------------
+# Tracer 初期化
+# ---------------------------------------------------------------------------
 
 
 def _get_tracer() -> Any:
@@ -48,8 +160,11 @@ def _get_tracer() -> Any:
 
     URL 未設定または opentelemetry 未インストールの場合は None。
     初回呼び出しのみ初期化処理を走らせる (以降はキャッシュを返す)。
+
+    issue #92: ``_FixedNextSpanIdGenerator`` を TracerProvider に注入して
+    ``_id_generator`` モジュールグローバルに保持する。
     """
-    global _tracer, _TRACER_INIT
+    global _tracer, _TRACER_INIT, _id_generator
     if _TRACER_INIT:
         return _tracer
 
@@ -76,10 +191,14 @@ def _get_tracer() -> Any:
         # otelite は protobuf を受け付け、スパンは正常に届くことを実機確認済み。
         endpoint = url.rstrip("/") + "/v1/traces"
         exporter = OTLPSpanExporter(endpoint=endpoint)
-        provider = TracerProvider()
+
+        # issue #92: span_id を sent_msg_id に固定するためのカスタム IdGenerator。
+        id_gen = _FixedNextSpanIdGenerator()
+        provider = TracerProvider(id_generator=id_gen)
         provider.add_span_processor(BatchSpanProcessor(exporter))
         trace.set_tracer_provider(provider)
         _tracer = trace.get_tracer("agent-hub-bridge-claude")
+        _id_generator = id_gen
         logger.info(
             "[telemetry] OTLP span emit enabled: endpoint=%s (protobuf)",
             endpoint,
@@ -98,25 +217,41 @@ def _get_tracer() -> Any:
     return _tracer
 
 
+# ---------------------------------------------------------------------------
+# emit_span
+# ---------------------------------------------------------------------------
+
+
 def emit_span(
     *,
-    msg_id: str,
+    caused_by_id: str,
+    sent_msg_id: str | None = None,
     model: str,
     result: ResultMessage,
 ) -> None:
-    """send_message 1 呼び出し後に OTLP span を emit する (issue #90).
+    """send_message 1 呼び出し後に OTLP span を emit する (issue #90, #92).
 
     ``AGENT_HUB_TELEMETRY_URL`` 未設定時はサイレント skip (opt-in)。
     例外は ``logger.warning`` で読み捨て — span 失敗で bridge を停止させない。
 
     Args:
-        msg_id: 受信した agent-hub message の UUID (``IncomingMessage.id``)。
-        model:  呼び出した Claude model (例: ``"claude-sonnet-4-6"``)。
-        result: ``receive_response()`` が最後に返す ``ResultMessage``。
-                ``result.usage`` から token counts を取り出す。
+        caused_by_id: 受信した agent-hub message の UUID (``IncomingMessage.id``)。
+                      OTel ``parent_span_id`` (64bit hex) として設定される。
+        sent_msg_id:  ``send_message`` ツールが返した ``id`` フィールドの UUID。
+                      OTel ``span_id`` (64bit hex) として設定される。
+                      ``None`` の場合は span_id をランダム生成にフォールバックする。
+        model:        呼び出した Claude model (例: ``"claude-sonnet-4-6"``)。
+        result:       ``receive_response()`` が最後に返す ``ResultMessage``。
+                      ``result.usage`` から token counts を取り出す。
+
+    OTel span 文脈 (issue #92):
+        - ``parent_span_id``: ``_uuid_to_span_id_int(caused_by_id)`` (受信 msg.id の高位 64bit)
+        - ``span_id``:        ``_uuid_to_span_id_int(sent_msg_id)`` (送信 msg.id の高位 64bit)
+        - ``trace_id``:       ``_uuid_to_trace_id_int(caused_by_id)`` (受信 msg.id 全 128bit)
+          ※ 各ホップで trace_id は変わるが parent_span_id → span_id の連鎖で辿れる。
 
     Span 属性 (ドット区切り — アンダースコア不可):
-        - ``msg_id``: agent-hub message ID
+        - ``msg_id``: 受信した agent-hub message ID (caused_by_id)
         - ``gen_ai.request.model``: model name
         - ``gen_ai.usage.input_tokens``: input tokens (int)
         - ``gen_ai.usage.output_tokens``: output tokens (int)
@@ -137,8 +272,33 @@ def emit_span(
         output_tokens: int = int(usage.get("output_tokens") or 0)
         cache_read: int = int(usage.get("cache_read_input_tokens") or 0)
 
-        with tracer.start_as_current_span("bridge_claude.send_message") as span:
-            span.set_attribute("msg_id", msg_id)
+        # issue #92: span_id を sent_msg_id に固定 (IdGenerator one-shot 注入)。
+        if sent_msg_id is not None and _id_generator is not None:
+            _id_generator.set_next_span_id(_uuid_to_span_id_int(sent_msg_id))
+
+        # issue #92: parent_span_id / trace_id を caused_by_id から構築して
+        # OTel context として注入する。
+        from opentelemetry.trace import (
+            NonRecordingSpan,
+            SpanContext,
+            TraceFlags,
+            set_span_in_context,
+        )
+
+        parent_span_id_int = _uuid_to_span_id_int(caused_by_id)
+        trace_id_int = _uuid_to_trace_id_int(caused_by_id)
+        parent_ctx = SpanContext(
+            trace_id=trace_id_int,
+            span_id=parent_span_id_int,
+            is_remote=True,
+            trace_flags=TraceFlags(TraceFlags.SAMPLED),
+        )
+        ctx = set_span_in_context(NonRecordingSpan(parent_ctx))
+
+        with tracer.start_as_current_span(
+            "bridge_claude.send_message", context=ctx
+        ) as span:
+            span.set_attribute("msg_id", caused_by_id)
             span.set_attribute("gen_ai.request.model", model)
             span.set_attribute("gen_ai.usage.input_tokens", input_tokens)
             span.set_attribute("gen_ai.usage.output_tokens", output_tokens)
@@ -148,9 +308,10 @@ def emit_span(
             )
 
         logger.debug(
-            "[telemetry] span emitted: msg_id=%s model=%s "
+            "[telemetry] span emitted: caused_by=%s sent=%s model=%s "
             "in=%d out=%d cache_read=%d is_error=%s",
-            msg_id,
+            caused_by_id,
+            sent_msg_id,
             model,
             input_tokens,
             output_tokens,
@@ -167,6 +328,7 @@ def reset_for_testing() -> None:
     テスト間で状態が漏れないようにするため、各テストの setUp / tearDown で呼ぶ。
     本番コードでは使用しない。
     """
-    global _tracer, _TRACER_INIT
+    global _tracer, _TRACER_INIT, _id_generator
     _tracer = None
     _TRACER_INIT = False
+    _id_generator = None

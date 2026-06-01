@@ -705,6 +705,12 @@ async def _handle_one(
     await claude.query(prompt, session_id=msg.sender)
 
     result_msg: ResultMessage | None = None
+    # issue #92: send_message ツール結果から送信 msg_id を捕捉する。
+    # AssistantMessage の ToolUseBlock で send_message 呼び出しを検知し、
+    # 対応する UserMessage の ToolResultBlock から {"id": "<uuid>"} を取得する。
+    sent_msg_id: str | None = None
+    _send_msg_tool_ids: set[str] = set()
+
     async for sdk_msg in claude.receive_response():
         formatted = _format_message(sdk_msg)
         logger.info(formatted)
@@ -712,12 +718,50 @@ async def _handle_one(
         # でアクティビティを記録する。stdout スニフと同等の外部観測ベース。
         if isinstance(sdk_msg, AssistantMessage):
             tracker.mark_active()
+            # issue #92: send_message tool_use_id を追跡する。
+            for block in sdk_msg.content:
+                if isinstance(block, ToolUseBlock) and "send_message" in block.name:
+                    _send_msg_tool_ids.add(block.id)
+        elif isinstance(sdk_msg, UserMessage):
+            # issue #92: 最初の成功した send_message 結果から送信 msg_id を取得。
+            if sent_msg_id is None:
+                blocks = (
+                    sdk_msg.content
+                    if isinstance(sdk_msg.content, list)
+                    else [sdk_msg.content]
+                )
+                for block in blocks:
+                    if (
+                        isinstance(block, ToolResultBlock)
+                        and block.tool_use_id in _send_msg_tool_ids
+                        and not block.is_error
+                        and block.content
+                    ):
+                        try:
+                            content_str = (
+                                block.content
+                                if isinstance(block.content, str)
+                                else block.content[0].get("text", "")  # type: ignore[union-attr]
+                            )
+                            sent_msg_id = json.loads(content_str).get("id")
+                        except (
+                            json.JSONDecodeError,
+                            AttributeError,
+                            IndexError,
+                            KeyError,
+                        ):
+                            pass
         if isinstance(sdk_msg, ResultMessage):
             result_msg = sdk_msg
             break
 
-    # issue #90: OTLP span emit (opt-in — AGENT_HUB_TELEMETRY_URL で有効化)。
+    # issue #90 + #92: OTLP span emit (opt-in — AGENT_HUB_TELEMETRY_URL で有効化)。
     # ResultMessage が得られた場合のみ span を emit する。
     # emit_span は内部で例外を読み捨てるため bridge を停止させない。
     if result_msg is not None:
-        emit_span(msg_id=msg.id, model=config.model, result=result_msg)
+        emit_span(
+            caused_by_id=msg.id,
+            sent_msg_id=sent_msg_id,
+            model=config.model,
+            result=result_msg,
+        )
