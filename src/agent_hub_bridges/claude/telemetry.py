@@ -53,6 +53,7 @@ logger = logging.getLogger(__name__)
 _tracer: Any = None
 _TRACER_INIT: bool = False
 _id_generator: Any = None  # _FixedNextSpanIdGenerator | None (issue #92)
+_SERVICE_NAME: str = "bridge-claude"  # issue #96: OTel service.name (set via configure())
 
 
 # ---------------------------------------------------------------------------
@@ -151,6 +152,30 @@ class _FixedNextSpanIdGenerator:
 
 
 # ---------------------------------------------------------------------------
+# configure (issue #96)
+# ---------------------------------------------------------------------------
+
+
+def configure(*, service_name: str) -> None:
+    """Telemetry の service.name を設定する (issue #96).
+
+    otelite ダッシュボードで ``Service: unknown_service`` になる問題を解消するため、
+    ``TracerProvider`` に ``Resource({"service.name": service_name})`` を設定する。
+
+    **呼び出しタイミング**: ``_get_tracer()`` の遅延初期化より前に呼ぶこと。
+    初期化後に呼んでも ``TracerProvider`` は再作成されないため反映されない。
+    ``run_worker()`` の先頭で ``configure(service_name=f"@{config.user}")``
+    を呼ぶのが想定使用例。
+
+    Args:
+        service_name: OTel ``service.name`` に設定する文字列
+                      (例: ``"@bridge-claude"``, ``"@planner"``)。
+    """
+    global _SERVICE_NAME
+    _SERVICE_NAME = service_name
+
+
+# ---------------------------------------------------------------------------
 # Tracer 初期化
 # ---------------------------------------------------------------------------
 
@@ -193,8 +218,12 @@ def _get_tracer() -> Any:
         exporter = OTLPSpanExporter(endpoint=endpoint)
 
         # issue #92: span_id を sent_msg_id に固定するためのカスタム IdGenerator。
+        # issue #96: service.name を @handle 名に設定する (Resource 経由)。
+        from opentelemetry.sdk.resources import Resource
+
         id_gen = _FixedNextSpanIdGenerator()
-        provider = TracerProvider(id_generator=id_gen)
+        resource = Resource({"service.name": _SERVICE_NAME})
+        provider = TracerProvider(id_generator=id_gen, resource=resource)
         provider.add_span_processor(BatchSpanProcessor(exporter))
         trace.set_tracer_provider(provider)
         _tracer = trace.get_tracer("agent-hub-bridge-claude")
@@ -328,7 +357,8 @@ def reset_for_testing() -> None:
     テスト間で状態が漏れないようにするため、各テストの setUp / tearDown で呼ぶ。
     本番コードでは使用しない。
     """
-    global _tracer, _TRACER_INIT, _id_generator
+    global _tracer, _TRACER_INIT, _id_generator, _SERVICE_NAME
     _tracer = None
     _TRACER_INIT = False
     _id_generator = None
+    _SERVICE_NAME = "bridge-claude"
