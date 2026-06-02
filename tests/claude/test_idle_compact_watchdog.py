@@ -258,3 +258,105 @@ class TestWatchAndCompact:
 
         # move_on_after は cancel を呑むので Exception は不要
         assert not cancelled
+
+
+# ---------------------------------------------------------------------------
+# watch_and_compact_lazy — 非同期テスト (issue #91)
+# ---------------------------------------------------------------------------
+
+
+class TestWatchAndCompactLazy:
+    """watch_and_compact_lazy() の非同期挙動。
+
+    runner が None の間はタイマーをリセットしてスキップし、
+    runner が確定してから watch_and_compact と同じ動作をする。
+    check_interval_s=0.001 を渡して sleep をほぼゼロにし、
+    anyio.move_on_after() で強制終了する。
+    """
+
+    @pytest.mark.asyncio
+    async def test_skips_when_runner_none(self) -> None:
+        """get_runner() が None を返す間は /compact を呼ばない。"""
+        wd = _IdleCompactWatchdog(idle_s=0.0, check_interval_s=0.001)
+        wd._last_activity = time.monotonic() - 1000.0  # definitely idle
+
+        with anyio.move_on_after(0.05):
+            await wd.watch_and_compact_lazy(lambda: None)
+
+        # runner が None なので compact は一度も呼ばれない。
+        # (ランナーが提供されないため query の呼び出し先がない)
+
+    @pytest.mark.asyncio
+    async def test_resets_timer_while_runner_none(self) -> None:
+        """runner=None の間はタイマーをリセットし続ける。"""
+        wd = _IdleCompactWatchdog(idle_s=9999.0, check_interval_s=0.001)
+        # 意図的に far-past に設定
+        wd._last_activity = time.monotonic() - 10000.0
+
+        with anyio.move_on_after(0.05):
+            await wd.watch_and_compact_lazy(lambda: None)
+
+        # 少なくとも 1 回 reset() が呼ばれ、_last_activity が更新されているはず
+        assert wd.idle_elapsed() < 1.0
+
+    @pytest.mark.asyncio
+    async def test_compact_called_when_runner_present_and_idle(self) -> None:
+        """runner が確定済み + idle → /compact が呼ばれる。"""
+        wd = _IdleCompactWatchdog(idle_s=0.0, check_interval_s=0.001)
+        wd._last_activity = time.monotonic() - 1000.0
+
+        runner = _make_mock_runner()
+
+        with anyio.move_on_after(0.05):
+            await wd.watch_and_compact_lazy(lambda: runner)
+
+        runner.client.query.assert_awaited_with("/compact")
+        assert runner.client.query.await_count >= 1
+
+    @pytest.mark.asyncio
+    async def test_compact_not_called_when_runner_present_not_idle(self) -> None:
+        """runner 確定済み + idle でない → /compact を呼ばない。"""
+        wd = _IdleCompactWatchdog(idle_s=9999.0, check_interval_s=0.001)
+        runner = _make_mock_runner()
+
+        with anyio.move_on_after(0.05):
+            await wd.watch_and_compact_lazy(lambda: runner)
+
+        runner.client.query.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_transitions_none_to_runner(self) -> None:
+        """runner が途中で None → 実体 に変わった場合に compact が走る。"""
+        wd = _IdleCompactWatchdog(idle_s=0.0, check_interval_s=0.001)
+        wd._last_activity = time.monotonic() - 1000.0
+
+        runner = _make_mock_runner()
+        # 最初は None, 一定時間後にセット
+        holder: list = [None]
+
+        async def _set_runner_later() -> None:
+            await anyio.sleep(0.02)
+            holder[0] = runner
+
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(_set_runner_later)
+            with anyio.move_on_after(0.1):
+                await wd.watch_and_compact_lazy(lambda: holder[0])
+            tg.cancel_scope.cancel()
+
+        # runner が確定してから compact が呼ばれるはず
+        assert runner.client.query.await_count >= 1
+
+    @pytest.mark.asyncio
+    async def test_cancellation_propagates(self) -> None:
+        """cancel が伝播して watch_and_compact_lazy が正常終了する。"""
+        wd = _IdleCompactWatchdog(idle_s=9999.0, check_interval_s=0.001)
+
+        cancelled = False
+        try:
+            with anyio.move_on_after(0.02):
+                await wd.watch_and_compact_lazy(lambda: None)
+        except Exception:
+            cancelled = True
+
+        assert not cancelled

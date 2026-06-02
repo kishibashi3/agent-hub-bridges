@@ -206,6 +206,12 @@ def build_traceparent(msg_id: str) -> str:
     Raises:
         ValueError: ``msg_id`` が有効な UUID でない場合 (``_uuid_to_trace_id_int``
             / ``_uuid_to_span_id_int`` が raise する)。
+
+    Note:
+        nil UUID (``00000000-0000-0000-0000-000000000000``) を渡すと
+        trace_id / span_id がすべてゼロになり W3C 仕様上無効な traceparent になる。
+        agent-hub の msg_id は UUID v4 前提であるため実害はないが、
+        nil UUID を渡さないよう呼び出し側で保証すること。
     """
     trace_id_int = _uuid_to_trace_id_int(msg_id)
     span_id_int = _uuid_to_span_id_int(msg_id)

@@ -49,7 +49,11 @@ from agent_hub_bridges._common.reconnect import run_with_reconnect
 from agent_hub_bridges.claude.claude_runner import ClaudeRunner
 from agent_hub_bridges.claude.config import Config
 from agent_hub_bridges.claude.cursor import load_cursor, save_cursor
-from agent_hub_bridges.claude.telemetry import build_traceparent, emit_span
+from agent_hub_bridges.claude.telemetry import (
+    build_traceparent,
+    emit_span,
+    make_subprocess_telemetry_env,
+)
 from agent_hub_bridges.claude.telemetry import configure as configure_telemetry
 
 logger = logging.getLogger(__name__)
@@ -337,9 +341,8 @@ def _build_options(
     ``claude_code.llm_request`` span が受信 msg_id の trace の子 span になる。
     """
     env: dict[str, str] = {}
+    # None (未設定) と "" (空文字) をいずれも「telemetry 無効」として扱う (opt-in)。
     if telemetry_url:
-        from agent_hub_bridges.claude.telemetry import make_subprocess_telemetry_env
-
         env.update(make_subprocess_telemetry_env(telemetry_url))
         if traceparent:
             env["TRACEPARENT"] = traceparent
@@ -622,10 +625,30 @@ async def _run_hub_session(
                     # issue #60: メッセージ受信で idle タイマーをリセット。
                     compact_watchdog.reset()
 
-                    # issue #91: runner を最初のメッセージ受信時に lazy init する。
-                    # 最初の msg.id から TRACEPARENT を生成して subprocess の
-                    # trace root に設定する。hub reconnect ごとに新しい runner を作る。
+                    # issue #37: 再起動後の重複 dispatch 防止。cursor-skip を
+                    # runner lazy init より先に置くことで、replay メッセージ
+                    # (= cursor 以前) の msg.id が trace root にならないようにする。
+                    # NOTE: ISO-8601 UTC 文字列 (例: "2026-05-21T12:00:00.000Z") は
+                    # 辞書順比較 (<=) が時系列順と一致する。これは server が
+                    # 一貫した形式を返す前提。server 実装を変えた場合は
+                    # `datetime.fromisoformat()` でのパースに切り替えること。
+                    if cursor is not None and msg.timestamp <= cursor:
+                        logger.info(
+                            "Skipping already-seen message %s (ts=%s, cursor=%s)",
+                            msg.id,
+                            msg.timestamp,
+                            cursor,
+                        )
+                        await hub.ack(msg.id)
+                        continue
+
+                    # issue #91: runner を最初の非 cursor-skip メッセージ受信時に
+                    # lazy init する。最初の msg.id から TRACEPARENT を生成して
+                    # subprocess の trace root に設定する。hub reconnect ごとに
+                    # 新しい runner を作り直す。
                     if runner_holder[0] is None:
+                        # None (未設定) と "" (空文字) をいずれも「telemetry 無効」
+                        # として扱う (opt-in)。
                         traceparent = (
                             build_traceparent(msg.id) if telemetry_url else None
                         )
@@ -644,22 +667,6 @@ async def _run_hub_session(
                             msg.id,
                             traceparent or "none",
                         )
-
-                    # issue #37: 再起動後の重複 dispatch 防止。
-                    # cursor 以前 (cursor と同値含む) は skip + ack して次へ。
-                    # NOTE: ISO-8601 UTC 文字列 (例: "2026-05-21T12:00:00.000Z") は
-                    # 辞書順比較 (<=) が時系列順と一致する。これは server が
-                    # 一貫した形式を返す前提。server 実装を変えた場合は
-                    # `datetime.fromisoformat()` でのパースに切り替えること。
-                    if cursor is not None and msg.timestamp <= cursor:
-                        logger.info(
-                            "Skipping already-seen message %s (ts=%s, cursor=%s)",
-                            msg.id,
-                            msg.timestamp,
-                            cursor,
-                        )
-                        await hub.ack(msg.id)
-                        continue
 
                     await _handle_one(
                         hub, runner_holder[0].client, msg, config, tracker, journal
