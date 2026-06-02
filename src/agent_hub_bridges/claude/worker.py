@@ -503,6 +503,116 @@ async def run_worker(config: Config) -> None:
             tg.start_soon(compact_watchdog.watch_and_compact_lazy, lambda: runner_holder[0])
 
 
+async def _startup_catchup(
+    hub: HubSession,
+    config: Config,
+    mcp_config_path: Path,
+    runner_holder: list[ClaudeRunner | None],
+    cursor: str | None,
+    tracker: _ActivityTracker,
+    gap_tracker: _MessageGapTracker,
+    compact_watchdog: _IdleCompactWatchdog,
+    journal: Journal,
+    router: CommandRouter,
+    *,
+    telemetry_url: str | None = None,
+) -> str | None:
+    """bridge 起動時に未読メッセージを処理する startup catchup (issue #98).
+
+    hub 接続確立後・inbox ループ開始前に ``get_messages`` を呼んで、
+    オフライン中に届いたメッセージを処理する。
+
+    コマンドメッセージ (body が "/" で始まる) は inbox ループの
+    CommandRouter に委ねるためスキップする (= ack しない)。
+    自然言語メッセージは通常の inbox ループと同じ処理を行う:
+
+      1. ``gap_tracker.on_message_received()`` でメッセージ間隔を計測
+      2. ``compact_watchdog.reset()`` で idle タイマーをリセット
+      3. runner が未初期化なら lazy init (issue #91 と同じロジック)
+      4. cursor check: 既読メッセージは ack して skip
+      5. ``_handle_one()`` でメッセージ処理
+      6. ``save_cursor()`` + ``hub.ack()`` で状態永続化
+
+    ``get_unread()`` 呼び出しが失敗した場合は WARNING を記録して
+    cursor をそのまま返す (graceful degradation)。
+
+    Returns:
+        処理後の cursor 値。未読がなければ入力 cursor をそのまま返す。
+    """
+    try:
+        msgs = await hub.get_unread()
+    except Exception:
+        logger.warning(
+            "[startup-catchup] get_messages failed; skipping startup catchup",
+            exc_info=True,
+        )
+        return cursor
+
+    # コマンドメッセージ (/ で始まる) は inbox loop の CommandRouter に委ねる
+    nl_msgs = [m for m in msgs if not m.body.strip().startswith("/")]
+    cmd_count = len(msgs) - len(nl_msgs)
+
+    if not nl_msgs:
+        if cmd_count > 0:
+            logger.info(
+                "[startup-catchup] %d command message(s) only; deferred to inbox loop",
+                cmd_count,
+            )
+        else:
+            logger.info("[startup-catchup] no unread messages at startup")
+        return cursor
+
+    logger.info(
+        "[startup-catchup] %d unread message(s) to process (+ %d command(s) deferred)",
+        len(nl_msgs),
+        cmd_count,
+    )
+
+    for msg in nl_msgs:
+        gap_tracker.on_message_received(msg.id)
+        compact_watchdog.reset()
+
+        # issue #91: runner を最初のメッセージ受信時に lazy init する。
+        # 最初の msg.id から TRACEPARENT を生成して subprocess の trace root に設定する。
+        if runner_holder[0] is None:
+            traceparent = build_traceparent(msg.id) if telemetry_url else None
+            opts = _build_options(
+                config,
+                mcp_config_path,
+                traceparent=traceparent,
+                telemetry_url=telemetry_url,
+            )
+            _runner = ClaudeRunner(opts)
+            await _runner.__aenter__()
+            runner_holder[0] = _runner
+            router.set_restart_handler(_runner.restart)
+            logger.info(
+                "[startup-catchup] Claude session started (first msg: %s, traceparent: %s)",
+                msg.id,
+                traceparent or "none",
+            )
+
+        # issue #37: 再起動後の重複 dispatch 防止。
+        # cursor 以前 (cursor と同値含む) は skip + ack して次へ。
+        if cursor is not None and msg.timestamp <= cursor:
+            logger.info(
+                "[startup-catchup] skipping seen message %s (ts=%s, cursor=%s)",
+                msg.id,
+                msg.timestamp,
+                cursor,
+            )
+            await hub.ack(msg.id)
+            continue
+
+        await _handle_one(hub, runner_holder[0].client, msg, config, tracker, journal)
+        # process → save_cursor → ack の順 (crash-safe)。
+        save_cursor(config.user, msg.timestamp)
+        cursor = msg.timestamp
+        await hub.ack(msg.id)
+
+    return cursor
+
+
 async def _run_hub_session(
     config: Config,
     mcp_config_path: Path,
@@ -608,6 +718,22 @@ async def _run_hub_session(
         # issue #183 / agent-hub#168: 前回クラッシュ時の pending entry を replay。
         # hub 接続確立直後に行うことで、送信先が online になってから再送できる。
         await _replay_journal(hub, journal)
+
+        # issue #98: bridge 起動時に未読メッセージを処理する。
+        # オフライン中に届いたメッセージを inbox ループ開始前に処理する。
+        cursor = await _startup_catchup(
+            hub,
+            config,
+            mcp_config_path,
+            runner_holder,
+            cursor,
+            tracker,
+            gap_tracker,
+            compact_watchdog,
+            journal,
+            router,
+            telemetry_url=telemetry_url,
+        )
 
         try:
             async with hub.inbox(commands=router) as messages:
