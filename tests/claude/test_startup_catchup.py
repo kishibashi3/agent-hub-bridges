@@ -212,17 +212,14 @@ class TestCursorFilter:
     async def test_older_message_is_acked_and_skipped(self, tmp_path: Path) -> None:
         """cursor より古いメッセージ → ack + _handle_one 呼ばれない。
 
-        runner init はカーソルチェックの前に走る (inbox ループと同じ順序) ので
-        ClaudeRunner と _build_options をモックする必要がある。
+        cursor-skip は runner lazy init より先に行われるため、
+        ClaudeRunner や _build_options のモックは不要。
         """
         old_msg = _make_msg(timestamp="2026-05-01T08:00:00.000Z")
         hub = _make_hub(msgs=[old_msg])
         tracker, gap_tracker, compact_watchdog = _make_trackers()
-        runner = _mock_runner()
 
-        with patch(_HANDLE_PATCH) as mock_handle, \
-             patch(_BUILD_OPTIONS_PATCH, return_value=MagicMock()), \
-             patch(_RUNNER_PATCH, return_value=runner):
+        with patch(_HANDLE_PATCH) as mock_handle:
             await _startup_catchup(
                 hub,
                 _make_config(tmp_path),
@@ -246,11 +243,8 @@ class TestCursorFilter:
         msg = _make_msg(timestamp=ts)
         hub = _make_hub(msgs=[msg])
         tracker, gap_tracker, compact_watchdog = _make_trackers()
-        runner = _mock_runner()
 
-        with patch(_HANDLE_PATCH) as mock_handle, \
-             patch(_BUILD_OPTIONS_PATCH, return_value=MagicMock()), \
-             patch(_RUNNER_PATCH, return_value=runner):
+        with patch(_HANDLE_PATCH) as mock_handle:
             result = await _startup_catchup(
                 hub,
                 _make_config(tmp_path),

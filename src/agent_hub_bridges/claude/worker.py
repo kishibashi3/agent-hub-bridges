@@ -569,10 +569,23 @@ async def _startup_catchup(
     )
 
     for msg in nl_msgs:
+        # issue #37: 再起動後の重複 dispatch 防止。cursor-skip を
+        # runner lazy init より先に置くことで、replay メッセージ
+        # (= cursor 以前) の msg.id が trace root にならないようにする。
+        if cursor is not None and msg.timestamp <= cursor:
+            logger.info(
+                "[startup-catchup] skipping seen message %s (ts=%s, cursor=%s)",
+                msg.id,
+                msg.timestamp,
+                cursor,
+            )
+            await hub.ack(msg.id)
+            continue
+
         gap_tracker.on_message_received(msg.id)
         compact_watchdog.reset()
 
-        # issue #91: runner を最初のメッセージ受信時に lazy init する。
+        # issue #91: runner を最初の非 cursor-skip メッセージ受信時に lazy init する。
         # 最初の msg.id から TRACEPARENT を生成して subprocess の trace root に設定する。
         if runner_holder[0] is None:
             traceparent = build_traceparent(msg.id) if telemetry_url else None
@@ -591,18 +604,6 @@ async def _startup_catchup(
                 msg.id,
                 traceparent or "none",
             )
-
-        # issue #37: 再起動後の重複 dispatch 防止。
-        # cursor 以前 (cursor と同値含む) は skip + ack して次へ。
-        if cursor is not None and msg.timestamp <= cursor:
-            logger.info(
-                "[startup-catchup] skipping seen message %s (ts=%s, cursor=%s)",
-                msg.id,
-                msg.timestamp,
-                cursor,
-            )
-            await hub.ack(msg.id)
-            continue
 
         await _handle_one(hub, runner_holder[0].client, msg, config, tracker, journal)
         # process → save_cursor → ack の順 (crash-safe)。
