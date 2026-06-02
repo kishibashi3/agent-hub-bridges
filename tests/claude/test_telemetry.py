@@ -499,6 +499,76 @@ class TestSpanContextInjection:
         )
 
 
+# ---------- build_traceparent / make_subprocess_telemetry_env (issue #91) ----------
+
+
+class TestBuildTraceparent:
+    """build_traceparent() の W3C traceparent 文字列生成を確認する (issue #91)."""
+
+    _UUID = "550e8400-e29b-41d4-a716-446655440000"
+
+    def test_build_traceparent_format(self) -> None:
+        """format は ``00-{32hex}-{16hex}-01`` であること。"""
+        result = telemetry.build_traceparent(self._UUID)
+        parts = result.split("-", 3)
+        assert parts[0] == "00"
+        # trace_id: 32 hex chars (128 bits)
+        assert len(parts[1]) == 32
+        assert all(c in "0123456789abcdef" for c in parts[1])
+        # span_id: 16 hex chars (64 bits)
+        assert len(parts[2]) == 16
+        assert all(c in "0123456789abcdef" for c in parts[2])
+        # flags
+        assert parts[3] == "01"
+
+    def test_build_traceparent_trace_id(self) -> None:
+        """trace_id 32 hex = UUID の全 128bit。"""
+        result = telemetry.build_traceparent(self._UUID)
+        trace_id_hex = result.split("-")[1]
+        expected = int("550e8400e29b41d4a716446655440000", 16)
+        assert int(trace_id_hex, 16) == expected
+
+    def test_build_traceparent_span_id(self) -> None:
+        """span_id 16 hex = UUID の高位 64bit。"""
+        result = telemetry.build_traceparent(self._UUID)
+        span_id_hex = result.split("-")[2]
+        expected = int("550e8400e29b41d4", 16)
+        assert int(span_id_hex, 16) == expected
+
+    def test_build_traceparent_sampled_flag(self) -> None:
+        """flags フィールドは ``01`` (sampled) であること。"""
+        result = telemetry.build_traceparent(self._UUID)
+        assert result.endswith("-01")
+
+    def test_build_traceparent_invalid_uuid(self) -> None:
+        """不正な UUID 文字列は ValueError を raise する。"""
+        with pytest.raises(ValueError):
+            telemetry.build_traceparent("not-a-valid-uuid")
+
+
+class TestMakeSubprocessTelemetryEnv:
+    """make_subprocess_telemetry_env() の env dict 生成を確認する (issue #91)."""
+
+    def test_make_subprocess_telemetry_env_keys(self) -> None:
+        """4 つの必須キーが全て含まれること。"""
+        env = telemetry.make_subprocess_telemetry_env("http://localhost:4318")
+        assert "CLAUDE_CODE_ENABLE_TELEMETRY" in env
+        assert "CLAUDE_CODE_ENHANCED_TELEMETRY_BETA" in env
+        assert "OTEL_TRACES_EXPORTER" in env
+        assert "OTEL_EXPORTER_OTLP_ENDPOINT" in env
+
+    def test_make_subprocess_telemetry_env_endpoint(self) -> None:
+        """指定した URL が ``OTEL_EXPORTER_OTLP_ENDPOINT`` に設定されること。"""
+        url = "http://localhost:4318"
+        env = telemetry.make_subprocess_telemetry_env(url)
+        assert env["OTEL_EXPORTER_OTLP_ENDPOINT"] == url
+
+    def test_make_subprocess_telemetry_env_trailing_slash(self) -> None:
+        """末尾の ``/`` が除去されること。"""
+        env = telemetry.make_subprocess_telemetry_env("http://localhost:4318/")
+        assert env["OTEL_EXPORTER_OTLP_ENDPOINT"] == "http://localhost:4318"
+
+
 # ---------- env var 非汚染の確認 ----------
 
 

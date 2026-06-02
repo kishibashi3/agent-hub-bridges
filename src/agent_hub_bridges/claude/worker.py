@@ -25,7 +25,7 @@ import os
 import sys
 import tempfile
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import anyio
@@ -49,8 +49,8 @@ from agent_hub_bridges._common.reconnect import run_with_reconnect
 from agent_hub_bridges.claude.claude_runner import ClaudeRunner
 from agent_hub_bridges.claude.config import Config
 from agent_hub_bridges.claude.cursor import load_cursor, save_cursor
+from agent_hub_bridges.claude.telemetry import build_traceparent, emit_span
 from agent_hub_bridges.claude.telemetry import configure as configure_telemetry
-from agent_hub_bridges.claude.telemetry import emit_span
 
 logger = logging.getLogger(__name__)
 
@@ -228,6 +228,52 @@ class _IdleCompactWatchdog:
                 # 失敗・skip 問わずタイマーをリセットし、tight retry を防ぐ
                 self.reset()
 
+    async def watch_and_compact_lazy(
+        self, get_runner: Callable[[], ClaudeRunner | None]
+    ) -> None:
+        """background task 版 (lazy runner 対応): runner が None の間はスキップする.
+
+        issue #91: runner が lazily 初期化される構造に対応するため、
+        ``get_runner()`` callable を受け取る。``None`` を返す間はタイマーを
+        リセットしてスキップする。runner が確定してから ``watch_and_compact``
+        と同じ動作をする。
+
+        ``get_runner``: ``ClaudeRunner | None`` を返す callable。
+        """
+        cancelled_exc = anyio.get_cancelled_exc_class()
+        while True:
+            await anyio.sleep(self._check_interval_s)
+            runner = get_runner()
+            if runner is None:
+                # Runner not yet initialized — reset timer to avoid spurious compact
+                self.reset()
+                continue
+            if not self.is_idle():
+                continue
+            elapsed = self.idle_elapsed()
+            logger.info(
+                "[auto-compact] idle %.0fs >= threshold %.0fs, running /compact ...",
+                elapsed,
+                self._idle_s,
+            )
+            try:
+                client = runner.client  # RuntimeError if restarting
+                await client.query("/compact")
+                async for sdk_msg in client.receive_response():
+                    if isinstance(sdk_msg, ResultMessage):
+                        break
+                logger.info("[auto-compact] /compact completed, timer reset")
+            except cancelled_exc:
+                raise
+            except RuntimeError:
+                logger.debug(
+                    "[auto-compact] runner not ready (restart in progress), skip"
+                )
+            except Exception as exc:
+                logger.warning("[auto-compact] /compact failed: %s", exc)
+            finally:
+                self.reset()
+
 
 @contextlib.contextmanager
 def _mcp_config_file(config: Config) -> Iterator[Path]:
@@ -267,7 +313,13 @@ def _mcp_config_file(config: Config) -> Iterator[Path]:
             path.unlink()
 
 
-def _build_options(config: Config, mcp_config_path: Path) -> ClaudeAgentOptions:
+def _build_options(
+    config: Config,
+    mcp_config_path: Path,
+    *,
+    traceparent: str | None = None,
+    telemetry_url: str | None = None,
+) -> ClaudeAgentOptions:
     """Claude SDK の options を組み立てる.
 
     bridge は「入力経路を agent-hub に差し替えただけの Claude Code」を目指す。
@@ -278,7 +330,20 @@ def _build_options(config: Config, mcp_config_path: Path) -> ClaudeAgentOptions:
     SDK の alias resolver が ``claude-sonnet-4-6`` のような family alias を
     受け付ける (= 同 family の point release で勝手に上がる) ので、 bridge は
     date-pinned form ではなく family alias を default にしてる。
+
+    issue #91: ``telemetry_url`` が設定されている場合、Claude CLI subprocess の
+    OTel telemetry を有効化する環境変数を ``ClaudeAgentOptions.env`` に設定する。
+    ``traceparent`` が渡された場合はさらに ``TRACEPARENT`` を env に注入することで、
+    ``claude_code.llm_request`` span が受信 msg_id の trace の子 span になる。
     """
+    env: dict[str, str] = {}
+    if telemetry_url:
+        from agent_hub_bridges.claude.telemetry import make_subprocess_telemetry_env
+
+        env.update(make_subprocess_telemetry_env(telemetry_url))
+        if traceparent:
+            env["TRACEPARENT"] = traceparent
+
     return ClaudeAgentOptions(
         # str (file path) として渡し、 CLI 引数経由の PAT 露出を回避
         mcp_servers=str(mcp_config_path),
@@ -293,6 +358,7 @@ def _build_options(config: Config, mcp_config_path: Path) -> ClaudeAgentOptions:
         # user-level の plugin marketplace は読まない (agent-hub-plugin の
         # auto-engage を防ぐ)。 workdir の CLAUDE.md / .claude/settings は読む。
         setting_sources=["project", "local"],
+        **({"env": env} if env else {}),
     )
 
 
@@ -334,10 +400,12 @@ async def run_worker(config: Config) -> None:
 
     `_common.reconnect.run_with_reconnect` で outer reconnect loop を回す。
     `ClaudeRunner` (= peer ごとの会話履歴を持つ `ClaudeSDKClient` の in-place
-    restart 対応 wrapper) は hub 再接続に巻き込まず 外側で 1 度だけ立ち上げ、
-    再接続時も同じインスタンスを使い回す。 ``/restart`` (= agent-hub-sdk M6,
-    issue #26) を受信した時だけ runner 内部で ``ClaudeSDKClient`` の close +
-    open が走り、 conversation history が リセットされる。
+    restart 対応 wrapper) は hub session の最初のメッセージ受信時に lazily 初期化する
+    (issue #91)。これにより最初の msg.id から TRACEPARENT を生成して subprocess の
+    trace root に設定できる。hub reconnect 時は新しい runner を作り直す。
+
+    ``/restart`` (= agent-hub-sdk M6, issue #26) を受信した時は runner 内部で
+    ``ClaudeSDKClient`` の close + open が走り、 conversation history が リセットされる。
     """
     logging.basicConfig(
         level=logging.INFO,
@@ -378,58 +446,71 @@ async def run_worker(config: Config) -> None:
     # reconnect をまたいで 1 インスタンスを共有する (= cursor / tracker と同様)。
     compact_watchdog = _IdleCompactWatchdog()
 
+    # issue #91: AGENT_HUB_TELEMETRY_URL が設定されている場合、subprocess の OTel を有効化。
+    telemetry_url = os.environ.get("AGENT_HUB_TELEMETRY_URL")
+
+    # issue #91: runner は hub session の最初のメッセージ受信時に lazily 初期化する。
+    # runner_holder[0] が None の間は runner 未初期化。
+    # hub reconnect ごとに新しい runner を作り直す (_run_hub_session 内で tear down)。
+    runner_holder: list[ClaudeRunner | None] = [None]
+
     with _mcp_config_file(config) as mcp_config_path:
-        options = _build_options(config, mcp_config_path)
+        async def _one_session() -> None:
+            nonlocal cursor
+            cursor = await _run_hub_session(
+                config,
+                mcp_config_path,
+                runner_holder,
+                cursor,
+                tracker,
+                gap_tracker,
+                compact_watchdog,
+                journal,
+                telemetry_url=telemetry_url,
+            )
 
-        async with ClaudeRunner(options) as runner:
-            logger.info("Claude session started, awaiting hub session...")
+        async def _on_circuit_open() -> None:
+            """circuit breaker 発火時コールバック: dead marker + inventory 更新.
 
-            async def _one_session() -> None:
-                nonlocal cursor
-                cursor = await _run_hub_session(
-                    config, runner, cursor, tracker, gap_tracker, compact_watchdog, journal
-                )
+            issue #82: hub 接続が N 回連続で失敗したら graceful shutdown する前に
+            dead marker file を書いて operator の stop-bridge.sh --dead に通知する。
+            BRIDGE_INVENTORY が設定されていれば inventory に lost-hub エントリを追記。
+            """
+            pid = os.getpid()
+            write_dead_marker(config.user)
+            write_lost_hub_to_inventory(config.user, pid=pid)
+            logger.critical(
+                "[circuit-breaker] ALERT: @%s hub connection lost. "
+                "Dead marker written. Run 'stop-bridge.sh --dead' to clean up.",
+                config.user,
+            )
 
-            async def _on_circuit_open() -> None:
-                """circuit breaker 発火時コールバック: dead marker + inventory 更新.
+        async def _run_reconnect() -> None:
+            await run_with_reconnect(
+                _one_session,
+                name="hub session (claude)",
+                on_circuit_open=_on_circuit_open,
+            )
 
-                issue #82: hub 接続が N 回連続で失敗したら graceful shutdown する前に
-                dead marker file を書いて operator の stop-bridge.sh --dead に通知する。
-                BRIDGE_INVENTORY が設定されていれば inventory に lost-hub エントリを追記。
-                """
-                pid = os.getpid()
-                write_dead_marker(config.user)
-                write_lost_hub_to_inventory(config.user, pid=pid)
-                logger.critical(
-                    "[circuit-breaker] ALERT: @%s hub connection lost. "
-                    "Dead marker written. Run 'stop-bridge.sh --dead' to clean up.",
-                    config.user,
-                )
-
-            async def _run_reconnect() -> None:
-                await run_with_reconnect(
-                    _one_session,
-                    name="hub session (claude)",
-                    on_circuit_open=_on_circuit_open,
-                )
-
-            # issue #60: compact_watchdog を run_with_reconnect と並走させる。
-            # どちらか一方が例外で死ぬともう一方も cancel される (anyio 標準挙動)。
-            # compact_watchdog.watch_and_compact は内部で Exception を読み捨てるため
-            # 通常は例外を出さない。
-            async with anyio.create_task_group() as tg:
-                tg.start_soon(_run_reconnect)
-                tg.start_soon(compact_watchdog.watch_and_compact, runner)
+        # issue #60: compact_watchdog を run_with_reconnect と並走させる。
+        # issue #91: runner が lazy init される構造に対応するため watch_and_compact_lazy を使う。
+        # どちらか一方が例外で死ぬともう一方も cancel される (anyio 標準挙動)。
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(_run_reconnect)
+            tg.start_soon(compact_watchdog.watch_and_compact_lazy, lambda: runner_holder[0])
 
 
 async def _run_hub_session(
     config: Config,
-    runner: ClaudeRunner,
+    mcp_config_path: Path,
+    runner_holder: list[ClaudeRunner | None],
     cursor: str | None,
     tracker: _ActivityTracker,
     gap_tracker: _MessageGapTracker,
     compact_watchdog: _IdleCompactWatchdog,
     journal: Journal,
+    *,
+    telemetry_url: str | None = None,
 ) -> str | None:
     """1 回分の hub session を最後まで走らせる.
 
@@ -464,19 +545,22 @@ async def _run_hub_session(
       1. ``_handle_one`` で LLM に流す (process)
       2. ``save_cursor`` で timestamp を永続化
       3. ``hub.ack`` でサーバに既読通知
+
+    issue #91: ``ClaudeRunner`` は最初のメッセージ受信時に lazily 初期化する
+    (``runner_holder[0]`` が None の間は未初期化)。最初の msg.id から
+    TRACEPARENT を生成して subprocess の trace root に設定する。
+    hub session 終了 (inbox loop 脱出) 時に runner を tear down する。
+
     Returns: セッション終了時点の cursor 値 (= 上位 reconnect loop で持ち越す)。
     """
     # CommandRouter (= agent-hub-sdk M2.1) を built-in commands ON で構築。
-    # ``/restart`` (M6) の callback として runner.restart を注入する。 SDK の
-    # ``/restart`` built-in は 2-stage reply (= "restarting..." → callback
-    # → "ready") を orchestrate するので、 本 bridge 側 では reply 文字列の
-    # 管理も不要 (= SDK 内 hardcoded)。
+    # issue #91: runner が lazy init されるため、初期化前は router への restart
+    # handler 注入を遅延する。最初のメッセージ受信時に set_restart_handler を呼ぶ。
     #
     # issue #46: ``/status`` をカスタムハンドラで上書き。SDK 組み込みの
     # ``hub._status`` (= 常 "idle") ではなく ``_ActivityTracker.status()``
     # を返す。これにより ASSISTANT: ログが直近流れていれば "busy" を返せる。
     router = CommandRouter()
-    router.set_restart_handler(runner.restart)
 
     @router.command("/status", description="bridge state (idle/busy)")
     async def _status_handler(
@@ -522,44 +606,77 @@ async def _run_hub_session(
         # hub 接続確立直後に行うことで、送信先が online になってから再送できる。
         await _replay_journal(hub, journal)
 
-        async with hub.inbox(commands=router) as messages:
-            async for msg in messages:
-                # ``commands=router`` が ``/ping`` / ``/status`` / ``/help``
-                # / ``/restart`` を SDK 側 で intercept 済。 ここに到達する
-                # のは natural language メッセージのみ。 ``runner.client``
-                # は per-message に読むので、 ``/restart`` で session が
-                # re-spawn された直後の次メッセージから新 client が使われる。
+        try:
+            async with hub.inbox(commands=router) as messages:
+                async for msg in messages:
+                    # ``commands=router`` が ``/ping`` / ``/status`` / ``/help``
+                    # / ``/restart`` を SDK 側 で intercept 済。 ここに到達する
+                    # のは natural language メッセージのみ。 ``runner.client``
+                    # は per-message に読むので、 ``/restart`` で session が
+                    # re-spawn された直後の次メッセージから新 client が使われる。
 
-                # issue #26: safety-net 発火推定。cursor skip より前に呼ぶことで
-                # 重複 skip されたメッセージも含む全着信 gap を計測する。
-                gap_tracker.on_message_received(msg.id)
+                    # issue #26: safety-net 発火推定。cursor skip より前に呼ぶことで
+                    # 重複 skip されたメッセージも含む全着信 gap を計測する。
+                    gap_tracker.on_message_received(msg.id)
 
-                # issue #60: メッセージ受信で idle タイマーをリセット。
-                compact_watchdog.reset()
+                    # issue #60: メッセージ受信で idle タイマーをリセット。
+                    compact_watchdog.reset()
 
-                # issue #37: 再起動後の重複 dispatch 防止。
-                # cursor 以前 (cursor と同値含む) は skip + ack して次へ。
-                # NOTE: ISO-8601 UTC 文字列 (例: "2026-05-21T12:00:00.000Z") は
-                # 辞書順比較 (<=) が時系列順と一致する。これは server が
-                # 一貫した形式を返す前提。server 実装を変えた場合は
-                # `datetime.fromisoformat()` でのパースに切り替えること。
-                if cursor is not None and msg.timestamp <= cursor:
-                    logger.info(
-                        "Skipping already-seen message %s (ts=%s, cursor=%s)",
-                        msg.id,
-                        msg.timestamp,
-                        cursor,
+                    # issue #91: runner を最初のメッセージ受信時に lazy init する。
+                    # 最初の msg.id から TRACEPARENT を生成して subprocess の
+                    # trace root に設定する。hub reconnect ごとに新しい runner を作る。
+                    if runner_holder[0] is None:
+                        traceparent = (
+                            build_traceparent(msg.id) if telemetry_url else None
+                        )
+                        opts = _build_options(
+                            config,
+                            mcp_config_path,
+                            traceparent=traceparent,
+                            telemetry_url=telemetry_url,
+                        )
+                        _runner = ClaudeRunner(opts)
+                        await _runner.__aenter__()
+                        runner_holder[0] = _runner
+                        router.set_restart_handler(_runner.restart)
+                        logger.info(
+                            "Claude session started (first msg: %s, traceparent: %s)",
+                            msg.id,
+                            traceparent or "none",
+                        )
+
+                    # issue #37: 再起動後の重複 dispatch 防止。
+                    # cursor 以前 (cursor と同値含む) は skip + ack して次へ。
+                    # NOTE: ISO-8601 UTC 文字列 (例: "2026-05-21T12:00:00.000Z") は
+                    # 辞書順比較 (<=) が時系列順と一致する。これは server が
+                    # 一貫した形式を返す前提。server 実装を変えた場合は
+                    # `datetime.fromisoformat()` でのパースに切り替えること。
+                    if cursor is not None and msg.timestamp <= cursor:
+                        logger.info(
+                            "Skipping already-seen message %s (ts=%s, cursor=%s)",
+                            msg.id,
+                            msg.timestamp,
+                            cursor,
+                        )
+                        await hub.ack(msg.id)
+                        continue
+
+                    await _handle_one(
+                        hub, runner_holder[0].client, msg, config, tracker, journal
                     )
+                    # process → save_cursor → ack の順 (crash-safe)。
+                    # save_cursor 後 ack 前にクラッシュしても、 再起動後に
+                    # cursor で skip されるので二重 dispatch にならない。
+                    save_cursor(config.user, msg.timestamp)
+                    cursor = msg.timestamp
                     await hub.ack(msg.id)
-                    continue
-
-                await _handle_one(hub, runner.client, msg, config, tracker, journal)
-                # process → save_cursor → ack の順 (crash-safe)。
-                # save_cursor 後 ack 前にクラッシュしても、 再起動後に
-                # cursor で skip されるので二重 dispatch にならない。
-                save_cursor(config.user, msg.timestamp)
-                cursor = msg.timestamp
-                await hub.ack(msg.id)
+        finally:
+            # issue #91: hub session 終了時に runner を tear down する。
+            # 次の hub session では新しい runner を作り直す。
+            _r = runner_holder[0]
+            if _r is not None:
+                runner_holder[0] = None
+                await _r.__aexit__(None, None, None)
 
     return cursor
 
