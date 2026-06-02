@@ -176,6 +176,79 @@ def configure(*, service_name: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# build_traceparent / make_subprocess_telemetry_env (issue #91)
+# ---------------------------------------------------------------------------
+
+
+def build_traceparent(msg_id: str) -> str:
+    """受信 msg_id から W3C traceparent 文字列を生成する (issue #91).
+
+    format: ``00-{trace_id_hex_32}-{span_id_hex_16}-01``
+
+    trace_id は ``_uuid_to_trace_id_int(msg_id)`` (UUID 全 128bit)。
+    parent_span_id は ``_uuid_to_span_id_int(msg_id)`` (UUID 高位 64bit)。
+    flags: ``01`` (sampled)。
+
+    生成した traceparent を ``ClaudeAgentOptions.env["TRACEPARENT"]`` に設定すると、
+    Claude CLI subprocess の ``claude_code.llm_request`` span が
+    この traceparent の子 span として OTLP に記録される。
+    ``subprocess_cli.py`` の ``connect()`` がこの値を process_env に注入する
+    (``ClaudeAgentOptions.env`` は auto-inject より優先)。
+
+    Args:
+        msg_id: agent-hub の受信 ``IncomingMessage.id`` (UUID 文字列)。
+
+    Returns:
+        W3C traceparent 文字列。例::
+
+            "00-550e8400e29b41d4a716446655440000-550e8400e29b41d4-01"
+
+    Raises:
+        ValueError: ``msg_id`` が有効な UUID でない場合 (``_uuid_to_trace_id_int``
+            / ``_uuid_to_span_id_int`` が raise する)。
+
+    Note:
+        nil UUID (``00000000-0000-0000-0000-000000000000``) を渡すと
+        trace_id / span_id がすべてゼロになり W3C 仕様上無効な traceparent になる。
+        agent-hub の msg_id は UUID v4 前提であるため実害はないが、
+        nil UUID を渡さないよう呼び出し側で保証すること。
+    """
+    trace_id_int = _uuid_to_trace_id_int(msg_id)
+    span_id_int = _uuid_to_span_id_int(msg_id)
+    return f"00-{trace_id_int:032x}-{span_id_int:016x}-01"
+
+
+def make_subprocess_telemetry_env(telemetry_url: str) -> dict[str, str]:
+    """Claude CLI subprocess に渡す OpenTelemetry 環境変数を返す (issue #91).
+
+    ``AGENT_HUB_TELEMETRY_URL`` が設定されている場合に ``_build_options()`` から
+    呼ばれ、Claude CLI の telemetry (``claude_code.llm_request`` span 等) を
+    有効化するための環境変数セットを返す。
+
+    Args:
+        telemetry_url: OTLP エクスポート先 URL (``AGENT_HUB_TELEMETRY_URL`` の値)。
+
+    Returns:
+        env dict::
+
+            {
+                "CLAUDE_CODE_ENABLE_TELEMETRY": "1",
+                "CLAUDE_CODE_ENHANCED_TELEMETRY_BETA": "1",
+                "OTEL_TRACES_EXPORTER": "otlp",
+                "OTEL_EXPORTER_OTLP_ENDPOINT": "<url>",
+            }
+
+        trailing ``/`` は URL から除去する。
+    """
+    return {
+        "CLAUDE_CODE_ENABLE_TELEMETRY": "1",
+        "CLAUDE_CODE_ENHANCED_TELEMETRY_BETA": "1",
+        "OTEL_TRACES_EXPORTER": "otlp",
+        "OTEL_EXPORTER_OTLP_ENDPOINT": telemetry_url.rstrip("/"),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Tracer 初期化
 # ---------------------------------------------------------------------------
 
