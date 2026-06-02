@@ -212,19 +212,21 @@ class TestCursorFilter:
     async def test_older_message_is_acked_and_skipped(self, tmp_path: Path) -> None:
         """cursor より古いメッセージ → ack + _handle_one 呼ばれない。
 
-        cursor-skip は runner lazy init より先に行われるため、
-        ClaudeRunner や _build_options のモックは不要。
+        cursor-skip は runner lazy init より先に行われるため:
+        - ClaudeRunner や _build_options のモックは不要
+        - cursor-skip されたメッセージでは runner_holder[0] が None のまま
         """
         old_msg = _make_msg(timestamp="2026-05-01T08:00:00.000Z")
         hub = _make_hub(msgs=[old_msg])
         tracker, gap_tracker, compact_watchdog = _make_trackers()
+        runner_holder: list = [None]
 
         with patch(_HANDLE_PATCH) as mock_handle:
             await _startup_catchup(
                 hub,
                 _make_config(tmp_path),
                 tmp_path / "mcp.json",
-                [None],
+                runner_holder,
                 "2026-05-01T12:00:00.000Z",  # cursor newer than msg
                 tracker,
                 gap_tracker,
@@ -235,21 +237,24 @@ class TestCursorFilter:
 
         mock_handle.assert_not_called()
         hub.ack.assert_called_once_with(old_msg.id)
+        # cursor-skip メッセージでは runner が初期化されない
+        assert runner_holder[0] is None
 
     @pytest.mark.asyncio
     async def test_exact_timestamp_match_is_skipped(self, tmp_path: Path) -> None:
-        """cursor と同じ timestamp のメッセージ → ack + スキップ。"""
+        """cursor と同じ timestamp のメッセージ → ack + スキップ。runner_holder は None のまま。"""
         ts = "2026-05-01T12:00:00.000Z"
         msg = _make_msg(timestamp=ts)
         hub = _make_hub(msgs=[msg])
         tracker, gap_tracker, compact_watchdog = _make_trackers()
+        runner_holder: list = [None]
 
         with patch(_HANDLE_PATCH) as mock_handle:
             result = await _startup_catchup(
                 hub,
                 _make_config(tmp_path),
                 tmp_path / "mcp.json",
-                [None],
+                runner_holder,
                 ts,
                 tracker,
                 gap_tracker,
@@ -261,6 +266,8 @@ class TestCursorFilter:
         mock_handle.assert_not_called()
         hub.ack.assert_called_once_with(msg.id)
         assert result == ts  # cursor unchanged
+        # cursor-skip メッセージでは runner が初期化されない
+        assert runner_holder[0] is None
 
 
 # ---------------------------------------------------------------------------
