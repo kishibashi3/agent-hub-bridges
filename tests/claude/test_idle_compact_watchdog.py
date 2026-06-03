@@ -2,11 +2,14 @@
 
 カバーするケース:
   - reset() / idle_elapsed() / is_idle() の基本挙動
+  - set_busy() / clear_busy() / is_processing() の基本挙動 (issue #102)
   - watch_and_compact(): idle 時に /compact を実行しタイマーリセット
   - watch_and_compact(): idle でなければ /compact を呼ばない
+  - watch_and_compact(): _processing == True の間は /compact をスキップ (issue #102)
   - watch_and_compact(): RuntimeError (runner restart 中) → skip + reset
   - watch_and_compact(): /compact 失敗 (Exception) → warning log + reset
   - watch_and_compact(): cancellation は外に伝播する
+  - watch_and_compact_lazy(): _processing == True の間は /compact をスキップ (issue #102)
 
 実装の都合上、watch_and_compact() は while True ループのため、
 anyio.move_on_after() で 1 イテレーション後に cancel する。
@@ -118,6 +121,26 @@ class TestIdleCompactWatchdogSync:
         # 直後は elapsed ≈ 0 < 60s
         assert not wd.is_idle()
 
+    # --- issue #102: set_busy / clear_busy / is_processing ---
+
+    def test_initial_not_processing(self) -> None:
+        """初期状態では is_processing() == False。"""
+        wd = _IdleCompactWatchdog(idle_s=60.0, check_interval_s=1.0)
+        assert not wd.is_processing()
+
+    def test_set_busy_makes_processing_true(self) -> None:
+        """set_busy() 後は is_processing() == True。"""
+        wd = _IdleCompactWatchdog(idle_s=60.0, check_interval_s=1.0)
+        wd.set_busy()
+        assert wd.is_processing()
+
+    def test_clear_busy_makes_processing_false(self) -> None:
+        """clear_busy() 後は is_processing() == False に戻る。"""
+        wd = _IdleCompactWatchdog(idle_s=60.0, check_interval_s=1.0)
+        wd.set_busy()
+        wd.clear_busy()
+        assert not wd.is_processing()
+
 
 # ---------------------------------------------------------------------------
 # デフォルト定数値確認
@@ -174,6 +197,41 @@ class TestWatchAndCompact:
             await wd.watch_and_compact(runner)
 
         runner.client.query.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_compact_skipped_when_processing(self) -> None:
+        """_processing == True の間は /compact を呼ばない (issue #102)。"""
+        wd = _IdleCompactWatchdog(idle_s=0.0, check_interval_s=0.001)
+        wd._last_activity = time.monotonic() - 1000.0  # definitely idle
+        wd.set_busy()  # simulate _handle_one in-progress
+        runner = _make_mock_runner()
+
+        with anyio.move_on_after(0.05):
+            await wd.watch_and_compact(runner)
+
+        # busy 中は compact を呼ばない
+        runner.client.query.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_compact_called_after_clear_busy(self) -> None:
+        """clear_busy() 後は再び /compact が呼ばれる (issue #102)。"""
+        wd = _IdleCompactWatchdog(idle_s=0.0, check_interval_s=0.001)
+        wd._last_activity = time.monotonic() - 1000.0  # definitely idle
+        wd.set_busy()
+        runner = _make_mock_runner()
+
+        async def _release_busy_later() -> None:
+            await anyio.sleep(0.02)
+            wd.clear_busy()
+
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(_release_busy_later)
+            with anyio.move_on_after(0.1):
+                await wd.watch_and_compact(runner)
+            tg.cancel_scope.cancel()
+
+        # clear_busy() 後に compact が実行されるはず
+        assert runner.client.query.await_count >= 1
 
     @pytest.mark.asyncio
     async def test_timer_reset_after_compact(self) -> None:
@@ -322,6 +380,20 @@ class TestWatchAndCompactLazy:
         with anyio.move_on_after(0.05):
             await wd.watch_and_compact_lazy(lambda: runner)
 
+        runner.client.query.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_compact_skipped_when_processing(self) -> None:
+        """_processing == True の間は /compact を呼ばない (issue #102)。"""
+        wd = _IdleCompactWatchdog(idle_s=0.0, check_interval_s=0.001)
+        wd._last_activity = time.monotonic() - 1000.0  # definitely idle
+        wd.set_busy()  # simulate _handle_one in-progress
+        runner = _make_mock_runner()
+
+        with anyio.move_on_after(0.05):
+            await wd.watch_and_compact_lazy(lambda: runner)
+
+        # busy 中は compact を呼ばない
         runner.client.query.assert_not_called()
 
     @pytest.mark.asyncio
