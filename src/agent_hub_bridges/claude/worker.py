@@ -168,6 +168,10 @@ class _IdleCompactWatchdog:
       - ``watch_and_compact(runner)`` を background task として起動する
         (``anyio.create_task_group`` で並走)。
 
+    NOTE: 実運用では ``run_worker`` が ``watch_and_compact_lazy`` を直接
+    起動する (lazy runner 初期化構造に対応するため)。``watch_and_compact``
+    はテスト・runner が確定している埋め込みシナリオ向け。
+
     ``idle_s`` のデフォルトは ``_COMPACT_IDLE_S`` (= ``BRIDGE_COMPACT_IDLE_MINUTES``
     環境変数、未設定なら 30 分)。テストでは小さな値を渡して動作を確認できる。
     ``check_interval_s`` のデフォルトは ``_COMPACT_CHECK_INTERVAL_S`` (60 秒)。

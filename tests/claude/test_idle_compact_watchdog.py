@@ -3,6 +3,7 @@
 カバーするケース:
   - reset() / idle_elapsed() / is_idle() の基本挙動
   - set_busy() / clear_busy() / is_processing() の基本挙動 (issue #102)
+  - set_busy() 後に例外が発生しても finally: clear_busy() で False に戻る (issue #102)
   - watch_and_compact(): idle 時に /compact を実行しタイマーリセット
   - watch_and_compact(): idle でなければ /compact を呼ばない
   - watch_and_compact(): _processing == True の間は /compact をスキップ (issue #102)
@@ -139,6 +140,29 @@ class TestIdleCompactWatchdogSync:
         wd = _IdleCompactWatchdog(idle_s=60.0, check_interval_s=1.0)
         wd.set_busy()
         wd.clear_busy()
+        assert not wd.is_processing()
+
+    def test_clear_busy_called_on_exception_via_finally(self) -> None:
+        """_handle_one が例外を送出しても finally: clear_busy() で False に戻る (issue #102).
+
+        worker.py の呼び出しパターンを再現:
+          compact_watchdog.set_busy()
+          try:
+              await _handle_one(...)  # raises
+          finally:
+              compact_watchdog.clear_busy()
+
+        stuck bug (is_processing() が True のまま残る) が起きないことを確認する。
+        """
+        wd = _IdleCompactWatchdog(idle_s=60.0, check_interval_s=1.0)
+        wd.set_busy()
+        assert wd.is_processing()
+        try:
+            raise RuntimeError("simulated _handle_one failure")
+        except RuntimeError:
+            pass
+        finally:
+            wd.clear_busy()
         assert not wd.is_processing()
 
 
