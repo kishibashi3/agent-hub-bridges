@@ -16,6 +16,8 @@
 
 from __future__ import annotations
 
+from typing import ClassVar
+
 import pytest
 
 from agent_hub_bridges.claude.blocking_commands import (
@@ -23,7 +25,6 @@ from agent_hub_bridges.claude.blocking_commands import (
     build_blocking_error_message,
     check_blocking_command,
 )
-
 
 # ---------------------------------------------------------------------------
 # check_blocking_command — パターン検出テスト
@@ -122,11 +123,11 @@ class TestCheckBlockingCommand:
         """tail -100f など combined flags も検出する。"""
         assert check_blocking_command("tail -100f /var/log/app.log") == "tail -f / --follow"
 
-    def test_tail_capital_F(self) -> None:
+    def test_tail_capital_f(self) -> None:
         """tail -F (follow-name モード) も検出する (Minor #2)。"""
         assert check_blocking_command("tail -F /var/log/app.log") == "tail -f / --follow"
 
-    def test_tail_capital_F_combined(self) -> None:
+    def test_tail_capital_f_combined(self) -> None:
         """tail -100F も検出する。"""
         assert check_blocking_command("tail -100F /var/log/app.log") == "tail -f / --follow"
 
@@ -208,7 +209,7 @@ class TestBuildBlockingErrorMessage:
 class TestBashPreToolUseHook:
     """bash_pre_tool_use_hook() の非同期挙動。"""
 
-    _CONTEXT: dict = {"signal": None}
+    _CONTEXT: ClassVar[dict] = {"signal": None}
 
     @pytest.mark.asyncio
     async def test_non_blocking_command_returns_empty_dict(self) -> None:
