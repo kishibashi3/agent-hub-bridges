@@ -34,6 +34,7 @@ from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
     ClaudeSDKClient,
+    HookMatcher,
     ResultMessage,
     SystemMessage,
     TextBlock,
@@ -46,6 +47,7 @@ from agent_hub_bridges._common.inventory import write_dead_marker, write_lost_hu
 from agent_hub_bridges._common.journal import Journal
 from agent_hub_bridges._common.prompt import format_peer_message_prompt
 from agent_hub_bridges._common.reconnect import run_with_reconnect
+from agent_hub_bridges.claude.blocking_commands import bash_pre_tool_use_hook
 from agent_hub_bridges.claude.claude_runner import ClaudeRunner
 from agent_hub_bridges.claude.config import Config
 from agent_hub_bridges.claude.cursor import load_cursor, save_cursor
@@ -408,6 +410,14 @@ def _build_options(
         # user-level の plugin marketplace は読まない (agent-hub-plugin の
         # auto-engage を防ぐ)。 workdir の CLAUDE.md / .claude/settings は読む。
         setting_sources=["project", "local"],
+        # issue #101: Bash ツール実行前にブロッキングコマンドを検出して拒否する。
+        # bypassPermissions では can_use_tool は呼ばれないため hooks を使う。
+        # hooks は permission mode に関わらず全 tool call の前に実行される。
+        hooks={
+            "PreToolUse": [
+                HookMatcher(matcher="Bash", hooks=[bash_pre_tool_use_hook]),
+            ],
+        },
         **({"env": env} if env else {}),
     )
 
