@@ -4,10 +4,14 @@
   - check_blocking_command: 各ブロッキングパターンの検出
   - check_blocking_command: 許可コマンドは None を返す
   - check_blocking_command: sleep 秒数閾値 (60s 未満は許可、60s 以上はブロック)
+  - check_blocking_command: sleep 時間単位付き (1m / 1h / 1d)
+  - check_blocking_command: sleep infinity / inf
+  - check_blocking_command: tail -F (capital F, follow-name モード)
   - build_blocking_error_message: エラーメッセージに pattern_name と @scheduler ヒントを含む
   - bash_pre_tool_use_hook: 非ブロッキングコマンドは空 dict を返す
   - bash_pre_tool_use_hook: ブロッキングコマンドは deny + permissionDecisionReason を返す
   - bash_pre_tool_use_hook: tool_input が欠落しても安全に空 dict を返す
+  - bash_pre_tool_use_hook: command キーの値が None でも TypeError にならない (Critical #1)
 """
 
 from __future__ import annotations
@@ -82,6 +86,30 @@ class TestCheckBlockingCommand:
         """パイプライン内の sleep も検出する。"""
         assert check_blocking_command("echo start && sleep 300 && echo done") == "sleep <N>=60s+"
 
+    def test_sleep_1m_blocked(self) -> None:
+        """sleep 1m (1分 = 60s) はブロッキング (Minor #3)。"""
+        assert check_blocking_command("sleep 1m") == "sleep <N>=60s+"
+
+    def test_sleep_2h_blocked(self) -> None:
+        """sleep 2h もブロッキング。"""
+        assert check_blocking_command("sleep 2h") == "sleep <N>=60s+"
+
+    def test_sleep_1d_blocked(self) -> None:
+        """sleep 1d もブロッキング。"""
+        assert check_blocking_command("sleep 1d") == "sleep <N>=60s+"
+
+    def test_sleep_infinity_blocked(self) -> None:
+        """sleep infinity はブロッキング (Minor #3)。"""
+        assert check_blocking_command("sleep infinity") == "sleep <N>=60s+"
+
+    def test_sleep_inf_blocked(self) -> None:
+        """sleep inf もブロッキング。"""
+        assert check_blocking_command("sleep inf") == "sleep <N>=60s+"
+
+    def test_sleep_infinity_case_insensitive(self) -> None:
+        """sleep INFINITY も大文字小文字無関係にブロッキング。"""
+        assert check_blocking_command("sleep INFINITY") == "sleep <N>=60s+"
+
     # --- tail -f / --follow ---
 
     def test_tail_f_basic(self) -> None:
@@ -93,6 +121,14 @@ class TestCheckBlockingCommand:
     def test_tail_combined_flags(self) -> None:
         """tail -100f など combined flags も検出する。"""
         assert check_blocking_command("tail -100f /var/log/app.log") == "tail -f / --follow"
+
+    def test_tail_capital_F(self) -> None:
+        """tail -F (follow-name モード) も検出する (Minor #2)。"""
+        assert check_blocking_command("tail -F /var/log/app.log") == "tail -f / --follow"
+
+    def test_tail_capital_F_combined(self) -> None:
+        """tail -100F も検出する。"""
+        assert check_blocking_command("tail -100F /var/log/app.log") == "tail -f / --follow"
 
     def test_tail_follow_long_form(self) -> None:
         assert check_blocking_command("tail --follow /var/log/app.log") == "tail -f / --follow"
@@ -273,6 +309,22 @@ class TestBashPreToolUseHook:
             "tool_use_id": "tu_008",
         }
         result = await bash_pre_tool_use_hook(hook_input, "tu_008", self._CONTEXT)  # type: ignore[arg-type]
+        assert result == {}
+
+    @pytest.mark.asyncio
+    async def test_command_value_none_does_not_raise(self) -> None:
+        """command キーが存在して値が None でも TypeError にならず空 dict を返す (Critical #1)。
+
+        tool_input.get("command", "") はキーが存在すると None を返す。
+        以前の実装では re.finditer(None) → TypeError が伝播していた。
+        """
+        hook_input = {
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": None},  # 値が None
+            "tool_use_id": "tu_010",
+        }
+        result = await bash_pre_tool_use_hook(hook_input, "tu_010", self._CONTEXT)  # type: ignore[arg-type]
         assert result == {}
 
     @pytest.mark.asyncio

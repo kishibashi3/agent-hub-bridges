@@ -14,11 +14,19 @@ bridge の ``receive_response()`` ループが完了しなくなり、後続の 
      を返して実行を拒否し、@scheduler の代替手段を案内する。
 
 ブロッキングパターン:
-  - ``gh run watch``       : GitHub Actions run の監視 (無限待ち)
-  - ``sleep <N>=60以上``   : 長時間 sleep (60s 未満は許可)
-  - ``tail -f``            : ファイル follow モード (無限)
-  - ``tail --follow``      : 同上 (long form)
-  - ``watch <command>``    : コマンドの繰り返し実行 (無限)
+  - ``gh run watch``              : GitHub Actions run の監視 (無限待ち)
+  - ``sleep <N>=60以上``          : 長時間 sleep (60s 未満は許可)
+  - ``sleep 1m / 1h / 1d``       : 時間単位付き sleep (m/h/d suffix)
+  - ``sleep infinity / sleep inf``: 無限 sleep
+  - ``tail -f / -F / --follow``   : ファイル follow モード (無限)
+  - ``watch <command>``           : コマンドの繰り返し実行 (無限)
+
+既知の検出限界 (Known limitations):
+  - ``sudo watch df`` / ``nice watch df`` など、prefix コマンドを挟んだ
+    ``watch`` は検出できない (shell operator パターンに一致しないため)。
+  - ``sleep 1m30s`` のような複合 duration (GNU coreutils 非対応の BSD では
+    使えないが一部環境で有効) は未対応。
+  - 変数展開 (``sleep $WAIT``) は静的解析では検出不可。
 
 NOTE: ``bypassPermissions`` モードでは ``can_use_tool`` コールバックは
 invoked されないため、``hooks["PreToolUse"]`` を使う必要がある。
@@ -49,21 +57,30 @@ _BLOCKING_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ),
     (
         "tail -f / --follow",
-        # -[a-zA-Z0-9]* で "-f", "-100f", "-nf" など combined flags も捕捉する。
-        re.compile(r"\btail\b.*(?:\s-[a-zA-Z0-9]*f\b|\s--follow\b)"),
+        # -[a-zA-Z0-9]* で "-f", "-F", "-100f", "-nF" など combined flags も捕捉する。
+        # [fF] で -f (follow-descriptor) と -F (follow-name) の両方に対応。
+        re.compile(r"\btail\b.*(?:\s-[a-zA-Z0-9]*[fF]\b|\s--follow\b)"),
     ),
     (
         "watch <command>",
         # 行頭 or シェル演算子 (;, |, &, (, &&, ||) の直後の watch のみ対象。
         # watchman / watchdog 等の別コマンドの引数 "watch" は除外する。
+        # Known limitation: sudo/nice/env 等の prefix コマンドを挟んだ watch は未検出。
         re.compile(r"(?:^|&&|\|\||[;&|(])\s*watch\s"),
     ),
-    # sleep は秒数を抽出して閾値比較するため別途処理する。
-    # ここではプレースホルダーとして None を置き、_SLEEP_PATTERN で管理する。
 ]
+# sleep は秒数 or 特殊値を抽出して判定するため _BLOCKING_PATTERNS とは別に管理する。
 
-_SLEEP_PATTERN = re.compile(r"\bsleep\s+(\d+(?:\.\d+)?)(?:\s|$|[;&|])")
+# sleep <N> — 整数・小数値 (秒単位)
+_SLEEP_SECONDS_PATTERN = re.compile(r"\bsleep\s+(\d+(?:\.\d+)?)(?:\s|$|[;&|])")
 _SLEEP_MIN_SECONDS: float = 60.0
+
+# sleep <N>m / <N>h / <N>d — 時間単位付き (GNU coreutils / macOS sleep)
+# m=分, h=時間, d=日 — いずれも 1 単位以上で 60s を超えるためすべてブロッキングとみなす。
+_SLEEP_UNIT_PATTERN = re.compile(r"\bsleep\s+\d+(?:\.\d+)?[mhd]\b")
+
+# sleep infinity / sleep inf — 無限 sleep
+_SLEEP_INFINITY_PATTERN = re.compile(r"\bsleep\s+(?:infinity|inf)\b", re.IGNORECASE)
 
 # @scheduler ヒントメッセージ (全パターン共通)
 _SCHEDULER_HINT = (
@@ -93,21 +110,35 @@ def check_blocking_command(command: str) -> str | None:
         'gh run watch'
         >>> check_blocking_command("sleep 3600")
         'sleep <N>=60s+'
+        >>> check_blocking_command("sleep 1m")
+        'sleep <N>=60s+'
+        >>> check_blocking_command("sleep infinity")
+        'sleep <N>=60s+'
         >>> check_blocking_command("sleep 30")  # 30s は許可
         >>> check_blocking_command("tail -f /var/log/syslog")
+        'tail -f / --follow'
+        >>> check_blocking_command("tail -F /var/log/syslog")
         'tail -f / --follow'
         >>> check_blocking_command("watch df -h")
         'watch <command>'
         >>> check_blocking_command("echo hello")
     """
-    # sleep は秒数閾値チェックが必要なので個別に処理
-    for m in _SLEEP_PATTERN.finditer(command):
+    # sleep: 秒数の閾値チェック
+    for m in _SLEEP_SECONDS_PATTERN.finditer(command):
         try:
             seconds = float(m.group(1))
         except ValueError:
             continue
         if seconds >= _SLEEP_MIN_SECONDS:
             return "sleep <N>=60s+"
+
+    # sleep: 時間単位付き (m/h/d) — いずれも 60s 超なので無条件ブロック
+    if _SLEEP_UNIT_PATTERN.search(command):
+        return "sleep <N>=60s+"
+
+    # sleep: infinity / inf — 無限 sleep
+    if _SLEEP_INFINITY_PATTERN.search(command):
+        return "sleep <N>=60s+"
 
     # その他のパターンは正規表現一致のみ
     for name, pattern in _BLOCKING_PATTERNS:
@@ -165,8 +196,16 @@ async def bash_pre_tool_use_hook(
     # HookMatcher(matcher="Bash") で登録しているため、ここに到達する時点で
     # tool_name == "Bash" のはず。tool_input["command"] にコマンド文字列がある。
     raw_input: dict = hook_input  # type: ignore[assignment]
-    tool_input = raw_input.get("tool_input", {})
-    command: str = tool_input.get("command", "") if isinstance(tool_input, dict) else ""
+    tool_input = raw_input.get("tool_input")
+    if not isinstance(tool_input, dict):
+        return {}  # tool_input 欠落 or 非 dict — pass-through
+    # .get("command", "") ではなく .get("command") を使い、値が None の場合も
+    # 安全に pass-through する (デフォルト値 "" は key が存在しない場合のみ発動するため、
+    # 値が None だと None が返り finditer(None) で TypeError になる)。
+    raw_command = tool_input.get("command")
+    if not isinstance(raw_command, str):
+        return {}  # command キー欠落 or 非 str (None 等) — pass-through
+    command: str = raw_command
 
     detected = check_blocking_command(command)
     if detected is None:
