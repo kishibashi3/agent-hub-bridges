@@ -161,8 +161,16 @@ class _IdleCompactWatchdog:
 
     使い方:
       - メッセージ受信ごとに ``reset()`` を呼ぶ。
+      - LLM 呼び出し中 (``_handle_one`` の実行期間) は ``set_busy()`` /
+        ``clear_busy()`` で busy 状態を通知する。busy 中は /compact をスキップ
+        して stream の競合 (= 2 つのコルーチンが同じ ``receive_response()``
+        ストリームを読む競合) を防ぐ (issue #102)。
       - ``watch_and_compact(runner)`` を background task として起動する
         (``anyio.create_task_group`` で並走)。
+
+    NOTE: 実運用では ``run_worker`` が ``watch_and_compact_lazy`` を直接
+    起動する (lazy runner 初期化構造に対応するため)。``watch_and_compact``
+    はテスト・runner が確定している埋め込みシナリオ向け。
 
     ``idle_s`` のデフォルトは ``_COMPACT_IDLE_S`` (= ``BRIDGE_COMPACT_IDLE_MINUTES``
     環境変数、未設定なら 30 分)。テストでは小さな値を渡して動作を確認できる。
@@ -177,10 +185,29 @@ class _IdleCompactWatchdog:
         self._idle_s = idle_s
         self._check_interval_s = check_interval_s
         self._last_activity: float = time.monotonic()
+        self._processing: bool = False
 
     def reset(self) -> None:
         """メッセージ受信時に呼ぶ。idle タイマーをリセットする。"""
         self._last_activity = time.monotonic()
+
+    def set_busy(self) -> None:
+        """``_handle_one`` 開始時に呼ぶ。watchdog が /compact をスキップするようにする。
+
+        issue #102: サブエージェント実行中などの長時間処理で watchdog が
+        ``query()``/``receive_response()`` を並走させると、2 つのコルーチンが
+        同じ ``MemoryObjectReceiveStream`` を競合読みしてプロトコルが壊れる。
+        ``_processing`` フラグで busy 期間を明示的に通知してスキップする。
+        """
+        self._processing = True
+
+    def clear_busy(self) -> None:
+        """``_handle_one`` 終了時に呼ぶ (finally で必ず呼ぶこと)。"""
+        self._processing = False
+
+    def is_processing(self) -> bool:
+        """``_handle_one`` が実行中 (LLM が応答待ち) なら ``True``。"""
+        return self._processing
 
     def idle_elapsed(self) -> float:
         """最後にリセットしてから経過した秒数を返す。"""
@@ -200,10 +227,20 @@ class _IdleCompactWatchdog:
 
         ``anyio.get_cancelled_exc_class()`` は伝播する
         (= task group の tear-down 時に正常終了)。
+
+        issue #102: ``_handle_one`` が実行中 (``_processing == True``) の間は
+        /compact をスキップして stream 競合を防ぐ。タイマーはリセットして
+        tight retry を防ぐ。
         """
         cancelled_exc = anyio.get_cancelled_exc_class()
         while True:
             await anyio.sleep(self._check_interval_s)
+            if self.is_processing():
+                # _handle_one が実行中: stream 競合を防ぐためスキップ。
+                # タイマーをリセットして次の check interval まで待つ。
+                self.reset()
+                logger.debug("[auto-compact] _handle_one in progress, skip compact")
+                continue
             if not self.is_idle():
                 continue
             elapsed = self.idle_elapsed()
@@ -242,6 +279,10 @@ class _IdleCompactWatchdog:
         リセットしてスキップする。runner が確定してから ``watch_and_compact``
         と同じ動作をする。
 
+        issue #102: ``_handle_one`` が実行中 (``_processing == True``) の間は
+        /compact をスキップして stream 競合を防ぐ。タイマーはリセットして
+        tight retry を防ぐ。
+
         ``get_runner``: ``ClaudeRunner | None`` を返す callable。
         """
         cancelled_exc = anyio.get_cancelled_exc_class()
@@ -251,6 +292,12 @@ class _IdleCompactWatchdog:
             if runner is None:
                 # Runner not yet initialized — reset timer to avoid spurious compact
                 self.reset()
+                continue
+            if self.is_processing():
+                # _handle_one が実行中: stream 競合を防ぐためスキップ。
+                # タイマーをリセットして次の check interval まで待つ。
+                self.reset()
+                logger.debug("[auto-compact] _handle_one in progress, skip compact")
                 continue
             if not self.is_idle():
                 continue
@@ -605,7 +652,13 @@ async def _startup_catchup(
                 traceparent or "none",
             )
 
-        await _handle_one(hub, runner_holder[0].client, msg, config, tracker, journal)
+        # issue #102: stream 競合防止のため _handle_one の前後で
+        # compact_watchdog の busy フラグを set/clear する。
+        compact_watchdog.set_busy()
+        try:
+            await _handle_one(hub, runner_holder[0].client, msg, config, tracker, journal)
+        finally:
+            compact_watchdog.clear_busy()
         # process → save_cursor → ack の順 (crash-safe)。
         save_cursor(config.user, msg.timestamp)
         cursor = msg.timestamp
@@ -795,9 +848,15 @@ async def _run_hub_session(
                             traceparent or "none",
                         )
 
-                    await _handle_one(
-                        hub, runner_holder[0].client, msg, config, tracker, journal
-                    )
+                    # issue #102: stream 競合防止のため _handle_one の前後で
+                    # compact_watchdog の busy フラグを set/clear する。
+                    compact_watchdog.set_busy()
+                    try:
+                        await _handle_one(
+                            hub, runner_holder[0].client, msg, config, tracker, journal
+                        )
+                    finally:
+                        compact_watchdog.clear_busy()
                     # process → save_cursor → ack の順 (crash-safe)。
                     # save_cursor 後 ack 前にクラッシュしても、 再起動後に
                     # cursor で skip されるので二重 dispatch にならない。
