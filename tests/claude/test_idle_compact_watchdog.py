@@ -11,6 +11,7 @@
   - watch_and_compact(): /compact 失敗 (Exception) → warning log + reset
   - watch_and_compact(): cancellation は外に伝播する
   - watch_and_compact_lazy(): _processing == True の間は /compact をスキップ (issue #102)
+  - watch_and_compact_lazy(): clear_busy() 後は /compact が実行される (issue #102)
 
 実装の都合上、watch_and_compact() は while True ループのため、
 anyio.move_on_after() で 1 イテレーション後に cancel する。
@@ -152,17 +153,17 @@ class TestIdleCompactWatchdogSync:
           finally:
               compact_watchdog.clear_busy()
 
+        except ブロックを持たない実装と同じく例外を伝播させた上で、
         stuck bug (is_processing() が True のまま残る) が起きないことを確認する。
         """
         wd = _IdleCompactWatchdog(idle_s=60.0, check_interval_s=1.0)
         wd.set_busy()
         assert wd.is_processing()
-        try:
-            raise RuntimeError("simulated _handle_one failure")
-        except RuntimeError:
-            pass
-        finally:
-            wd.clear_busy()
+        with pytest.raises(RuntimeError, match="simulated _handle_one failure"):
+            try:
+                raise RuntimeError("simulated _handle_one failure")
+            finally:
+                wd.clear_busy()
         assert not wd.is_processing()
 
 
@@ -441,6 +442,27 @@ class TestWatchAndCompactLazy:
             tg.cancel_scope.cancel()
 
         # runner が確定してから compact が呼ばれるはず
+        assert runner.client.query.await_count >= 1
+
+    @pytest.mark.asyncio
+    async def test_compact_called_after_clear_busy(self) -> None:
+        """clear_busy() 後は再び /compact が呼ばれる (issue #102)。"""
+        wd = _IdleCompactWatchdog(idle_s=0.0, check_interval_s=0.001)
+        wd._last_activity = time.monotonic() - 1000.0  # definitely idle
+        wd.set_busy()
+        runner = _make_mock_runner()
+
+        async def _release_busy_later() -> None:
+            await anyio.sleep(0.02)
+            wd.clear_busy()
+
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(_release_busy_later)
+            with anyio.move_on_after(0.1):
+                await wd.watch_and_compact_lazy(lambda: runner)
+            tg.cancel_scope.cancel()
+
+        # clear_busy() 後に compact が実行されるはず
         assert runner.client.query.await_count >= 1
 
     @pytest.mark.asyncio
