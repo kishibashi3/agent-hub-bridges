@@ -166,10 +166,10 @@ def build_blocking_error_message(pattern_name: str) -> str:
 
 
 async def bash_pre_tool_use_hook(
-    hook_input: "HookInput",
+    hook_input: HookInput,
     tool_use_id: str | None,
-    context: "HookContext",
-) -> "HookJSONOutput":
+    context: HookContext,
+) -> HookJSONOutput:
     """PreToolUse フック: Bash ツールのブロッキングコマンドを検出して拒否する.
 
     ``ClaudeAgentOptions.hooks["PreToolUse"]`` に
