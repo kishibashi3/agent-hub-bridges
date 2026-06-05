@@ -1,4 +1,4 @@
-"""OTLP span emit for bridge-claude (issue #90, #92).
+"""OTLP span emit for bridge-claude (issue #90, #92, #109).
 
 ``AGENT_HUB_TELEMETRY_URL`` が未設定の場合は全操作がサイレント skip (opt-in)。
 設定されている場合は OTLP/HTTP (`Content-Type: application/x-protobuf`) で span emit する。
@@ -22,12 +22,27 @@
   ``root_message_id`` が bridge に届かないため各ホップは別 trace_id だが、
   ``parent_span_id`` → ``span_id`` の連鎖で辿れる (1 ホップずつ)。
 
+**tool_use child span (issue #109)**:
+  1 メッセージの trace で LLM コスト + 全 tool 実行を一覧できるよう、
+  ``tool_uses`` で渡された各 ``ToolUseRecord`` に対して child span を emit する。
+  child span の親は root span (``bridge_claude.send_message``)。
+  child span 名: ``tool.<tool_name>`` (例: ``tool.Bash``, ``tool.Read``)。
+  explicit start/end timestamp を使うため、tool 実行が過去に遡っても正確な duration を記録できる。
+
 span 属性 (GenAI semantic conventions + custom):
-  - ``msg_id``: 受信した agent-hub message ID (caused_by_id; custom)
+  Root span:
+  - ``message.id``: 受信した agent-hub message ID (caused_by_id; custom)
   - ``gen_ai.request.model``: model name
   - ``gen_ai.usage.input_tokens``: input tokens
   - ``gen_ai.usage.output_tokens``: output tokens
   - ``gen_ai.usage.cache_read.input_tokens``: cache read tokens (ドット区切り)
+  - ``gen_ai.usage.cost_usd``: estimated LLM cost in USD (ResultMessage.total_cost_usd)
+
+  Child span (per tool_use):
+  - ``message.id``: 受信した agent-hub message ID (caused_by_id; custom)
+  - ``tool.name``: tool 名 (例: ``"Bash"``, ``"Read"``)
+  - ``tool.args.<key>``: sanitized tool 引数 (各値を 200 文字に truncate)
+  - ``duration_ms``: tool 実行時間 (ms)
 
 送信先: ``${AGENT_HUB_TELEMETRY_URL}/v1/traces``
 """
@@ -36,12 +51,42 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypedDict
 
 if TYPE_CHECKING:
     from claude_agent_sdk import ResultMessage
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# ToolUseRecord (issue #109)
+# ---------------------------------------------------------------------------
+
+
+class ToolUseRecord(TypedDict):
+    """1 回の tool_use 実行の timing record.
+
+    ``worker._handle_one`` で ``AssistantMessage`` / ``UserMessage`` を観測して
+    構築し、 ``emit_span`` に渡す。 ``emit_span`` はこれを child span として emit する。
+
+    Attributes:
+        name:          tool 名 (例: ``"Bash"``, ``"Read"``, ``"mcp__agent-hub__send_message"``)。
+        input:         tool 呼び出し時の引数 dict。``_sanitize_tool_input`` で sanitize
+                       してから span 属性に記録する (値は 200 文字に truncate)。
+        start_time_ns: tool_use request (``AssistantMessage`` の ``ToolUseBlock``) を
+                       受信した時刻 (``time.time_ns()``)。
+        end_time_ns:   tool_use result (``UserMessage`` の ``ToolResultBlock``) を
+                       受信した時刻 (``time.time_ns()``)。
+        is_error:      ``ToolResultBlock.is_error`` が truthy かどうか。
+    """
+
+    name: str
+    input: dict[str, Any]
+    start_time_ns: int
+    end_time_ns: int
+    is_error: bool
+
 
 # module-level singletons: TracerProvider / Tracer / IdGenerator の遅延初期化。
 # None   = 未初期化 or 初期化済みだが無効 (URL 未設定 / import 失敗)。
@@ -320,6 +365,37 @@ def _get_tracer() -> Any:
 
 
 # ---------------------------------------------------------------------------
+# _sanitize_tool_input (issue #109)
+# ---------------------------------------------------------------------------
+
+_SENSITIVE_KEYS: frozenset[str] = frozenset(
+    {"password", "token", "secret", "key", "api_key", "pat", "authorization"}
+)
+_TOOL_ARG_MAX_LEN: int = 200
+
+
+def _sanitize_tool_input(tool_input: dict[str, Any]) -> dict[str, str]:
+    """tool_input を span 属性用に sanitize する (issue #109).
+
+    各 value を ``str`` に変換して ``_TOOL_ARG_MAX_LEN`` 文字に truncate する。
+    key 名が ``_SENSITIVE_KEYS`` に含まれる場合は値を ``"***"`` に置換する。
+
+    Args:
+        tool_input: ``ToolUseBlock.input`` の dict。
+
+    Returns:
+        sanitize 済みの ``{key: str_value}`` dict。
+    """
+    result: dict[str, str] = {}
+    for k, v in tool_input.items():
+        if k.lower() in _SENSITIVE_KEYS:
+            result[k] = "***"
+        else:
+            result[k] = str(v)[:_TOOL_ARG_MAX_LEN]
+    return result
+
+
+# ---------------------------------------------------------------------------
 # emit_span
 # ---------------------------------------------------------------------------
 
@@ -330,49 +406,67 @@ def emit_span(
     sent_msg_id: str | None = None,
     model: str,
     result: ResultMessage,
-    session_trace_root_id: str | None = None,
+    tool_uses: list[ToolUseRecord] | None = None,
 ) -> None:
-    """send_message 1 呼び出し後に OTLP span を emit する (issue #90, #92, #108).
+    """send_message 1 呼び出し後に OTLP span を emit する (issue #90, #92, #109).
 
     ``AGENT_HUB_TELEMETRY_URL`` 未設定時はサイレント skip (opt-in)。
     例外は ``logger.warning`` で読み捨て — span 失敗で bridge を停止させない。
 
+    **設計 (issue #109)**:
+    各メッセージに対して 1 root span + N child span (tool_use ごと) を emit する。
+    セッション全体で trace_id を統一するのではなく、メッセージごとに独立した trace_id を
+    使う (``caused_by_id`` から生成)。tool_use child span に ``message.id`` 属性を付けることで
+    Jaeger の属性検索で 1 メッセージの全 tool 実行を一覧できる。
+
     Args:
-        caused_by_id:           受信した agent-hub message の UUID (``IncomingMessage.id``)。
-                                ``msg_id`` span 属性として記録される。
-        sent_msg_id:            ``send_message`` ツールが返した ``id`` フィールドの UUID。
-                                OTel ``span_id`` (64bit hex) として設定される。
-                                ``None`` の場合は span_id をランダム生成にフォールバックする。
-        model:                  呼び出した Claude model (例: ``"claude-sonnet-4-6"``)。
-        result:                 ``receive_response()`` が最後に返す ``ResultMessage``。
-                                ``result.usage`` から token counts を取り出す。
-        session_trace_root_id:  セッション内の最初のメッセージ ID (issue #108)。
-                                指定された場合、この UUID から ``trace_id`` と
-                                ``parent_span_id`` を生成する。
-                                ``None`` の場合は ``caused_by_id`` を使う (後方互換)。
+        caused_by_id:   受信した agent-hub message の UUID (``IncomingMessage.id``)。
+                        root span の ``message.id`` 属性・trace_id の生成元。
+        sent_msg_id:    ``send_message`` ツールが返した ``id`` フィールドの UUID。
+                        OTel root span の ``span_id`` (64bit hex) として設定される。
+                        ``None`` の場合は span_id をランダム生成にフォールバックする。
+        model:          呼び出した Claude model (例: ``"claude-sonnet-4-6"``)。
+        result:         ``receive_response()`` が最後に返す ``ResultMessage``。
+                        ``result.usage`` から token counts、``result.total_cost_usd``
+                        から推定コストを取り出す。
+        tool_uses:      ``_handle_one`` で収集した ``ToolUseRecord`` のリスト。
+                        各 record が child span として emit される。
+                        ``None`` または空リストの場合は child span を emit しない。
 
-    OTel span 文脈 (issue #92, #108):
-        - ``trace_id``:      ``_uuid_to_trace_id_int(session_trace_root_id or caused_by_id)``
-                             session_trace_root_id を指定するとセッション内の全 bridge span が
-                             同じ trace_id を持ち、subprocess span と Jaeger 上で接続される。
-        - ``parent_span_id``: ``_uuid_to_span_id_int(session_trace_root_id or caused_by_id)``
-                             subprocess の TRACEPARENT と同じ値を使うことで
-                             bridge span と subprocess span が同じ phantom root 下に並ぶ。
-        - ``span_id``:       ``_uuid_to_span_id_int(sent_msg_id)`` (送信 msg.id の高位 64bit)
+    OTel span 文脈 (issue #92):
+        - ``trace_id``:       ``_uuid_to_trace_id_int(caused_by_id)``
+                              各メッセージが独立した trace を持つ (per-message trace)。
+        - ``parent_span_id``: ``_uuid_to_span_id_int(caused_by_id)``
+                              caused_by_id を phantom parent として設定。
+        - ``span_id``:        ``_uuid_to_span_id_int(sent_msg_id)`` (送信 msg.id の高位 64bit)
 
-    Span 属性 (ドット区切り — アンダースコア不可):
-        - ``msg_id``: 受信した agent-hub message ID (caused_by_id)
+    Root span 属性 (ドット区切り — アンダースコア不可):
+        - ``message.id``: 受信した agent-hub message ID (caused_by_id)
         - ``gen_ai.request.model``: model name
         - ``gen_ai.usage.input_tokens``: input tokens (int)
         - ``gen_ai.usage.output_tokens``: output tokens (int)
         - ``gen_ai.usage.cache_read.input_tokens``: cache read tokens (int)
+        - ``gen_ai.usage.cost_usd``: estimated cost in USD (float; omitted if None)
+
+    Child span 属性 (per tool_use):
+        - ``message.id``: caused_by_id (root span と同じ値)
+        - ``tool.name``: tool 名 (例: ``"Bash"``)
+        - ``tool.args.<key>``: sanitize 済みの tool 引数値 (200 文字に truncate)
+        - ``duration_ms``: tool 実行時間 (ms; int)
     """
     tracer = _get_tracer()
     if tracer is None:
         return
 
     try:
-        from opentelemetry.trace import StatusCode
+        from opentelemetry import context as otel_ctx_api
+        from opentelemetry.trace import (
+            NonRecordingSpan,
+            SpanContext,
+            StatusCode,
+            TraceFlags,
+            set_span_in_context,
+        )
 
         usage: dict[str, Any] = {}
         if isinstance(result.usage, dict):
@@ -386,23 +480,11 @@ def emit_span(
         if sent_msg_id is not None and _id_generator is not None:
             _id_generator.set_next_span_id(_uuid_to_span_id_int(sent_msg_id))
 
-        # issue #92: parent_span_id / trace_id を caused_by_id (or session_trace_root_id)
-        # から構築して OTel context として注入する。
-        #
-        # issue #108: trace_id mismatch 修正。
-        # subprocess の TRACEPARENT はセッション最初のメッセージ ID で設定される。
-        # bridge span も同じ trace_id を使わないと Jaeger 上でトレースが分離する。
-        # session_trace_root_id が渡された場合はそちらを trace_id / parent_span_id に使う。
-        from opentelemetry.trace import (
-            NonRecordingSpan,
-            SpanContext,
-            TraceFlags,
-            set_span_in_context,
-        )
-
-        trace_root = session_trace_root_id if session_trace_root_id else caused_by_id
-        parent_span_id_int = _uuid_to_span_id_int(trace_root)
-        trace_id_int = _uuid_to_trace_id_int(trace_root)
+        # issue #92: parent_span_id / trace_id を caused_by_id から構築して
+        # OTel context として注入する。各メッセージが独立した trace_id を持つ
+        # (per-message trace design; issue #109 redesign)。
+        parent_span_id_int = _uuid_to_span_id_int(caused_by_id)
+        trace_id_int = _uuid_to_trace_id_int(caused_by_id)
         parent_ctx = SpanContext(
             trace_id=trace_id_int,
             span_id=parent_span_id_int,
@@ -414,25 +496,60 @@ def emit_span(
         with tracer.start_as_current_span(
             "bridge_claude.send_message", context=ctx
         ) as span:
-            span.set_attribute("msg_id", caused_by_id)
+            span.set_attribute("message.id", caused_by_id)
             span.set_attribute("gen_ai.request.model", model)
             span.set_attribute("gen_ai.usage.input_tokens", input_tokens)
             span.set_attribute("gen_ai.usage.output_tokens", output_tokens)
             span.set_attribute("gen_ai.usage.cache_read.input_tokens", cache_read)
+            # issue #109: LLM コスト (USD) を span 属性として記録する。
+            total_cost = getattr(result, "total_cost_usd", None)
+            if total_cost is not None:
+                try:
+                    span.set_attribute("gen_ai.usage.cost_usd", float(total_cost))
+                except (TypeError, ValueError):
+                    pass
             span.set_status(
                 StatusCode.ERROR if result.is_error else StatusCode.OK
             )
 
+            # issue #109: tool_use ごとに child span を emit する。
+            # child span の親は root span (start_as_current_span で設定した current span)。
+            # explicit start/end timestamp で実際の tool 実行時間を記録する。
+            if tool_uses:
+                root_span_ctx = otel_ctx_api.get_current()
+                for tu in tool_uses:
+                    child = tracer.start_span(
+                        f"tool.{tu['name']}",
+                        context=root_span_ctx,
+                        start_time=tu["start_time_ns"],
+                    )
+                    child.set_attribute("message.id", caused_by_id)
+                    child.set_attribute("tool.name", tu["name"])
+                    sanitized = _sanitize_tool_input(tu["input"])
+                    for k, v in sanitized.items():
+                        child.set_attribute(f"tool.args.{k}", v)
+                    duration_ms = max(
+                        0,
+                        (tu["end_time_ns"] - tu["start_time_ns"]) // 1_000_000,
+                    )
+                    child.set_attribute("duration_ms", duration_ms)
+                    child.set_status(
+                        StatusCode.ERROR if tu["is_error"] else StatusCode.OK
+                    )
+                    child.end(end_time=tu["end_time_ns"])
+
         logger.debug(
             "[telemetry] span emitted: caused_by=%s sent=%s model=%s "
-            "in=%d out=%d cache_read=%d is_error=%s",
+            "in=%d out=%d cache_read=%d cost_usd=%s is_error=%s tools=%d",
             caused_by_id,
             sent_msg_id,
             model,
             input_tokens,
             output_tokens,
             cache_read,
+            total_cost,
             result.is_error,
+            len(tool_uses) if tool_uses else 0,
         )
     except Exception:
         logger.warning("[telemetry] OTLP span emit failed (non-fatal)", exc_info=True)

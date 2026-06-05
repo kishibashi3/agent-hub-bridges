@@ -52,6 +52,7 @@ from agent_hub_bridges.claude.claude_runner import ClaudeRunner
 from agent_hub_bridges.claude.config import Config
 from agent_hub_bridges.claude.cursor import load_cursor, save_cursor
 from agent_hub_bridges.claude.telemetry import (
+    ToolUseRecord,
     build_traceparent,
     emit_span,
     make_subprocess_telemetry_env,
@@ -514,12 +515,6 @@ async def run_worker(config: Config) -> None:
     # hub reconnect ごとに新しい runner を作り直す (_run_hub_session 内で tear down)。
     runner_holder: list[ClaudeRunner | None] = [None]
 
-    # issue #108: OTel trace_id mismatch 修正。
-    # subprocess の TRACEPARENT はセッション最初のメッセージ ID で設定され変わらない。
-    # emit_span も同じ trace_id を使うため、最初のメッセージ ID を追跡する。
-    # runner_holder と同様に hub reconnect ごとにリセットされる。
-    session_trace_root_id_holder: list[str | None] = [None]
-
     with _mcp_config_file(config) as mcp_config_path:
         async def _one_session() -> None:
             nonlocal cursor
@@ -532,7 +527,6 @@ async def run_worker(config: Config) -> None:
                 gap_tracker,
                 compact_watchdog,
                 journal,
-                session_trace_root_id_holder=session_trace_root_id_holder,
                 telemetry_url=telemetry_url,
             )
 
@@ -579,7 +573,6 @@ async def _startup_catchup(
     journal: Journal,
     router: CommandRouter,
     *,
-    session_trace_root_id_holder: list[str | None] | None = None,
     telemetry_url: str | None = None,
 ) -> str | None:
     """bridge 起動時に未読メッセージを処理する startup catchup (issue #98).
@@ -652,12 +645,8 @@ async def _startup_catchup(
 
         # issue #91: runner を最初の非 cursor-skip メッセージ受信時に lazy init する。
         # 最初の msg.id から TRACEPARENT を生成して subprocess の trace root に設定する。
-        # issue #108: session_trace_root_id を設定してセッション内全 bridge span の
-        # trace_id を揃える。
         if runner_holder[0] is None:
             traceparent = build_traceparent(msg.id) if telemetry_url else None
-            if telemetry_url and session_trace_root_id_holder is not None:
-                session_trace_root_id_holder[0] = msg.id
             opts = _build_options(
                 config,
                 mcp_config_path,
@@ -685,11 +674,6 @@ async def _startup_catchup(
                 config,
                 tracker,
                 journal,
-                session_trace_root_id=(
-                    session_trace_root_id_holder[0]
-                    if session_trace_root_id_holder is not None
-                    else None
-                ),
             )
         finally:
             compact_watchdog.clear_busy()
@@ -711,7 +695,6 @@ async def _run_hub_session(
     compact_watchdog: _IdleCompactWatchdog,
     journal: Journal,
     *,
-    session_trace_root_id_holder: list[str | None] | None = None,
     telemetry_url: str | None = None,
 ) -> str | None:
     """1 回分の hub session を最後まで走らせる.
@@ -821,7 +804,6 @@ async def _run_hub_session(
             compact_watchdog,
             journal,
             router,
-            session_trace_root_id_holder=session_trace_root_id_holder,
             telemetry_url=telemetry_url,
         )
 
@@ -862,16 +844,12 @@ async def _run_hub_session(
                     # lazy init する。最初の msg.id から TRACEPARENT を生成して
                     # subprocess の trace root に設定する。hub reconnect ごとに
                     # 新しい runner を作り直す。
-                    # issue #108: session_trace_root_id を設定してセッション内全
-                    # bridge span の trace_id を揃える。
                     if runner_holder[0] is None:
                         # None (未設定) と "" (空文字) をいずれも「telemetry 無効」
                         # として扱う (opt-in)。
                         traceparent = (
                             build_traceparent(msg.id) if telemetry_url else None
                         )
-                        if telemetry_url and session_trace_root_id_holder is not None:
-                            session_trace_root_id_holder[0] = msg.id
                         opts = _build_options(
                             config,
                             mcp_config_path,
@@ -899,11 +877,6 @@ async def _run_hub_session(
                             config,
                             tracker,
                             journal,
-                            session_trace_root_id=(
-                                session_trace_root_id_holder[0]
-                                if session_trace_root_id_holder is not None
-                                else None
-                            ),
                         )
                     finally:
                         compact_watchdog.clear_busy()
@@ -916,13 +889,9 @@ async def _run_hub_session(
         finally:
             # issue #91: hub session 終了時に runner を tear down する。
             # 次の hub session では新しい runner を作り直す。
-            # issue #108: session_trace_root_id もリセットして次のセッションに
-            # 前のセッションの trace_id が持ち込まれないようにする。
             _r = runner_holder[0]
             if _r is not None:
                 runner_holder[0] = None
-                if session_trace_root_id_holder is not None:
-                    session_trace_root_id_holder[0] = None
                 await _r.__aexit__(None, None, None)
 
     return cursor
@@ -1017,8 +986,6 @@ async def _handle_one(
     config: Config,
     tracker: _ActivityTracker,
     journal: Journal,
-    *,
-    session_trace_root_id: str | None = None,
 ) -> None:
     """message 1 件を Claude に流して応答を待つ.
 
@@ -1082,6 +1049,12 @@ async def _handle_one(
     sent_msg_id: str | None = None
     _send_msg_tool_ids: set[str] = set()
 
+    # issue #109: 全 tool_use を追跡して OTel child span に記録する。
+    # _pending_tool_uses: tool_use_id → (name, input, start_time_ns)
+    # tool_uses: 完了した ToolUseRecord のリスト (emit_span に渡す)
+    _pending_tool_uses: dict[str, tuple[str, dict, int]] = {}
+    tool_uses: list[ToolUseRecord] = []
+
     async for sdk_msg in claude.receive_response():
         formatted = _format_message(sdk_msg)
         logger.info(formatted)
@@ -1089,27 +1062,45 @@ async def _handle_one(
         # でアクティビティを記録する。stdout スニフと同等の外部観測ベース。
         if isinstance(sdk_msg, AssistantMessage):
             tracker.mark_active()
-            # issue #92: send_message tool_use_id を追跡する。
-            # 完全一致で "mcp__agent-hub__send_message" のみを対象にする
-            # (部分一致だと将来追加されるツールで誤検知するリスクがある — reviewer Minor)。
             for block in sdk_msg.content:
-                if (
-                    isinstance(block, ToolUseBlock)
-                    and block.name == "mcp__agent-hub__send_message"
-                ):
-                    _send_msg_tool_ids.add(block.id)
+                if isinstance(block, ToolUseBlock):
+                    # issue #109: 全 tool_use を start_time_ns と共に記録する。
+                    _pending_tool_uses[block.id] = (
+                        block.name,
+                        block.input if isinstance(block.input, dict) else {},
+                        time.time_ns(),
+                    )
+                    # issue #92: send_message tool_use_id を追跡する。
+                    # 完全一致で "mcp__agent-hub__send_message" のみを対象にする
+                    # (部分一致だと将来追加されるツールで誤検知するリスクがある — reviewer Minor)。
+                    if block.name == "mcp__agent-hub__send_message":
+                        _send_msg_tool_ids.add(block.id)
         elif isinstance(sdk_msg, UserMessage):
-            # issue #92: 最初の成功した send_message 結果から送信 msg_id を取得。
-            if sent_msg_id is None:
-                blocks = (
-                    sdk_msg.content
-                    if isinstance(sdk_msg.content, list)
-                    else [sdk_msg.content]
-                )
-                for block in blocks:
+            end_ns = time.time_ns()
+            blocks = (
+                sdk_msg.content
+                if isinstance(sdk_msg.content, list)
+                else [sdk_msg.content]
+            )
+            for block in blocks:
+                if isinstance(block, ToolResultBlock):
+                    tool_id = block.tool_use_id
+                    # issue #109: 対応する pending tool_use を完了させて記録する。
+                    if tool_id in _pending_tool_uses:
+                        t_name, t_input, start_ns = _pending_tool_uses.pop(tool_id)
+                        tool_uses.append(
+                            ToolUseRecord(
+                                name=t_name,
+                                input=t_input,
+                                start_time_ns=start_ns,
+                                end_time_ns=end_ns,
+                                is_error=bool(block.is_error),
+                            )
+                        )
+                    # issue #92: 最初の成功した send_message 結果から送信 msg_id を取得。
                     if (
-                        isinstance(block, ToolResultBlock)
-                        and block.tool_use_id in _send_msg_tool_ids
+                        sent_msg_id is None
+                        and tool_id in _send_msg_tool_ids
                         and not block.is_error
                         and block.content
                     ):
@@ -1131,16 +1122,15 @@ async def _handle_one(
             result_msg = sdk_msg
             break
 
-    # issue #90 + #92: OTLP span emit (opt-in — AGENT_HUB_TELEMETRY_URL で有効化)。
+    # issue #90 + #92 + #109: OTLP span emit (opt-in — AGENT_HUB_TELEMETRY_URL で有効化)。
     # ResultMessage が得られた場合のみ span を emit する。
     # emit_span は内部で例外を読み捨てるため bridge を停止させない。
-    # issue #108: session_trace_root_id を渡して bridge span と subprocess span の
-    # trace_id を揃える。
+    # issue #109: tool_uses を渡して tool_use ごとの child span を emit する。
     if result_msg is not None:
         emit_span(
             caused_by_id=msg.id,
             sent_msg_id=sent_msg_id,
             model=config.model,
             result=result_msg,
-            session_trace_root_id=session_trace_root_id,
+            tool_uses=tool_uses if tool_uses else None,
         )
