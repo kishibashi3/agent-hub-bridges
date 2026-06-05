@@ -514,6 +514,12 @@ async def run_worker(config: Config) -> None:
     # hub reconnect ごとに新しい runner を作り直す (_run_hub_session 内で tear down)。
     runner_holder: list[ClaudeRunner | None] = [None]
 
+    # issue #108: OTel trace_id mismatch 修正。
+    # subprocess の TRACEPARENT はセッション最初のメッセージ ID で設定され変わらない。
+    # emit_span も同じ trace_id を使うため、最初のメッセージ ID を追跡する。
+    # runner_holder と同様に hub reconnect ごとにリセットされる。
+    session_trace_root_id_holder: list[str | None] = [None]
+
     with _mcp_config_file(config) as mcp_config_path:
         async def _one_session() -> None:
             nonlocal cursor
@@ -526,6 +532,7 @@ async def run_worker(config: Config) -> None:
                 gap_tracker,
                 compact_watchdog,
                 journal,
+                session_trace_root_id_holder=session_trace_root_id_holder,
                 telemetry_url=telemetry_url,
             )
 
@@ -572,6 +579,7 @@ async def _startup_catchup(
     journal: Journal,
     router: CommandRouter,
     *,
+    session_trace_root_id_holder: list[str | None] | None = None,
     telemetry_url: str | None = None,
 ) -> str | None:
     """bridge 起動時に未読メッセージを処理する startup catchup (issue #98).
@@ -644,8 +652,12 @@ async def _startup_catchup(
 
         # issue #91: runner を最初の非 cursor-skip メッセージ受信時に lazy init する。
         # 最初の msg.id から TRACEPARENT を生成して subprocess の trace root に設定する。
+        # issue #108: session_trace_root_id を設定してセッション内全 bridge span の
+        # trace_id を揃える。
         if runner_holder[0] is None:
             traceparent = build_traceparent(msg.id) if telemetry_url else None
+            if telemetry_url and session_trace_root_id_holder is not None:
+                session_trace_root_id_holder[0] = msg.id
             opts = _build_options(
                 config,
                 mcp_config_path,
@@ -666,7 +678,19 @@ async def _startup_catchup(
         # compact_watchdog の busy フラグを set/clear する。
         compact_watchdog.set_busy()
         try:
-            await _handle_one(hub, runner_holder[0].client, msg, config, tracker, journal)
+            await _handle_one(
+                hub,
+                runner_holder[0].client,
+                msg,
+                config,
+                tracker,
+                journal,
+                session_trace_root_id=(
+                    session_trace_root_id_holder[0]
+                    if session_trace_root_id_holder is not None
+                    else None
+                ),
+            )
         finally:
             compact_watchdog.clear_busy()
         # process → save_cursor → ack の順 (crash-safe)。
@@ -687,6 +711,7 @@ async def _run_hub_session(
     compact_watchdog: _IdleCompactWatchdog,
     journal: Journal,
     *,
+    session_trace_root_id_holder: list[str | None] | None = None,
     telemetry_url: str | None = None,
 ) -> str | None:
     """1 回分の hub session を最後まで走らせる.
@@ -796,6 +821,7 @@ async def _run_hub_session(
             compact_watchdog,
             journal,
             router,
+            session_trace_root_id_holder=session_trace_root_id_holder,
             telemetry_url=telemetry_url,
         )
 
@@ -836,12 +862,16 @@ async def _run_hub_session(
                     # lazy init する。最初の msg.id から TRACEPARENT を生成して
                     # subprocess の trace root に設定する。hub reconnect ごとに
                     # 新しい runner を作り直す。
+                    # issue #108: session_trace_root_id を設定してセッション内全
+                    # bridge span の trace_id を揃える。
                     if runner_holder[0] is None:
                         # None (未設定) と "" (空文字) をいずれも「telemetry 無効」
                         # として扱う (opt-in)。
                         traceparent = (
                             build_traceparent(msg.id) if telemetry_url else None
                         )
+                        if telemetry_url and session_trace_root_id_holder is not None:
+                            session_trace_root_id_holder[0] = msg.id
                         opts = _build_options(
                             config,
                             mcp_config_path,
@@ -863,7 +893,17 @@ async def _run_hub_session(
                     compact_watchdog.set_busy()
                     try:
                         await _handle_one(
-                            hub, runner_holder[0].client, msg, config, tracker, journal
+                            hub,
+                            runner_holder[0].client,
+                            msg,
+                            config,
+                            tracker,
+                            journal,
+                            session_trace_root_id=(
+                                session_trace_root_id_holder[0]
+                                if session_trace_root_id_holder is not None
+                                else None
+                            ),
                         )
                     finally:
                         compact_watchdog.clear_busy()
@@ -876,9 +916,13 @@ async def _run_hub_session(
         finally:
             # issue #91: hub session 終了時に runner を tear down する。
             # 次の hub session では新しい runner を作り直す。
+            # issue #108: session_trace_root_id もリセットして次のセッションに
+            # 前のセッションの trace_id が持ち込まれないようにする。
             _r = runner_holder[0]
             if _r is not None:
                 runner_holder[0] = None
+                if session_trace_root_id_holder is not None:
+                    session_trace_root_id_holder[0] = None
                 await _r.__aexit__(None, None, None)
 
     return cursor
@@ -973,6 +1017,8 @@ async def _handle_one(
     config: Config,
     tracker: _ActivityTracker,
     journal: Journal,
+    *,
+    session_trace_root_id: str | None = None,
 ) -> None:
     """message 1 件を Claude に流して応答を待つ.
 
@@ -1088,10 +1134,13 @@ async def _handle_one(
     # issue #90 + #92: OTLP span emit (opt-in — AGENT_HUB_TELEMETRY_URL で有効化)。
     # ResultMessage が得られた場合のみ span を emit する。
     # emit_span は内部で例外を読み捨てるため bridge を停止させない。
+    # issue #108: session_trace_root_id を渡して bridge span と subprocess span の
+    # trace_id を揃える。
     if result_msg is not None:
         emit_span(
             caused_by_id=msg.id,
             sent_msg_id=sent_msg_id,
             model=config.model,
             result=result_msg,
+            session_trace_root_id=session_trace_root_id,
         )

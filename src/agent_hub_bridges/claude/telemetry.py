@@ -330,27 +330,35 @@ def emit_span(
     sent_msg_id: str | None = None,
     model: str,
     result: ResultMessage,
+    session_trace_root_id: str | None = None,
 ) -> None:
-    """send_message 1 呼び出し後に OTLP span を emit する (issue #90, #92).
+    """send_message 1 呼び出し後に OTLP span を emit する (issue #90, #92, #108).
 
     ``AGENT_HUB_TELEMETRY_URL`` 未設定時はサイレント skip (opt-in)。
     例外は ``logger.warning`` で読み捨て — span 失敗で bridge を停止させない。
 
     Args:
-        caused_by_id: 受信した agent-hub message の UUID (``IncomingMessage.id``)。
-                      OTel ``parent_span_id`` (64bit hex) として設定される。
-        sent_msg_id:  ``send_message`` ツールが返した ``id`` フィールドの UUID。
-                      OTel ``span_id`` (64bit hex) として設定される。
-                      ``None`` の場合は span_id をランダム生成にフォールバックする。
-        model:        呼び出した Claude model (例: ``"claude-sonnet-4-6"``)。
-        result:       ``receive_response()`` が最後に返す ``ResultMessage``。
-                      ``result.usage`` から token counts を取り出す。
+        caused_by_id:           受信した agent-hub message の UUID (``IncomingMessage.id``)。
+                                ``msg_id`` span 属性として記録される。
+        sent_msg_id:            ``send_message`` ツールが返した ``id`` フィールドの UUID。
+                                OTel ``span_id`` (64bit hex) として設定される。
+                                ``None`` の場合は span_id をランダム生成にフォールバックする。
+        model:                  呼び出した Claude model (例: ``"claude-sonnet-4-6"``)。
+        result:                 ``receive_response()`` が最後に返す ``ResultMessage``。
+                                ``result.usage`` から token counts を取り出す。
+        session_trace_root_id:  セッション内の最初のメッセージ ID (issue #108)。
+                                指定された場合、この UUID から ``trace_id`` と
+                                ``parent_span_id`` を生成する。
+                                ``None`` の場合は ``caused_by_id`` を使う (後方互換)。
 
-    OTel span 文脈 (issue #92):
-        - ``parent_span_id``: ``_uuid_to_span_id_int(caused_by_id)`` (受信 msg.id の高位 64bit)
-        - ``span_id``:        ``_uuid_to_span_id_int(sent_msg_id)`` (送信 msg.id の高位 64bit)
-        - ``trace_id``:       ``_uuid_to_trace_id_int(caused_by_id)`` (受信 msg.id 全 128bit)
-          ※ 各ホップで trace_id は変わるが parent_span_id → span_id の連鎖で辿れる。
+    OTel span 文脈 (issue #92, #108):
+        - ``trace_id``:      ``_uuid_to_trace_id_int(session_trace_root_id or caused_by_id)``
+                             session_trace_root_id を指定するとセッション内の全 bridge span が
+                             同じ trace_id を持ち、subprocess span と Jaeger 上で接続される。
+        - ``parent_span_id``: ``_uuid_to_span_id_int(session_trace_root_id or caused_by_id)``
+                             subprocess の TRACEPARENT と同じ値を使うことで
+                             bridge span と subprocess span が同じ phantom root 下に並ぶ。
+        - ``span_id``:       ``_uuid_to_span_id_int(sent_msg_id)`` (送信 msg.id の高位 64bit)
 
     Span 属性 (ドット区切り — アンダースコア不可):
         - ``msg_id``: 受信した agent-hub message ID (caused_by_id)
@@ -378,8 +386,13 @@ def emit_span(
         if sent_msg_id is not None and _id_generator is not None:
             _id_generator.set_next_span_id(_uuid_to_span_id_int(sent_msg_id))
 
-        # issue #92: parent_span_id / trace_id を caused_by_id から構築して
-        # OTel context として注入する。
+        # issue #92: parent_span_id / trace_id を caused_by_id (or session_trace_root_id)
+        # から構築して OTel context として注入する。
+        #
+        # issue #108: trace_id mismatch 修正。
+        # subprocess の TRACEPARENT はセッション最初のメッセージ ID で設定される。
+        # bridge span も同じ trace_id を使わないと Jaeger 上でトレースが分離する。
+        # session_trace_root_id が渡された場合はそちらを trace_id / parent_span_id に使う。
         from opentelemetry.trace import (
             NonRecordingSpan,
             SpanContext,
@@ -387,8 +400,9 @@ def emit_span(
             set_span_in_context,
         )
 
-        parent_span_id_int = _uuid_to_span_id_int(caused_by_id)
-        trace_id_int = _uuid_to_trace_id_int(caused_by_id)
+        trace_root = session_trace_root_id if session_trace_root_id else caused_by_id
+        parent_span_id_int = _uuid_to_span_id_int(trace_root)
+        trace_id_int = _uuid_to_trace_id_int(trace_root)
         parent_ctx = SpanContext(
             trace_id=trace_id_int,
             span_id=parent_span_id_int,

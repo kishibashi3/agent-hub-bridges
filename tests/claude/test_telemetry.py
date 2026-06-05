@@ -499,6 +499,183 @@ class TestSpanContextInjection:
         )
 
 
+# ---------- session_trace_root_id (issue #108) ----------
+
+
+class TestSessionTraceRootId:
+    """issue #108: session_trace_root_id で trace_id / parent_span_id を上書きできることを確認。
+
+    bridge span と subprocess span が同じ trace_id を持ち Jaeger 上で接続されるために必要。
+    subprocess TRACEPARENT はセッション最初のメッセージ ID から生成され変わらない。
+    2通目以降のメッセージでも同じ trace_id を使うことで全 span が 1 トレースに収まる。
+    """
+
+    def setup_method(self) -> None:
+        telemetry.reset_for_testing()
+
+    def _inject_mock_tracer(self, monkeypatch) -> MagicMock:
+        monkeypatch.setenv("AGENT_HUB_TELEMETRY_URL", "http://localhost:4318")
+        mock_span = MagicMock()
+        mock_ctx = MagicMock()
+        mock_ctx.__enter__ = MagicMock(return_value=mock_span)
+        mock_ctx.__exit__ = MagicMock(return_value=False)
+        mock_tracer = MagicMock()
+        mock_tracer.start_as_current_span.return_value = mock_ctx
+        telemetry._tracer = mock_tracer
+        telemetry._TRACER_INIT = True
+        return mock_tracer
+
+    def test_session_trace_root_id_overrides_trace_id(self, monkeypatch) -> None:
+        """session_trace_root_id が指定されると trace_id がその UUID から生成される。"""
+        mock_tracer = self._inject_mock_tracer(monkeypatch)
+
+        first_msg_id = "aaaaaaaa-bbbb-cccc-dddd-000000000001"  # セッション最初のメッセージ
+        second_msg_id = "11111111-2222-3333-4444-555555555555"  # 2通目
+
+        telemetry.emit_span(
+            caused_by_id=second_msg_id,
+            model="m",
+            result=_make_result(),
+            session_trace_root_id=first_msg_id,
+        )
+
+        ctx = mock_tracer.start_as_current_span.call_args.kwargs["context"]
+        from opentelemetry.trace import get_current_span
+
+        parent_span = get_current_span(ctx)
+        parent_sc = parent_span.get_span_context()
+
+        # trace_id は session_trace_root_id (first_msg_id) から生成される
+        expected_trace_id = telemetry._uuid_to_trace_id_int(first_msg_id)
+        assert parent_sc.trace_id == expected_trace_id, (
+            f"trace_id should match first_msg_id: got {hex(parent_sc.trace_id)}, "
+            f"expected {hex(expected_trace_id)}"
+        )
+        # trace_id が second_msg_id から生成されていないことを確認
+        wrong_trace_id = telemetry._uuid_to_trace_id_int(second_msg_id)
+        assert parent_sc.trace_id != wrong_trace_id
+
+    def test_session_trace_root_id_overrides_parent_span_id(self, monkeypatch) -> None:
+        """session_trace_root_id が指定されると parent_span_id がその UUID から生成される。"""
+        mock_tracer = self._inject_mock_tracer(monkeypatch)
+
+        first_msg_id = "aaaaaaaa-bbbb-cccc-dddd-000000000001"
+        second_msg_id = "11111111-2222-3333-4444-555555555555"
+
+        telemetry.emit_span(
+            caused_by_id=second_msg_id,
+            model="m",
+            result=_make_result(),
+            session_trace_root_id=first_msg_id,
+        )
+
+        ctx = mock_tracer.start_as_current_span.call_args.kwargs["context"]
+        from opentelemetry.trace import get_current_span
+
+        parent_span = get_current_span(ctx)
+        parent_sc = parent_span.get_span_context()
+
+        # parent_span_id は session_trace_root_id (first_msg_id) から生成される
+        expected_parent_span_id = telemetry._uuid_to_span_id_int(first_msg_id)
+        assert parent_sc.span_id == expected_parent_span_id, (
+            f"parent_span_id should match first_msg_id: got {hex(parent_sc.span_id)}, "
+            f"expected {hex(expected_parent_span_id)}"
+        )
+
+    def test_session_trace_root_id_none_falls_back_to_caused_by_id(
+        self, monkeypatch
+    ) -> None:
+        """session_trace_root_id=None のとき caused_by_id が従来通り使われる (後方互換)。"""
+        mock_tracer = self._inject_mock_tracer(monkeypatch)
+
+        caused_by_id = "550e8400-e29b-41d4-a716-446655440000"
+        telemetry.emit_span(
+            caused_by_id=caused_by_id,
+            model="m",
+            result=_make_result(),
+            session_trace_root_id=None,  # 明示的に None
+        )
+
+        ctx = mock_tracer.start_as_current_span.call_args.kwargs["context"]
+        from opentelemetry.trace import get_current_span
+
+        parent_span = get_current_span(ctx)
+        parent_sc = parent_span.get_span_context()
+
+        # trace_id, parent_span_id は caused_by_id から生成される
+        assert parent_sc.trace_id == telemetry._uuid_to_trace_id_int(caused_by_id)
+        assert parent_sc.span_id == telemetry._uuid_to_span_id_int(caused_by_id)
+
+    def test_msg_id_attribute_still_uses_caused_by_id(self, monkeypatch) -> None:
+        """session_trace_root_id が指定されても msg_id 属性は caused_by_id のまま。"""
+        self._inject_mock_tracer(monkeypatch)
+
+        mock_span = MagicMock()
+        mock_ctx = MagicMock()
+        mock_ctx.__enter__ = MagicMock(return_value=mock_span)
+        mock_ctx.__exit__ = MagicMock(return_value=False)
+        telemetry._tracer.start_as_current_span.return_value = mock_ctx  # type: ignore[union-attr]
+
+        first_msg_id = "aaaaaaaa-bbbb-cccc-dddd-000000000001"
+        second_msg_id = "11111111-2222-3333-4444-555555555555"
+
+        telemetry.emit_span(
+            caused_by_id=second_msg_id,
+            model="m",
+            result=_make_result(),
+            session_trace_root_id=first_msg_id,
+        )
+
+        # msg_id 属性は caused_by_id (2通目) であること
+        mock_span.set_attribute.assert_any_call("msg_id", second_msg_id)
+
+    def test_full_round_trip_with_session_trace_root_id(self, monkeypatch) -> None:
+        """実際の OTel SDK で session_trace_root_id が trace_id / parent_span_id に反映される。"""
+        from opentelemetry.sdk.trace import TracerProvider
+        from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+        from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
+            InMemorySpanExporter,
+        )
+
+        id_gen = telemetry._FixedNextSpanIdGenerator()
+        provider = TracerProvider(id_generator=id_gen)
+        real_tracer = provider.get_tracer("test")
+
+        monkeypatch.setenv("AGENT_HUB_TELEMETRY_URL", "http://localhost:4318")
+        telemetry._tracer = real_tracer
+        telemetry._TRACER_INIT = True
+        telemetry._id_generator = id_gen
+
+        exporter = InMemorySpanExporter()
+        provider.add_span_processor(SimpleSpanProcessor(exporter))
+
+        first_msg_id = "aaaaaaaa-bbbb-cccc-dddd-000000000001"  # セッション最初
+        second_msg_id = "11111111-2222-3333-4444-555555555555"  # 2通目
+        sent_msg_id = "cafebabe-dead-beef-1234-567890abcdef"
+
+        telemetry.emit_span(
+            caused_by_id=second_msg_id,
+            sent_msg_id=sent_msg_id,
+            model="claude-sonnet-4-6",
+            result=_make_result(),
+            session_trace_root_id=first_msg_id,
+        )
+
+        spans = exporter.get_finished_spans()
+        assert len(spans) == 1
+        span = spans[0]
+
+        # span_id は sent_msg_id から生成される
+        assert span.context.span_id == telemetry._uuid_to_span_id_int(sent_msg_id)
+        # parent_span_id と trace_id は session_trace_root_id (first_msg_id) から
+        assert span.parent.span_id == telemetry._uuid_to_span_id_int(first_msg_id)
+        assert span.context.trace_id == telemetry._uuid_to_trace_id_int(first_msg_id)
+        # msg_id 属性は caused_by_id (second_msg_id) のまま
+        attr_names = [call.args[0] for call in span.attributes.items() if False] or None
+        # attributes dict で確認
+        assert span.attributes.get("msg_id") == second_msg_id
+
+
 # ---------- build_traceparent / make_subprocess_telemetry_env (issue #91) ----------
 
 
