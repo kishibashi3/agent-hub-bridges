@@ -341,6 +341,39 @@ func TestSession_Stop_ForceKill(t *testing.T) {
 	}
 }
 
+func TestSession_Stop_ContextCancelledDuringGracefulWait(t *testing.T) {
+	r := &mockRunner{}
+	// IsAlive (first): alive
+	// send-keys C-c: success
+	// ctx cancelled → select exits immediately
+	// IsAlive after cancel: still alive → force kill
+	r.runQueue = []error{
+		nil, // IsAlive → alive
+		nil, // send-keys C-c
+		nil, // IsAlive after ctx cancel → still alive
+		nil, // kill-session
+	}
+
+	s := newTestSession(r)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // pre-cancel so graceful wait exits immediately
+
+	if err := s.Stop(ctx); err != nil {
+		t.Errorf("Stop() = %v, want nil", err)
+	}
+
+	// kill-session should be called because ctx was cancelled before graceful exit
+	killCalled := false
+	for _, call := range r.runCalls {
+		if len(call) > 0 && call[0] == "kill-session" {
+			killCalled = true
+		}
+	}
+	if !killCalled {
+		t.Error("kill-session should be called when ctx is cancelled during graceful wait")
+	}
+}
+
 // ──────────────────────────────────────────────────────────────────────── //
 // InjectMessage                                                            //
 // ──────────────────────────────────────────────────────────────────────── //
@@ -393,6 +426,21 @@ func TestSession_InjectMessage_PasteFail(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "paste-buffer") {
 		t.Errorf("expected 'paste-buffer' in error, got: %v", err)
+	}
+}
+
+func TestSession_InjectMessage_SendKeysFail(t *testing.T) {
+	r := &mockRunner{}
+	// load-buffer: success, paste-buffer: success, send-keys (Enter): fail
+	r.runQueue = []error{nil, nil, fmt.Errorf("send-keys failed")}
+	s := newTestSession(r)
+
+	err := s.InjectMessage("hello")
+	if err == nil {
+		t.Error("InjectMessage() should fail when send-keys errors")
+	}
+	if !strings.Contains(err.Error(), "send-keys") {
+		t.Errorf("expected 'send-keys' in error, got: %v", err)
 	}
 }
 
