@@ -42,7 +42,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -282,10 +282,13 @@ type streamEvent struct {
 //   - subprocess の exit code が非ゼロでも result イベントが得られていれば
 //     そちらを優先する (claude が partial result を出して失敗するケースを考慮)。
 //   - ctx がキャンセルされると exec.CommandContext が subprocess を kill する。
+//   - session keepalive: subprocess 実行中に bridge 側 MCP セッションが expire する
+//     問題を防ぐため、keepalive goroutine が定期的に GetMessages を呼ぶ。
+//     keepalive と MarkAsRead の競合を防ぐため clientMu で保護する。
 //
 // cfg.SubprocessTimeout > 0 の場合は追加タイムアウトを設ける。
 // 0 の場合は ctx のキャンセルのみで制御する。
-func runClaude(ctx context.Context, cfg *config, mcpConfigPath, prompt string) error {
+func runClaude(ctx context.Context, cfg *config, client *agenthub.Client, clientMu *sync.Mutex, mcpConfigPath, prompt string) error {
 	runCtx := ctx
 	if cfg.SubprocessTimeout > 0 {
 		var cancel context.CancelFunc
@@ -318,6 +321,34 @@ func runClaude(ctx context.Context, cfg *config, mcpConfigPath, prompt string) e
 	}
 	slog.Debug("claude subprocess started", "pid", cmd.Process.Pid)
 
+	// keepalive goroutine: subprocess 実行中に MCP セッションが expire するのを防ぐ。
+	// Get/MarkAsRead と競合しないよう clientMu でシリアライズする。
+	// subprocess 終了後の MarkAsRead より前に完全停止するため WaitGroup を使う。
+	const keepaliveInterval = 30 * time.Second
+	keepaliveDone := make(chan struct{})
+	var keepaliveWg sync.WaitGroup
+	keepaliveWg.Add(1)
+	go func() {
+		defer keepaliveWg.Done()
+		ticker := time.NewTicker(keepaliveInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-keepaliveDone:
+				return
+			case <-ticker.C:
+				clientMu.Lock()
+				_, kaErr := client.GetMessages(runCtx)
+				clientMu.Unlock()
+				if kaErr != nil {
+					slog.Debug("keepalive get_messages failed", "err", kaErr)
+				} else {
+					slog.Debug("keepalive get_messages ok")
+				}
+			}
+		}
+	}()
+
 	// stream-json をスキャンして result イベントを探す。
 	// エラーがあれば resultErr に記録して後で返す。
 	var resultErr error
@@ -346,6 +377,11 @@ func runClaude(ctx context.Context, cfg *config, mcpConfigPath, prompt string) e
 		slog.Warn("stream-json scan error", "err", scanErr)
 	}
 
+	// keepalive goroutine を停止してから cmd.Wait() する。
+	// これにより MarkAsRead の前に keepalive が完全終了することを保証する。
+	close(keepaliveDone)
+	keepaliveWg.Wait()
+
 	// subprocess の終了を待つ。
 	waitErr := cmd.Wait()
 	slog.Debug("claude subprocess finished", "exit_err", waitErr)
@@ -373,10 +409,14 @@ func runClaude(ctx context.Context, cfg *config, mcpConfigPath, prompt string) e
 //  3. プロンプト生成 → claude subprocess 起動 → 完了待ち
 //  4. subprocess エラー時: SendMessage でエラー通知
 //  5. MarkAsRead (成功・失敗問わず)
+//
+// clientMu は client への全 MCP 呼び出しを直列化するための mutex。
+// keepalive goroutine と MarkAsRead/SendMessage の競合を防ぐ。
 func handleMessage(
 	ctx context.Context,
 	cfg *config,
 	client *agenthub.Client,
+	clientMu *sync.Mutex,
 	mcpConfigPath string,
 	selfHandle string,
 	msg agenthub.Message,
@@ -384,7 +424,10 @@ func handleMessage(
 	// 自己ループ防止: bridge が送信したメッセージを再処理しない
 	if msg.Sender == selfHandle {
 		slog.Debug("skip self-sent message", "msg_id", msg.ID)
-		if err := client.MarkAsRead(ctx, msg.ID); err != nil {
+		clientMu.Lock()
+		err := client.MarkAsRead(ctx, msg.ID)
+		clientMu.Unlock()
+		if err != nil {
 			slog.Warn("mark_as_read (self-skip) failed", "msg_id", msg.ID, "err", err)
 		}
 		return
@@ -402,32 +445,39 @@ func handleMessage(
 			"workdir", cfg.Workdir, "msg_id", msg.ID)
 		sendCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		defer cancel()
+		clientMu.Lock()
 		_ = client.SendMessage(sendCtx, msg.Sender,
 			fmt.Sprintf("(auto) bridge workdir does not exist: %s", cfg.Workdir), msg.ID)
-		if err := client.MarkAsRead(ctx, msg.ID); err != nil {
-			slog.Warn("mark_as_read (workdir-missing) failed", "msg_id", msg.ID, "err", err)
-		}
+		_ = client.MarkAsRead(ctx, msg.ID)
+		clientMu.Unlock()
+		cancel()
 		return
 	}
 
 	prompt := formatPrompt(selfHandle, msg)
-	if err := runClaude(ctx, cfg, mcpConfigPath, prompt); err != nil {
+	// runClaude は内部で keepalive goroutine を走らせる。clientMu を渡して
+	// keepalive と MarkAsRead の競合を防ぐ。
+	if err := runClaude(ctx, cfg, client, clientMu, mcpConfigPath, prompt); err != nil {
 		slog.Error("claude subprocess error",
 			"msg_id", msg.ID, "from", msg.Sender, "err", err)
 		// エラーを送信元に通知する
 		errMsg := fmt.Sprintf("(auto) bridge-go-claude error: %v", err)
 		sendCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		defer cancel()
+		clientMu.Lock()
 		if sendErr := client.SendMessage(sendCtx, msg.Sender, errMsg, msg.ID); sendErr != nil {
 			slog.Error("fallback send_message failed", "msg_id", msg.ID, "err", sendErr)
 		}
+		clientMu.Unlock()
 	} else {
 		slog.Info("message processed", "msg_id", msg.ID, "from", msg.Sender)
 	}
 
+	clientMu.Lock()
 	if err := client.MarkAsRead(ctx, msg.ID); err != nil {
 		slog.Warn("mark_as_read failed", "msg_id", msg.ID, "err", err)
 	}
+	clientMu.Unlock()
 }
 
 // ──────────────────────────────────────────────────────────────────────── //
@@ -436,10 +486,14 @@ func handleMessage(
 
 // runBridge はポーリングループを回す。circuit breaker で MaxRetries 回連続失敗したら
 // error を返して呼出元の reconnect ループに入る。
+//
+// clientMu は client への全 MCP 呼び出しを直列化するための mutex。
+// handleMessage → runClaude の keepalive goroutine と MarkAsRead の競合を防ぐ。
 func runBridge(
 	ctx context.Context,
 	cfg *config,
 	client *agenthub.Client,
+	clientMu *sync.Mutex,
 	mcpConfigPath string,
 	selfHandle string,
 ) error {
@@ -456,7 +510,9 @@ func runBridge(
 		default:
 		}
 
+		clientMu.Lock()
 		msgs, err := client.GetMessages(ctx)
+		clientMu.Unlock()
 		if err != nil {
 			consecutiveFailures++
 			slog.Warn("get_messages error",
@@ -471,7 +527,7 @@ func runBridge(
 		consecutiveFailures = 0
 
 		for _, msg := range msgs {
-			handleMessage(ctx, cfg, client, mcpConfigPath, selfHandle, msg)
+			handleMessage(ctx, cfg, client, clientMu, mcpConfigPath, selfHandle, msg)
 		}
 
 		sleepWithContext(ctx, cfg.PollInterval)
@@ -517,31 +573,40 @@ func main() {
 	defer os.Remove(mcpConfigPath)
 
 	// agent-hub SDK クライアント初期化
-	client, err := agenthub.New(
-		cfg.AgentHubURL, cfg.GitHubPAT, cfg.User, cfg.Tenant,
-		agenthub.WithClientName("bridge-go-claude"),
-	)
-	if err != nil {
-		fatalCleanup("agenthub.New failed", "err", err)
+	// newClientAndRegister は毎回新しい Client を生成する。
+	// reconnect 時に古い sessionID を持つ Client を再利用すると re-initialize が
+	// HTTP 400 (missing/invalid session) で失敗するため、新規生成が必要。
+	newClientAndRegister := func() (*agenthub.Client, error) {
+		c, err := agenthub.New(
+			cfg.AgentHubURL, cfg.GitHubPAT, cfg.User, cfg.Tenant,
+			agenthub.WithClientName("bridge-go-claude"),
+		)
+		if err != nil {
+			return nil, fmt.Errorf("agenthub.New: %w", err)
+		}
+		if err := c.Initialize(ctx); err != nil {
+			return nil, fmt.Errorf("initialize: %w", err)
+		}
+		if _, err := c.Register(ctx, cfg.DisplayName, "stateless"); err != nil {
+			return nil, fmt.Errorf("register: %w", err)
+		}
+		return c, nil
 	}
 
-	// MCP initialize
-	if err := client.Initialize(ctx); err != nil {
-		fatalCleanup("MCP initialize failed", "err", err)
-	}
-
-	// register
-	registered, err := client.Register(ctx, cfg.DisplayName, "stateless")
+	client, err := newClientAndRegister()
 	if err != nil {
-		fatalCleanup("register failed", "err", err)
+		fatalCleanup("initial connect failed", "err", err)
 	}
-	slog.Info("registered", "result", strings.SplitN(registered, "\n", 2)[0])
+	slog.Info("registered", "handle", "@"+cfg.User)
 
 	selfHandle := "@" + cfg.User
+	// clientMu は client への全 MCP 呼び出しを直列化する。
+	// keepalive goroutine と polling/mark_as_read の競合を防ぐ。
+	var clientMu sync.Mutex
 
 	// ポーリングループ (reconnect あり)
 	for {
-		err := runBridge(ctx, cfg, client, mcpConfigPath, selfHandle)
+		err := runBridge(ctx, cfg, client, &clientMu, mcpConfigPath, selfHandle)
 		if ctx.Err() != nil {
 			slog.Info("bridge-go-claude shutting down")
 			return
@@ -557,15 +622,17 @@ func main() {
 			return
 		}
 
-		// MCP セッションを再確立する
-		if err := client.Initialize(ctx); err != nil {
-			slog.Warn("re-initialize failed", "err", err)
+		// 新しい Client を生成して reconnect する。
+		// 旧 Client の sessionID を引き継ぐと re-initialize が HTTP 400 で失敗するため
+		// 必ず新規生成する (テスト中に確認した問題 — fix)。
+		newClient, err := newClientAndRegister()
+		if err != nil {
+			slog.Warn("reconnect failed", "err", err)
 			continue
 		}
-		if _, err := client.Register(ctx, cfg.DisplayName, "stateless"); err != nil {
-			slog.Warn("re-register failed", "err", err)
-			continue
-		}
+		clientMu.Lock()
+		client = newClient
+		clientMu.Unlock()
 		slog.Info("reconnected and re-registered", "handle", selfHandle)
 	}
 }
