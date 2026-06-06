@@ -37,9 +37,9 @@ from agent_hub_bridges.claude.worker import (
     _COMPACT_ARCHIVE_DIR_ENV,
     _COMPACT_CHECK_INTERVAL_S,
     _COMPACT_IDLE_S,
-    _IdleCompactWatchdog,
     _append_compact_summary,
     _compact_archive_dir,
+    _IdleCompactWatchdog,
 )
 
 # ---------------------------------------------------------------------------
