@@ -296,6 +296,7 @@ func runClaude(ctx context.Context, cfg *config, mcpConfigPath, prompt string) e
 	args := []string{
 		"-p", prompt,
 		"--output-format", "stream-json",
+		"--verbose", // required with --output-format stream-json in print mode
 		"--permission-mode", "bypassPermissions",
 		"--mcp-config", mcpConfigPath,
 	}
