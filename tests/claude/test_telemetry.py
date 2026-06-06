@@ -1022,3 +1022,105 @@ class TestServiceNameConfig:
         call_kwargs = mock_provider_cls.call_args.kwargs
         resource = call_kwargs["resource"]
         assert resource.attributes.get("service.name") == "bridge-claude"
+
+
+# ---------------------------------------------------------------------------
+# TestSanitizeToolInput (issue #111, #112)
+# ---------------------------------------------------------------------------
+
+
+class TestSanitizeToolInput:
+    """_sanitize_tool_input の masking ロジックを直接検証する (issue #111, #112)。"""
+
+    def test_password_masked(self) -> None:
+        """'password' キーは '***' に置換される。"""
+        from agent_hub_bridges.claude.telemetry import _sanitize_tool_input
+
+        result = _sanitize_tool_input({"password": "secret123", "cmd": "ls"})
+        assert result["password"] == "***"
+        assert result["cmd"] == "ls"
+
+    def test_api_key_exact_masked(self) -> None:
+        """'api_key' キーは '***' に置換される。"""
+        from agent_hub_bridges.claude.telemetry import _sanitize_tool_input
+
+        result = _sanitize_tool_input({"api_key": "sk-abc123"})
+        assert result["api_key"] == "***"
+
+    def test_key_exact_masked(self) -> None:
+        """'key' キー(完全一致)は '***' に置換される。"""
+        from agent_hub_bridges.claude.telemetry import _sanitize_tool_input
+
+        result = _sanitize_tool_input({"key": "encryption-key-value"})
+        assert result["key"] == "***"
+
+    def test_pat_exact_masked(self) -> None:
+        """'pat' キー(完全一致)は '***' に置換される。"""
+        from agent_hub_bridges.claude.telemetry import _sanitize_tool_input
+
+        result = _sanitize_tool_input({"pat": "ghp_xxxx"})
+        assert result["pat"] == "***"
+
+    def test_compound_token_masked(self) -> None:
+        """'api_token' / 'access_token' 等のサブワード合成キーがマスクされる (issue #112)。"""
+        from agent_hub_bridges.claude.telemetry import _sanitize_tool_input
+
+        result = _sanitize_tool_input({
+            "api_token": "tok-abc",
+            "access_token": "tok-xyz",
+        })
+        assert result["api_token"] == "***"
+        assert result["access_token"] == "***"
+
+    def test_compound_secret_masked(self) -> None:
+        """'client_secret' 等のサブワード合成キーがマスクされる (issue #112)。"""
+        from agent_hub_bridges.claude.telemetry import _sanitize_tool_input
+
+        result = _sanitize_tool_input({"client_secret": "cs-123"})
+        assert result["client_secret"] == "***"
+
+    def test_private_key_masked(self) -> None:
+        """'private_key' はサブワード合成としてマスクされる (issue #112)。"""
+        from agent_hub_bridges.claude.telemetry import _sanitize_tool_input
+
+        result = _sanitize_tool_input({"private_key": "-----BEGIN RSA..."})
+        assert result["private_key"] == "***"
+
+    def test_case_insensitive_masking(self) -> None:
+        """大文字・混在キーも大文字小文字を区別せずマスクされる。"""
+        from agent_hub_bridges.claude.telemetry import _sanitize_tool_input
+
+        result = _sanitize_tool_input({
+            "PASSWORD": "secret",
+            "Api_Key": "key123",
+            "ACCESS_TOKEN": "tok",
+        })
+        assert result["PASSWORD"] == "***"
+        assert result["Api_Key"] == "***"
+        assert result["ACCESS_TOKEN"] == "***"
+
+    def test_normal_fields_not_masked(self) -> None:
+        """通常フィールドはマスクされず、値がそのまま返る。"""
+        from agent_hub_bridges.claude.telemetry import _sanitize_tool_input
+
+        result = _sanitize_tool_input({
+            "command": "ls -la",
+            "path": "/tmp/foo",
+            "count": "42",
+        })
+        assert result["command"] == "ls -la"
+        assert result["path"] == "/tmp/foo"
+        assert result["count"] == "42"
+
+    def test_all_sensitive_keywords_in_keys(self) -> None:
+        """_SENSITIVE_KEYWORDS の全キーワードを含むキーがマスクされる。"""
+        from agent_hub_bridges.claude.telemetry import (
+            _SENSITIVE_KEYWORDS,
+            _sanitize_tool_input,
+        )
+
+        # 各キーワードをキー名に含むエントリを生成して全てマスクされることを確認
+        tool_input = {f"my_{kw}_field": "value" for kw in _SENSITIVE_KEYWORDS}
+        result = _sanitize_tool_input(tool_input)
+        for k in tool_input:
+            assert result[k] == "***", f"{k!r} should be masked"
