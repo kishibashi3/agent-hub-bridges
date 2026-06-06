@@ -145,8 +145,10 @@ func StartHealthServer(ctx context.Context, port int, state *HealthState) {
 			slog.Error("health handler: encode failed", "err", err)
 		}
 	})
+	// 127.0.0.1 に bind して外部公開を防ぐ。
+	// LAN/外部に expose する場合は operator が reverse proxy (nginx 等) で制御すること。
 	srv := &http.Server{
-		Addr:         fmt.Sprintf(":%d", port),
+		Addr:         fmt.Sprintf("127.0.0.1:%d", port),
 		Handler:      mux,
 		ReadTimeout:  5 * time.Second,
 		WriteTimeout: 5 * time.Second,

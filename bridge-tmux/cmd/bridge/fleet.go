@@ -164,6 +164,7 @@ func RunFleet(ctx context.Context, global *config, fleet *FleetConfig, health *H
 			cfg := personaToConfig(p, global)
 			slog.Info("fleet persona starting", "handle", "@"+cfg.User, "workdir", cfg.Workdir)
 			if err := runPersona(ctx, cfg, p.Env, health); err != nil {
+				health.RecordError("@"+cfg.User, err.Error())
 				mu.Lock()
 				errs = append(errs, fmt.Errorf("persona @%s: %w", cfg.User, err))
 				mu.Unlock()
