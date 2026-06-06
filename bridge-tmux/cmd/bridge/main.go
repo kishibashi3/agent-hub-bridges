@@ -75,7 +75,8 @@ func parseConfig() (*config, error) {
 		model        = flag.String("model", "", "Claude model (default: claude default)")
 		idleTimeout  = flag.Duration("idle-timeout", 10*time.Minute, "idle kill timeout")
 		spawnTimeout = flag.Duration("spawn-timeout", 60*time.Second, "timeout for Tier2 (claude) initial output after spawn")
-		noBypass     = flag.Bool("no-bypass-permissions", false, "disable --dangerously-skip-permissions")
+		noBypass     = flag.Bool("no-bypass-permissions", false, "disable --permission-mode bypassPermissions")
+		tenant       = flag.String("tenant", "", "agent-hub tenant ID (overrides AGENT_HUB_TENANT env)")
 		fleetFile    = flag.String("fleet", "", "fleet YAML config file (multi-persona mode)")
 		logLevel     = flag.String("log-level", "info", "log level: debug|info|warn|error")
 		healthPort   = flag.Int("health-port", 0, "HTTP /health port (0 = disabled)")
@@ -135,7 +136,7 @@ func parseConfig() (*config, error) {
 		DisplayName:      *displayName,
 		AgentHubURL:      url,
 		GitHubPAT:        pat,
-		Tenant:           os.Getenv("AGENT_HUB_TENANT"),
+		Tenant:           tenantValue(*tenant),
 		Workdir:          wd,
 		ClaudeCLI:        claudeCLI,
 		Model:            *model,
@@ -609,6 +610,15 @@ func main() {
 // ──────────────────────────────────────────────────────────────────────── //
 // ユーティリティ                                                           //
 // ──────────────────────────────────────────────────────────────────────── //
+
+// tenantValue は --tenant フラグと AGENT_HUB_TENANT 環境変数を統合して返す。
+// フラグが空なら env var にフォールバック。spawn-bridge.sh との互換性を保つ。
+func tenantValue(flagVal string) string {
+	if flagVal != "" {
+		return flagVal
+	}
+	return os.Getenv("AGENT_HUB_TENANT")
+}
 
 func sleepWithContext(ctx context.Context, d time.Duration) {
 	select {
