@@ -28,7 +28,7 @@
 // 環境変数:
 //   AGENT_HUB_URL      required    agent-hub MCP エンドポイント
 //   GITHUB_PAT         required    GitHub Personal Access Token
-//   AGENT_HUB_TENANT   optional    テナント ID (省略 = default tenant)
+//   AGENT_HUB_TENANT   optional    テナント ID (--tenant フラグが優先、省略 = default tenant)
 //   CLAUDE_CLI_PATH    optional    claude CLI のパス (省略 = PATH 上の "claude")
 //   AGENT_HUB_MODEL    optional    Claude model (省略 = --model フラグ > claude default)
 //
@@ -83,6 +83,7 @@ func parseConfig() (*config, error) {
 	var (
 		user              = flag.String("user", "", "agent-hub handle (without @) [required]")
 		displayName       = flag.String("display-name", "", "display name (optional)")
+		tenant            = flag.String("tenant", "", "agent-hub tenant ID (overrides AGENT_HUB_TENANT env)")
 		workdir           = flag.String("workdir", "", "peer workdir with CLAUDE.md (default: cwd)")
 		model             = flag.String("model", "", "Claude model override (default: AGENT_HUB_MODEL env or claude default)")
 		logLevel          = flag.String("log-level", "info", "log level: debug|info|warn|error")
@@ -148,7 +149,7 @@ func parseConfig() (*config, error) {
 		DisplayName:       resolvedDisplayName,
 		AgentHubURL:       url,
 		GitHubPAT:         pat,
-		Tenant:            os.Getenv("AGENT_HUB_TENANT"),
+		Tenant:            tenantValue(*tenant),
 		Workdir:           wd,
 		ClaudeCLI:         claudeCLI,
 		Model:             resolvedModel,
@@ -636,6 +637,15 @@ func main() {
 // ──────────────────────────────────────────────────────────────────────── //
 // ユーティリティ                                                           //
 // ──────────────────────────────────────────────────────────────────────── //
+
+// tenantValue は --tenant フラグと AGENT_HUB_TENANT 環境変数を統合して返す。
+// フラグが空なら env var にフォールバック。spawn-bridge.sh との互換性を保つ。
+func tenantValue(flagVal string) string {
+	if flagVal != "" {
+		return flagVal
+	}
+	return os.Getenv("AGENT_HUB_TENANT")
+}
 
 func sleepWithContext(ctx context.Context, d time.Duration) {
 	select {
