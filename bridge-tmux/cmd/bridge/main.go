@@ -138,27 +138,16 @@ func parseConfig() (*config, error) {
 // session.Start() を呼ぶと race になる。timerDone channel を使って
 // timer.Stop() が false (= 発火済み) だった場合に goroutine の完了を待つ。
 type SessionManager struct {
-	session   *tmux.Session
+	session   tmux.SessionIface
 	cfg       *config
 	idleTimer *time.Timer
 	timerDone chan struct{} // AfterFunc goroutine 完了通知; nil = timer 未設定
 	timerMu   sync.Mutex
 }
 
-func newSessionManager(cfg *config, mcpConfigPath string) *SessionManager {
-	opts := tmux.SessionOptions{
-		UserID:           cfg.User,
-		Workdir:          cfg.Workdir,
-		MCPConfigPath:    mcpConfigPath,
-		ClaudeCLI:        cfg.ClaudeCLI,
-		Model:            cfg.Model,
-		BypassPerms:      cfg.BypassPerms,
-		SpawnTimeout:     cfg.SpawnTimeout,
-		ActivityIdleTime: cfg.ActivityIdle,
-		ResponseTimeout:  cfg.ResponseTimeout,
-	}
+func newSessionManager(cfg *config, session tmux.SessionIface) *SessionManager {
 	return &SessionManager{
-		session: tmux.NewSession(opts),
+		session: session,
 		cfg:     cfg,
 	}
 }
@@ -183,7 +172,7 @@ func (m *SessionManager) Handle(ctx context.Context, prompt string) error {
 
 	// Tier2 が停止していれば spawn する
 	if !m.session.IsAlive() {
-		log.Printf("[manager] session cold — spawning Tier2: %s", m.session.Name)
+		log.Printf("[manager] session cold — spawning Tier2: claude-bridge-%s", m.cfg.User)
 		if err := m.session.Start(ctx); err != nil {
 			return fmt.Errorf("spawn: %w", err)
 		}
@@ -207,8 +196,8 @@ func (m *SessionManager) Handle(ctx context.Context, prompt string) error {
 	m.timerDone = done
 	m.idleTimer = time.AfterFunc(m.cfg.IdleTimeout, func() {
 		defer close(done) // Handle() が待てるよう完了を通知する
-		log.Printf("[manager] idle timeout (%.0fs) — stopping session %s",
-			m.cfg.IdleTimeout.Seconds(), m.session.Name)
+		log.Printf("[manager] idle timeout (%.0fs) — stopping session claude-bridge-%s",
+			m.cfg.IdleTimeout.Seconds(), m.cfg.User)
 		ctx2, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		_ = m.session.Stop(ctx2)
@@ -443,7 +432,18 @@ func main() {
 	log.Printf("[main] registered: %s", strings.SplitN(registered, "\n", 2)[0])
 
 	// session manager
-	manager := newSessionManager(cfg, mcpConfigPath)
+	session := tmux.NewSession(tmux.SessionOptions{
+		UserID:           cfg.User,
+		Workdir:          cfg.Workdir,
+		MCPConfigPath:    mcpConfigPath,
+		ClaudeCLI:        cfg.ClaudeCLI,
+		Model:            cfg.Model,
+		BypassPerms:      cfg.BypassPerms,
+		SpawnTimeout:     cfg.SpawnTimeout,
+		ActivityIdleTime: cfg.ActivityIdle,
+		ResponseTimeout:  cfg.ResponseTimeout,
+	})
+	manager := newSessionManager(cfg, session)
 	defer func() {
 		shutCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
