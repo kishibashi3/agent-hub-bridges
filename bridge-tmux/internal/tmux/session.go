@@ -15,6 +15,7 @@ package tmux
 import (
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"os/exec"
 	"strings"
@@ -22,10 +23,53 @@ import (
 )
 
 const (
-	pollIntervalS    = 500 * time.Millisecond
-	gracefulWaitS    = 5 * time.Second
-	minActivityWaitS = 1 * time.Second
+	defaultPollInterval    = 500 * time.Millisecond
+	defaultGracefulWait    = 5 * time.Second
+	defaultMinActivityWait = 1 * time.Second
 )
+
+// tmuxRunner abstracts tmux exec.Command calls for testability.
+// Production uses realRunner; tests inject a mock.
+type tmuxRunner interface {
+	run(args ...string) error
+	runCtx(ctx context.Context, args ...string) error
+	runWithStdin(stdin io.Reader, args ...string) error
+	output(args ...string) ([]byte, error)
+}
+
+// SessionIface is the interface implemented by *Session.
+// Use it to inject mock sessions in tests (e.g. in SessionManager).
+type SessionIface interface {
+	IsAlive() bool
+	Start(ctx context.Context) error
+	Stop(ctx context.Context) error
+	InjectMessage(text string) error
+	WaitForIdle(ctx context.Context) error
+}
+
+// Compile-time assertion: *Session must implement SessionIface.
+var _ SessionIface = (*Session)(nil)
+
+// realRunner is the production tmuxRunner using exec.Command.
+type realRunner struct{}
+
+func (realRunner) run(args ...string) error {
+	return exec.Command("tmux", args...).Run()
+}
+
+func (realRunner) runCtx(ctx context.Context, args ...string) error {
+	return exec.CommandContext(ctx, "tmux", args...).Run()
+}
+
+func (realRunner) runWithStdin(stdin io.Reader, args ...string) error {
+	cmd := exec.Command("tmux", args...)
+	cmd.Stdin = stdin
+	return cmd.Run()
+}
+
+func (realRunner) output(args ...string) ([]byte, error) {
+	return exec.Command("tmux", args...).Output()
+}
 
 // Session は 1 peer に対応する tmux セッション。
 type Session struct {
@@ -36,6 +80,24 @@ type Session struct {
 	Model            string
 	BypassPerms      bool
 	startedBefore    bool
+	SpawnTimeout     time.Duration
+	ActivityIdleTime time.Duration
+	ResponseTimeout  time.Duration
+	// Timing overrides — zero means use default constant.
+	PollInterval    time.Duration // default: 500ms
+	GracefulWait    time.Duration // default: 5s
+	MinActivityWait time.Duration // default: 1s
+	runner          tmuxRunner
+}
+
+// SessionOptions は NewSession のオプション。
+type SessionOptions struct {
+	UserID           string
+	Workdir          string
+	MCPConfigPath    string
+	ClaudeCLI        string
+	Model            string
+	BypassPerms      bool
 	SpawnTimeout     time.Duration
 	ActivityIdleTime time.Duration
 	ResponseTimeout  time.Duration
@@ -54,20 +116,29 @@ func NewSession(opts SessionOptions) *Session {
 		SpawnTimeout:     opts.SpawnTimeout,
 		ActivityIdleTime: opts.ActivityIdleTime,
 		ResponseTimeout:  opts.ResponseTimeout,
+		runner:           realRunner{},
 	}
 }
 
-// SessionOptions は NewSession のオプション。
-type SessionOptions struct {
-	UserID           string
-	Workdir          string
-	MCPConfigPath    string
-	ClaudeCLI        string
-	Model            string
-	BypassPerms      bool
-	SpawnTimeout     time.Duration
-	ActivityIdleTime time.Duration
-	ResponseTimeout  time.Duration
+func (s *Session) pollInterval() time.Duration {
+	if s.PollInterval > 0 {
+		return s.PollInterval
+	}
+	return defaultPollInterval
+}
+
+func (s *Session) gracefulWait() time.Duration {
+	if s.GracefulWait > 0 {
+		return s.GracefulWait
+	}
+	return defaultGracefulWait
+}
+
+func (s *Session) minActivityWait() time.Duration {
+	if s.MinActivityWait > 0 {
+		return s.MinActivityWait
+	}
+	return defaultMinActivityWait
 }
 
 // ──────────────────────────────────────────────────────────────────────── //
@@ -76,8 +147,7 @@ type SessionOptions struct {
 
 // IsAlive は tmux セッションが存在するか確認する。
 func (s *Session) IsAlive() bool {
-	err := exec.Command("tmux", "has-session", "-t", s.Name).Run()
-	return err == nil
+	return s.runner.run("has-session", "-t", s.Name) == nil
 }
 
 // Start は tmux セッションを新規作成して claude を起動する。
@@ -91,26 +161,26 @@ func (s *Session) Start(ctx context.Context) error {
 	}
 
 	log.Printf("[tmux] creating session %s (workdir=%s)", s.Name, s.Workdir)
-	if err := exec.CommandContext(ctx,
-		"tmux", "new-session", "-d",
+	if err := s.runner.runCtx(ctx,
+		"new-session", "-d",
 		"-s", s.Name,
 		"-c", s.Workdir,
-	).Run(); err != nil {
+	); err != nil {
 		return fmt.Errorf("tmux new-session: %w", err)
 	}
 
 	cmdStr := s.buildCLICommand()
 	log.Printf("[tmux] starting claude: %s", cmdStr)
-	if err := exec.CommandContext(ctx,
-		"tmux", "send-keys", "-t", s.Name, cmdStr, "Enter",
-	).Run(); err != nil {
-		// send-keys 失敗時は空セッションが残留しないよう best-effort cleanup する (reviewer minor)
+	if err := s.runner.runCtx(ctx, "send-keys", "-t", s.Name, cmdStr, "Enter"); err != nil {
+		// send-keys 失敗時は空セッションが残留しないよう best-effort cleanup する
 		_ = s.Stop(ctx)
 		return fmt.Errorf("tmux send-keys (start): %w", err)
 	}
 
 	// claude が起動して pane に何か出力するまで待つ
-	time.Sleep(minActivityWaitS)
+	if wait := s.minActivityWait(); wait > 0 {
+		time.Sleep(wait)
+	}
 	deadline := time.Now().Add(s.SpawnTimeout)
 	baseline := s.capturePaneText()
 
@@ -126,10 +196,9 @@ func (s *Session) Start(ctx context.Context) error {
 			s.startedBefore = true
 			return nil
 		}
-		time.Sleep(pollIntervalS)
+		time.Sleep(s.pollInterval())
 	}
 
-	// タイムアウト
 	_ = s.Stop(ctx)
 	return fmt.Errorf("claude did not start within %.0fs in session %s",
 		s.SpawnTimeout.Seconds(), s.Name)
@@ -143,16 +212,16 @@ func (s *Session) Stop(ctx context.Context) error {
 	log.Printf("[tmux] stopping session %s", s.Name)
 
 	// Ctrl+C で graceful 終了を試みる
-	_ = exec.Command("tmux", "send-keys", "-t", s.Name, "C-c", "").Run()
+	_ = s.runner.run("send-keys", "-t", s.Name, "C-c", "")
 
-	// gracefulWaitS 待って、まだ生きていれば force kill
+	// gracefulWait 待って、まだ生きていれば force kill
 	select {
-	case <-time.After(gracefulWaitS):
+	case <-time.After(s.gracefulWait()):
 	case <-ctx.Done():
 	}
 
 	if s.IsAlive() {
-		_ = exec.Command("tmux", "kill-session", "-t", s.Name).Run()
+		_ = s.runner.run("kill-session", "-t", s.Name)
 	}
 	log.Printf("[tmux] session %s stopped", s.Name)
 	return nil
@@ -167,25 +236,22 @@ func (s *Session) Stop(ctx context.Context) error {
 func (s *Session) InjectMessage(text string) error {
 	bufName := "bridge-" + s.Name
 
-	// テキストを named buffer に書き込む
-	loadCmd := exec.Command("tmux", "load-buffer", "-b", bufName, "-")
-	loadCmd.Stdin = strings.NewReader(text)
-	if err := loadCmd.Run(); err != nil {
+	if err := s.runner.runWithStdin(strings.NewReader(text),
+		"load-buffer", "-b", bufName, "-",
+	); err != nil {
 		return fmt.Errorf("tmux load-buffer: %w", err)
 	}
 
-	// バッファをペインに貼り付ける
-	if err := exec.Command("tmux", "paste-buffer", "-b", bufName, "-t", s.Name).Run(); err != nil {
+	if err := s.runner.run("paste-buffer", "-b", bufName, "-t", s.Name); err != nil {
 		return fmt.Errorf("tmux paste-buffer: %w", err)
 	}
 
-	// Enter を送信してメッセージを確定する
-	if err := exec.Command("tmux", "send-keys", "-t", s.Name, "", "Enter").Run(); err != nil {
+	if err := s.runner.run("send-keys", "-t", s.Name, "", "Enter"); err != nil {
 		return fmt.Errorf("tmux send-keys (enter): %w", err)
 	}
 
 	// buffer を削除 (PAT 等の機密情報をメモリから消す)
-	_ = exec.Command("tmux", "delete-buffer", "-b", bufName).Run()
+	_ = s.runner.run("delete-buffer", "-b", bufName)
 
 	log.Printf("[tmux] injected %d chars to session %s", len(text), s.Name)
 	return nil
@@ -215,7 +281,7 @@ func (s *Session) WaitForIdle(ctx context.Context) error {
 			baseline = content
 			break
 		}
-		time.Sleep(pollIntervalS)
+		time.Sleep(s.pollInterval())
 	}
 	if !activityStarted {
 		return fmt.Errorf("session %s: claude did not start processing within %.0fs",
@@ -232,7 +298,7 @@ func (s *Session) WaitForIdle(ctx context.Context) error {
 			return ctx.Err()
 		default:
 		}
-		time.Sleep(pollIntervalS)
+		time.Sleep(s.pollInterval())
 
 		// tmux セッションが死んだ場合は capturePaneText が "" を返し続ける。
 		// 「変化なし」→ idle timeout で false success にならないよう死活確認する。
@@ -259,7 +325,7 @@ func (s *Session) WaitForIdle(ctx context.Context) error {
 // ──────────────────────────────────────────────────────────────────────── //
 
 func (s *Session) capturePaneText() string {
-	out, err := exec.Command("tmux", "capture-pane", "-p", "-S", "-", "-t", s.Name).Output()
+	out, err := s.runner.output("capture-pane", "-p", "-S", "-", "-t", s.Name)
 	if err != nil {
 		return ""
 	}
