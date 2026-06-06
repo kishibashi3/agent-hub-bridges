@@ -158,6 +158,35 @@ func TestBuildCLICommand_NoContinueFirstStart(t *testing.T) {
 	}
 }
 
+func TestBuildCLICommand_Env(t *testing.T) {
+	s := &Session{
+		ClaudeCLI:     "claude",
+		MCPConfigPath: "/tmp/c.json",
+		Env: map[string]string{
+			"FOO": "bar",
+			"ZAP": "baz",
+		},
+	}
+	got := s.buildCLICommand()
+	// env vars はキーソート順でコマンド先頭に付加される
+	if !strings.HasPrefix(got, "FOO='bar' ZAP='baz'") {
+		t.Errorf("env prefix missing or wrong order: %q", got)
+	}
+	if !strings.Contains(got, "'claude'") {
+		t.Errorf("claude binary missing: %q", got)
+	}
+}
+
+func TestBuildCLICommand_EnvEmpty(t *testing.T) {
+	// Env が nil / 空の場合は従来通り (先頭に余分なスペースなし)
+	s := &Session{ClaudeCLI: "claude", MCPConfigPath: "/tmp/c.json", Env: nil}
+	got := s.buildCLICommand()
+	want := "'claude' --mcp-config '/tmp/c.json'"
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
 // ──────────────────────────────────────────────────────────────────────── //
 // IsAlive                                                                  //
 // ──────────────────────────────────────────────────────────────────────── //
