@@ -52,6 +52,7 @@ from agent_hub_bridges.claude.claude_runner import ClaudeRunner
 from agent_hub_bridges.claude.config import Config
 from agent_hub_bridges.claude.cursor import load_cursor, save_cursor
 from agent_hub_bridges.claude.telemetry import (
+    ToolUseRecord,
     build_traceparent,
     emit_span,
     make_subprocess_telemetry_env,
@@ -666,7 +667,14 @@ async def _startup_catchup(
         # compact_watchdog の busy フラグを set/clear する。
         compact_watchdog.set_busy()
         try:
-            await _handle_one(hub, runner_holder[0].client, msg, config, tracker, journal)
+            await _handle_one(
+                hub,
+                runner_holder[0].client,
+                msg,
+                config,
+                tracker,
+                journal,
+            )
         finally:
             compact_watchdog.clear_busy()
         # process → save_cursor → ack の順 (crash-safe)。
@@ -863,7 +871,12 @@ async def _run_hub_session(
                     compact_watchdog.set_busy()
                     try:
                         await _handle_one(
-                            hub, runner_holder[0].client, msg, config, tracker, journal
+                            hub,
+                            runner_holder[0].client,
+                            msg,
+                            config,
+                            tracker,
+                            journal,
                         )
                     finally:
                         compact_watchdog.clear_busy()
@@ -1036,6 +1049,12 @@ async def _handle_one(
     sent_msg_id: str | None = None
     _send_msg_tool_ids: set[str] = set()
 
+    # issue #109: 全 tool_use を追跡して OTel child span に記録する。
+    # _pending_tool_uses: tool_use_id → (name, input, start_time_ns)
+    # tool_uses: 完了した ToolUseRecord のリスト (emit_span に渡す)
+    _pending_tool_uses: dict[str, tuple[str, dict, int]] = {}
+    tool_uses: list[ToolUseRecord] = []
+
     async for sdk_msg in claude.receive_response():
         formatted = _format_message(sdk_msg)
         logger.info(formatted)
@@ -1043,27 +1062,45 @@ async def _handle_one(
         # でアクティビティを記録する。stdout スニフと同等の外部観測ベース。
         if isinstance(sdk_msg, AssistantMessage):
             tracker.mark_active()
-            # issue #92: send_message tool_use_id を追跡する。
-            # 完全一致で "mcp__agent-hub__send_message" のみを対象にする
-            # (部分一致だと将来追加されるツールで誤検知するリスクがある — reviewer Minor)。
             for block in sdk_msg.content:
-                if (
-                    isinstance(block, ToolUseBlock)
-                    and block.name == "mcp__agent-hub__send_message"
-                ):
-                    _send_msg_tool_ids.add(block.id)
+                if isinstance(block, ToolUseBlock):
+                    # issue #109: 全 tool_use を start_time_ns と共に記録する。
+                    _pending_tool_uses[block.id] = (
+                        block.name,
+                        block.input if isinstance(block.input, dict) else {},
+                        time.time_ns(),
+                    )
+                    # issue #92: send_message tool_use_id を追跡する。
+                    # 完全一致で "mcp__agent-hub__send_message" のみを対象にする
+                    # (部分一致だと将来追加されるツールで誤検知するリスクがある — reviewer Minor)。
+                    if block.name == "mcp__agent-hub__send_message":
+                        _send_msg_tool_ids.add(block.id)
         elif isinstance(sdk_msg, UserMessage):
-            # issue #92: 最初の成功した send_message 結果から送信 msg_id を取得。
-            if sent_msg_id is None:
-                blocks = (
-                    sdk_msg.content
-                    if isinstance(sdk_msg.content, list)
-                    else [sdk_msg.content]
-                )
-                for block in blocks:
+            end_ns = time.time_ns()
+            blocks = (
+                sdk_msg.content
+                if isinstance(sdk_msg.content, list)
+                else [sdk_msg.content]
+            )
+            for block in blocks:
+                if isinstance(block, ToolResultBlock):
+                    tool_id = block.tool_use_id
+                    # issue #109: 対応する pending tool_use を完了させて記録する。
+                    if tool_id in _pending_tool_uses:
+                        t_name, t_input, start_ns = _pending_tool_uses.pop(tool_id)
+                        tool_uses.append(
+                            ToolUseRecord(
+                                name=t_name,
+                                input=t_input,
+                                start_time_ns=start_ns,
+                                end_time_ns=end_ns,
+                                is_error=bool(block.is_error),
+                            )
+                        )
+                    # issue #92: 最初の成功した send_message 結果から送信 msg_id を取得。
                     if (
-                        isinstance(block, ToolResultBlock)
-                        and block.tool_use_id in _send_msg_tool_ids
+                        sent_msg_id is None
+                        and tool_id in _send_msg_tool_ids
                         and not block.is_error
                         and block.content
                     ):
@@ -1085,13 +1122,15 @@ async def _handle_one(
             result_msg = sdk_msg
             break
 
-    # issue #90 + #92: OTLP span emit (opt-in — AGENT_HUB_TELEMETRY_URL で有効化)。
+    # issue #90 + #92 + #109: OTLP span emit (opt-in — AGENT_HUB_TELEMETRY_URL で有効化)。
     # ResultMessage が得られた場合のみ span を emit する。
     # emit_span は内部で例外を読み捨てるため bridge を停止させない。
+    # issue #109: tool_uses を渡して tool_use ごとの child span を emit する。
     if result_msg is not None:
         emit_span(
             caused_by_id=msg.id,
             sent_msg_id=sent_msg_id,
             model=config.model,
             result=result_msg,
+            tool_uses=tool_uses if tool_uses else None,
         )

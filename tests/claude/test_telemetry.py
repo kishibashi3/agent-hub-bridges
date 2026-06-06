@@ -1,7 +1,7 @@
-"""Unit tests for bridge-claude OTLP telemetry (issue #90, #92).
+"""Unit tests for bridge-claude OTLP telemetry (issue #90, #92, #109).
 
 opentelemetry は mock して、span 属性・skip guard・init ロジック・
-parent_span_id / span_id 注入 (issue #92) を確認する。
+parent_span_id / span_id 注入 (issue #92)・tool_use child span (issue #109) を確認する。
 """
 
 from __future__ import annotations
@@ -21,9 +21,11 @@ def _make_result(
     output_tokens: int = 50,
     cache_read: int = 20,
     usage_none: bool = False,
+    total_cost_usd: float | None = None,
 ) -> MagicMock:
     result = MagicMock()
     result.is_error = is_error
+    result.total_cost_usd = total_cost_usd
     if usage_none:
         result.usage = None
     else:
@@ -203,7 +205,8 @@ class TestSpanAttributes:
         telemetry._TRACER_INIT = True
         return mock_span
 
-    def test_span_sets_msg_id(self, monkeypatch) -> None:
+    def test_span_sets_message_id(self, monkeypatch) -> None:
+        """issue #109: 属性名は 'message.id' (旧 'msg_id' から変更)。"""
         span = self._inject_mock_tracer(monkeypatch)
         caused_by = "550e8400-e29b-41d4-a716-446655440000"
         telemetry.emit_span(
@@ -211,7 +214,7 @@ class TestSpanAttributes:
             model="claude-sonnet-4-6",
             result=_make_result(),
         )
-        span.set_attribute.assert_any_call("msg_id", caused_by)
+        span.set_attribute.assert_any_call("message.id", caused_by)
 
     def test_span_sets_model(self, monkeypatch) -> None:
         span = self._inject_mock_tracer(monkeypatch)
@@ -497,6 +500,330 @@ class TestSpanContextInjection:
             f"trace_id mismatch: got {hex(span.context.trace_id)}, "
             f"expected {hex(expected_trace_id)}"
         )
+        # issue #109: span 属性は "message.id" (旧 "msg_id" から変更)
+        assert span.attributes.get("message.id") == caused_by_id
+
+
+# ---------- gen_ai.usage.cost_usd (issue #109) ----------
+
+
+class TestCostUsd:
+    """issue #109: ResultMessage.total_cost_usd が gen_ai.usage.cost_usd 属性に記録される。"""
+
+    def setup_method(self) -> None:
+        telemetry.reset_for_testing()
+
+    def _inject_mock_tracer(self, monkeypatch) -> MagicMock:
+        monkeypatch.setenv("AGENT_HUB_TELEMETRY_URL", "http://localhost:4318")
+        mock_span = MagicMock()
+        mock_ctx = MagicMock()
+        mock_ctx.__enter__ = MagicMock(return_value=mock_span)
+        mock_ctx.__exit__ = MagicMock(return_value=False)
+        mock_tracer = MagicMock()
+        mock_tracer.start_as_current_span.return_value = mock_ctx
+        telemetry._tracer = mock_tracer
+        telemetry._TRACER_INIT = True
+        return mock_span
+
+    def test_cost_usd_set_when_available(self, monkeypatch) -> None:
+        """total_cost_usd が設定されているとき gen_ai.usage.cost_usd 属性が記録される。"""
+        span = self._inject_mock_tracer(monkeypatch)
+        telemetry.emit_span(
+            caused_by_id="00000000-0000-0000-0000-000000000001",
+            model="m",
+            result=_make_result(total_cost_usd=0.0025),
+        )
+        span.set_attribute.assert_any_call("gen_ai.usage.cost_usd", 0.0025)
+
+    def test_cost_usd_not_set_when_none(self, monkeypatch) -> None:
+        """total_cost_usd が None のとき gen_ai.usage.cost_usd 属性は記録されない。"""
+        span = self._inject_mock_tracer(monkeypatch)
+        telemetry.emit_span(
+            caused_by_id="00000000-0000-0000-0000-000000000001",
+            model="m",
+            result=_make_result(total_cost_usd=None),
+        )
+        all_calls = [c.args[0] for c in span.set_attribute.call_args_list]
+        assert "gen_ai.usage.cost_usd" not in all_calls
+
+
+# ---------- tool_use child spans (issue #109) ----------
+
+
+class TestToolUseSpans:
+    """issue #109: tool_uses が渡されると child span が emit されることを確認する。"""
+
+    def setup_method(self) -> None:
+        telemetry.reset_for_testing()
+
+    def _setup_real_otel(self, monkeypatch):
+        """InMemorySpanExporter を使った実 OTel provider をセットアップする。"""
+        from opentelemetry.sdk.trace import TracerProvider
+        from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+        from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
+            InMemorySpanExporter,
+        )
+
+        id_gen = telemetry._FixedNextSpanIdGenerator()
+        provider = TracerProvider(id_generator=id_gen)
+        exporter = InMemorySpanExporter()
+        provider.add_span_processor(SimpleSpanProcessor(exporter))
+        real_tracer = provider.get_tracer("test")
+
+        monkeypatch.setenv("AGENT_HUB_TELEMETRY_URL", "http://localhost:4318")
+        telemetry._tracer = real_tracer
+        telemetry._TRACER_INIT = True
+        telemetry._id_generator = id_gen
+
+        return exporter
+
+    def test_no_tool_uses_emits_one_root_span(self, monkeypatch) -> None:
+        """tool_uses=None のとき root span のみ emit される。"""
+        exporter = self._setup_real_otel(monkeypatch)
+        telemetry.emit_span(
+            caused_by_id="550e8400-e29b-41d4-a716-446655440000",
+            model="m",
+            result=_make_result(),
+            tool_uses=None,
+        )
+        spans = exporter.get_finished_spans()
+        assert len(spans) == 1
+        assert spans[0].name == "bridge_claude.send_message"
+
+    def test_tool_uses_emits_child_spans(self, monkeypatch) -> None:
+        """tool_uses が 2 件あると root + 2 child = 3 spans が emit される。"""
+        exporter = self._setup_real_otel(monkeypatch)
+        now = 1_000_000_000
+        tool_uses: list[telemetry.ToolUseRecord] = [
+            {
+                "name": "Bash",
+                "input": {"command": "ls"},
+                "start_time_ns": now,
+                "end_time_ns": now + 500_000_000,
+                "is_error": False,
+            },
+            {
+                "name": "Read",
+                "input": {"file_path": "/tmp/x"},
+                "start_time_ns": now + 600_000_000,
+                "end_time_ns": now + 700_000_000,
+                "is_error": False,
+            },
+        ]
+        telemetry.emit_span(
+            caused_by_id="550e8400-e29b-41d4-a716-446655440000",
+            model="m",
+            result=_make_result(),
+            tool_uses=tool_uses,
+        )
+        spans = exporter.get_finished_spans()
+        assert len(spans) == 3
+        span_names = {s.name for s in spans}
+        assert span_names == {"bridge_claude.send_message", "tool.Bash", "tool.Read"}
+
+    def test_child_span_name_prefix(self, monkeypatch) -> None:
+        """child span の名前は 'tool.<tool_name>' 形式であること。"""
+        exporter = self._setup_real_otel(monkeypatch)
+        now = 1_000_000_000
+        telemetry.emit_span(
+            caused_by_id="550e8400-e29b-41d4-a716-446655440000",
+            model="m",
+            result=_make_result(),
+            tool_uses=[
+                {
+                    "name": "Write",
+                    "input": {"file_path": "/tmp/f", "content": "hello"},
+                    "start_time_ns": now,
+                    "end_time_ns": now + 100_000_000,
+                    "is_error": False,
+                }
+            ],
+        )
+        spans = exporter.get_finished_spans()
+        child_spans = [s for s in spans if s.name != "bridge_claude.send_message"]
+        assert len(child_spans) == 1
+        assert child_spans[0].name == "tool.Write"
+
+    def test_child_span_has_message_id_attribute(self, monkeypatch) -> None:
+        """child span に message.id 属性が記録される。"""
+        exporter = self._setup_real_otel(monkeypatch)
+        caused_by_id = "550e8400-e29b-41d4-a716-446655440000"
+        now = 1_000_000_000
+        telemetry.emit_span(
+            caused_by_id=caused_by_id,
+            model="m",
+            result=_make_result(),
+            tool_uses=[
+                {
+                    "name": "Bash",
+                    "input": {"command": "echo hi"},
+                    "start_time_ns": now,
+                    "end_time_ns": now + 200_000_000,
+                    "is_error": False,
+                }
+            ],
+        )
+        spans = exporter.get_finished_spans()
+        child = next(s for s in spans if s.name == "tool.Bash")
+        assert child.attributes.get("message.id") == caused_by_id
+
+    def test_child_span_has_tool_name_attribute(self, monkeypatch) -> None:
+        """child span に tool.name 属性が記録される。"""
+        exporter = self._setup_real_otel(monkeypatch)
+        now = 1_000_000_000
+        telemetry.emit_span(
+            caused_by_id="550e8400-e29b-41d4-a716-446655440000",
+            model="m",
+            result=_make_result(),
+            tool_uses=[
+                {
+                    "name": "Read",
+                    "input": {"file_path": "/x"},
+                    "start_time_ns": now,
+                    "end_time_ns": now + 50_000_000,
+                    "is_error": False,
+                }
+            ],
+        )
+        spans = exporter.get_finished_spans()
+        child = next(s for s in spans if s.name == "tool.Read")
+        assert child.attributes.get("tool.name") == "Read"
+
+    def test_child_span_has_duration_ms_attribute(self, monkeypatch) -> None:
+        """child span に duration_ms 属性が記録される。"""
+        exporter = self._setup_real_otel(monkeypatch)
+        start_ns = 1_000_000_000
+        end_ns = start_ns + 250_000_000  # 250ms
+        telemetry.emit_span(
+            caused_by_id="550e8400-e29b-41d4-a716-446655440000",
+            model="m",
+            result=_make_result(),
+            tool_uses=[
+                {
+                    "name": "Bash",
+                    "input": {"command": "sleep 0"},
+                    "start_time_ns": start_ns,
+                    "end_time_ns": end_ns,
+                    "is_error": False,
+                }
+            ],
+        )
+        spans = exporter.get_finished_spans()
+        child = next(s for s in spans if s.name == "tool.Bash")
+        assert child.attributes.get("duration_ms") == 250
+
+    def test_child_span_tool_args_sanitized(self, monkeypatch) -> None:
+        """child span に tool.args.<key> 属性が記録され、値が truncate される。"""
+        exporter = self._setup_real_otel(monkeypatch)
+        now = 1_000_000_000
+        long_value = "x" * 300
+        telemetry.emit_span(
+            caused_by_id="550e8400-e29b-41d4-a716-446655440000",
+            model="m",
+            result=_make_result(),
+            tool_uses=[
+                {
+                    "name": "Bash",
+                    "input": {"command": long_value},
+                    "start_time_ns": now,
+                    "end_time_ns": now + 100_000_000,
+                    "is_error": False,
+                }
+            ],
+        )
+        spans = exporter.get_finished_spans()
+        child = next(s for s in spans if s.name == "tool.Bash")
+        cmd_val = child.attributes.get("tool.args.command")
+        assert cmd_val is not None
+        assert len(cmd_val) == 200  # truncated to _TOOL_ARG_MAX_LEN
+
+    def test_child_span_error_status_when_is_error(self, monkeypatch) -> None:
+        """is_error=True の child span に StatusCode.ERROR が設定される。"""
+        from opentelemetry.trace import StatusCode
+
+        exporter = self._setup_real_otel(monkeypatch)
+        now = 1_000_000_000
+        telemetry.emit_span(
+            caused_by_id="550e8400-e29b-41d4-a716-446655440000",
+            model="m",
+            result=_make_result(),
+            tool_uses=[
+                {
+                    "name": "Bash",
+                    "input": {"command": "false"},
+                    "start_time_ns": now,
+                    "end_time_ns": now + 10_000_000,
+                    "is_error": True,
+                }
+            ],
+        )
+        spans = exporter.get_finished_spans()
+        child = next(s for s in spans if s.name == "tool.Bash")
+        assert child.status.status_code == StatusCode.ERROR
+
+    def test_child_span_is_child_of_root_span(self, monkeypatch) -> None:
+        """child span の parent_span_id が root span の span_id と一致する。"""
+        exporter = self._setup_real_otel(monkeypatch)
+        now = 1_000_000_000
+        sent_msg_id = "cafebabe-dead-beef-1234-567890abcdef"
+        telemetry.emit_span(
+            caused_by_id="550e8400-e29b-41d4-a716-446655440000",
+            sent_msg_id=sent_msg_id,
+            model="m",
+            result=_make_result(),
+            tool_uses=[
+                {
+                    "name": "Read",
+                    "input": {"file_path": "/x"},
+                    "start_time_ns": now,
+                    "end_time_ns": now + 100_000_000,
+                    "is_error": False,
+                }
+            ],
+        )
+        spans = exporter.get_finished_spans()
+        root = next(s for s in spans if s.name == "bridge_claude.send_message")
+        child = next(s for s in spans if s.name == "tool.Read")
+        # child の parent は root span
+        assert child.parent is not None
+        assert child.parent.span_id == root.context.span_id
+
+    def test_child_span_same_trace_id_as_root(self, monkeypatch) -> None:
+        """child span と root span は同じ trace_id を持つ。"""
+        exporter = self._setup_real_otel(monkeypatch)
+        now = 1_000_000_000
+        caused_by_id = "550e8400-e29b-41d4-a716-446655440000"
+        telemetry.emit_span(
+            caused_by_id=caused_by_id,
+            model="m",
+            result=_make_result(),
+            tool_uses=[
+                {
+                    "name": "Bash",
+                    "input": {"command": "pwd"},
+                    "start_time_ns": now,
+                    "end_time_ns": now + 50_000_000,
+                    "is_error": False,
+                }
+            ],
+        )
+        spans = exporter.get_finished_spans()
+        root = next(s for s in spans if s.name == "bridge_claude.send_message")
+        child = next(s for s in spans if s.name == "tool.Bash")
+        assert child.context.trace_id == root.context.trace_id
+        assert child.context.trace_id == telemetry._uuid_to_trace_id_int(caused_by_id)
+
+    def test_empty_tool_uses_list_emits_only_root(self, monkeypatch) -> None:
+        """tool_uses=[] (空リスト) のとき root span のみ emit される。"""
+        exporter = self._setup_real_otel(monkeypatch)
+        telemetry.emit_span(
+            caused_by_id="550e8400-e29b-41d4-a716-446655440000",
+            model="m",
+            result=_make_result(),
+            tool_uses=[],
+        )
+        spans = exporter.get_finished_spans()
+        assert len(spans) == 1
 
 
 # ---------- build_traceparent / make_subprocess_telemetry_env (issue #91) ----------
