@@ -400,7 +400,8 @@ func main() {
 		os.Exit(2)
 	}
 
-	// ANTHROPIC_API_KEY を unset: Tier2 (tmux claude) を subscription 課金に強制
+	// ANTHROPIC_API_KEY を unset: Tier2 (claude CLI) が API キー課金ではなく
+	// subscription (claude.ai) で動くよう強制する。fleet / single 両モード共通。
 	os.Unsetenv("ANTHROPIC_API_KEY")
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)

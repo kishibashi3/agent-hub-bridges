@@ -20,10 +20,13 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
+	"regexp"
 	"sync"
 	"time"
 
@@ -31,6 +34,10 @@ import (
 	"github.com/kishibashi3/agent-hub-bridges/bridge-tmux/internal/tmux"
 	"gopkg.in/yaml.v3"
 )
+
+// envKeyRegex は有効な環境変数名のパターン (POSIX 準拠)。
+// キー名の無検証によるシェルインジェクションを防ぐ (Critical #1)。
+var envKeyRegex = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 // ──────────────────────────────────────────────────────────────────────── //
 // YAML 型定義                                                               //
@@ -76,18 +83,42 @@ type FleetConfig struct {
 // ──────────────────────────────────────────────────────────────────────── //
 
 // LoadFleetConfig は YAML ファイルを読んで FleetConfig を返す。
-// personas が空のファイルはエラーとする。
+// 以下をバリデートする:
+//   - personas が空でないこと
+//   - 各 persona に handle / workdir が設定されていること
+//   - env キー名が POSIX 環境変数名パターンに一致すること (シェルインジェクション防止)
+//
+// YAML unknown フィールドは strict モードで拒否する (typo 早期検出)。
 func LoadFleetConfig(path string) (*FleetConfig, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read fleet config %q: %w", path, err)
 	}
+
+	// KnownFields(true): unknown フィールドをエラーとして扱う (typo 早期検出)
 	var cfg FleetConfig
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	dec.KnownFields(true)
+	if err := dec.Decode(&cfg); err != nil {
 		return nil, fmt.Errorf("parse fleet config %q: %w", path, err)
 	}
+
 	if len(cfg.Personas) == 0 {
 		return nil, fmt.Errorf("fleet config %q: no personas defined", path)
+	}
+	for i, p := range cfg.Personas {
+		if p.Handle == "" {
+			return nil, fmt.Errorf("fleet config %q: persona[%d]: handle is required", path, i)
+		}
+		if p.Workdir == "" {
+			return nil, fmt.Errorf("fleet config %q: persona %q: workdir is required", path, p.Handle)
+		}
+		for k := range p.Env {
+			if !envKeyRegex.MatchString(k) {
+				return nil, fmt.Errorf("fleet config %q: persona %q: invalid env key %q"+
+					" (must match ^[A-Za-z_][A-Za-z0-9_]*$)", path, p.Handle, k)
+			}
+		}
 	}
 	return &cfg, nil
 }
@@ -140,11 +171,7 @@ func RunFleet(ctx context.Context, global *config, fleet *FleetConfig) error {
 	}
 
 	wg.Wait()
-
-	if len(errs) > 0 {
-		return errs[0]
-	}
-	return nil
+	return errors.Join(errs...)
 }
 
 // runPersona は 1 persona の MCP 接続・ポーリングループを管理する。

