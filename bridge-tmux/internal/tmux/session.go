@@ -18,6 +18,7 @@ import (
 	"io"
 	"log"
 	"os/exec"
+	"sort"
 	"strings"
 	"time"
 )
@@ -83,6 +84,10 @@ type Session struct {
 	SpawnTimeout     time.Duration
 	ActivityIdleTime time.Duration
 	ResponseTimeout  time.Duration
+	// Env は Tier2 (claude) 起動時に追加設定する環境変数。
+	// fleet mode で persona ごとに異なる env を渡す用途。
+	// キーはソートされてコマンド先頭に KEY='val' 形式で付加される。
+	Env map[string]string
 	// Timing overrides — zero means use default constant.
 	PollInterval    time.Duration // default: 500ms
 	GracefulWait    time.Duration // default: 5s
@@ -101,6 +106,8 @@ type SessionOptions struct {
 	SpawnTimeout     time.Duration
 	ActivityIdleTime time.Duration
 	ResponseTimeout  time.Duration
+	// Env は persona ごとの追加環境変数 (fleet mode 用)。
+	Env map[string]string
 }
 
 // NewSession は Session を生成する (tmux セッションはまだ作らない)。
@@ -116,6 +123,7 @@ func NewSession(opts SessionOptions) *Session {
 		SpawnTimeout:     opts.SpawnTimeout,
 		ActivityIdleTime: opts.ActivityIdleTime,
 		ResponseTimeout:  opts.ResponseTimeout,
+		Env:              opts.Env,
 		runner:           realRunner{},
 	}
 }
@@ -334,8 +342,24 @@ func (s *Session) capturePaneText() string {
 
 // buildCLICommand は claude 起動コマンド文字列を組み立てる。
 // シェル展開を避けるため各引数を単引用符でエスケープする。
+// Env が設定されている場合は "KEY='val'" 形式でコマンド先頭に付加する。
+// キーはソートして決定的な順序を保証する。
 func (s *Session) buildCLICommand() string {
-	parts := []string{shellQuote(s.ClaudeCLI)}
+	var parts []string
+
+	// 追加環境変数をコマンド先頭に付加 (KEY='val' 形式)
+	if len(s.Env) > 0 {
+		keys := make([]string, 0, len(s.Env))
+		for k := range s.Env {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			parts = append(parts, k+"="+shellQuote(s.Env[k]))
+		}
+	}
+
+	parts = append(parts, shellQuote(s.ClaudeCLI))
 	parts = append(parts, "--mcp-config", shellQuote(s.MCPConfigPath))
 	if s.startedBefore {
 		parts = append(parts, "--continue")
