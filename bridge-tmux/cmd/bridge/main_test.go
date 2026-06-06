@@ -7,6 +7,8 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -18,35 +20,56 @@ import (
 // ──────────────────────────────────────────────────────────────────────── //
 
 // mockSession implements tmux.SessionIface for testing SessionManager.
+// All fields are safe for concurrent access: the idle timer goroutine and
+// the test goroutine may call Stop() / IsAlive() simultaneously.
 type mockSession struct {
-	alive       bool
-	startCalls  int
-	stopCalls   int
-	injectCalls []string
-	waitErr     error
-	startErr    error
+	aliveMu    sync.Mutex
+	alive      bool
+	startCalls atomic.Int32
+	stopCalls  atomic.Int32
+	injectMu   sync.Mutex
+	injectList []string
+	waitErr    error
+	startErr   error
 }
 
-func (m *mockSession) IsAlive() bool { return m.alive }
+func (m *mockSession) IsAlive() bool {
+	m.aliveMu.Lock()
+	defer m.aliveMu.Unlock()
+	return m.alive
+}
 func (m *mockSession) Start(_ context.Context) error {
-	m.startCalls++
+	m.startCalls.Add(1)
 	if m.startErr != nil {
 		return m.startErr
 	}
+	m.aliveMu.Lock()
 	m.alive = true
+	m.aliveMu.Unlock()
 	return nil
 }
 func (m *mockSession) Stop(_ context.Context) error {
-	m.stopCalls++
+	m.stopCalls.Add(1)
+	m.aliveMu.Lock()
 	m.alive = false
+	m.aliveMu.Unlock()
 	return nil
 }
 func (m *mockSession) InjectMessage(text string) error {
-	m.injectCalls = append(m.injectCalls, text)
+	m.injectMu.Lock()
+	m.injectList = append(m.injectList, text)
+	m.injectMu.Unlock()
 	return nil
 }
 func (m *mockSession) WaitForIdle(_ context.Context) error {
 	return m.waitErr
+}
+
+// newMockSession initialises a mockSession with the given alive state.
+func newMockSession(alive bool) *mockSession {
+	m := &mockSession{}
+	m.alive = alive
+	return m
 }
 
 // newTestConfig returns a minimal *config for tests.
@@ -186,7 +209,7 @@ func TestTruncate_Long(t *testing.T) {
 // ──────────────────────────────────────────────────────────────────────── //
 
 func TestSessionManager_Handle_ColdSpawn(t *testing.T) {
-	mock := &mockSession{alive: false}
+	mock := newMockSession(false)
 	cfg := newTestConfig(t, "")
 	mgr := newSessionManager(cfg, mock)
 
@@ -197,16 +220,16 @@ func TestSessionManager_Handle_ColdSpawn(t *testing.T) {
 		t.Fatalf("Handle() error: %v", err)
 	}
 
-	if mock.startCalls != 1 {
-		t.Errorf("Start() called %d times, want 1", mock.startCalls)
+	if int(mock.startCalls.Load()) != 1 {
+		t.Errorf("Start() called %d times, want 1", int(mock.startCalls.Load()))
 	}
-	if len(mock.injectCalls) != 1 || mock.injectCalls[0] != "test prompt" {
-		t.Errorf("InjectMessage() calls: %v", mock.injectCalls)
+	if len(mock.injectList) != 1 || mock.injectList[0] != "test prompt" {
+		t.Errorf("InjectMessage() calls: %v", mock.injectList)
 	}
 }
 
 func TestSessionManager_Handle_WarmReuse(t *testing.T) {
-	mock := &mockSession{alive: true}
+	mock := newMockSession(true)
 	cfg := newTestConfig(t, "")
 	mgr := newSessionManager(cfg, mock)
 
@@ -217,13 +240,13 @@ func TestSessionManager_Handle_WarmReuse(t *testing.T) {
 		t.Fatalf("Handle() error: %v", err)
 	}
 
-	if mock.startCalls != 0 {
-		t.Errorf("Start() should not be called for warm session, called %d times", mock.startCalls)
+	if int(mock.startCalls.Load()) != 0 {
+		t.Errorf("Start() should not be called for warm session, called %d times", int(mock.startCalls.Load()))
 	}
 }
 
 func TestSessionManager_Handle_WaitIdleError_ResetsSession(t *testing.T) {
-	mock := &mockSession{alive: false, waitErr: context.DeadlineExceeded}
+	mock := &mockSession{waitErr: context.DeadlineExceeded}
 	cfg := newTestConfig(t, "")
 	mgr := newSessionManager(cfg, mock)
 
@@ -234,13 +257,13 @@ func TestSessionManager_Handle_WaitIdleError_ResetsSession(t *testing.T) {
 	if err == nil {
 		t.Error("Handle() should propagate WaitForIdle error")
 	}
-	if mock.stopCalls != 1 {
-		t.Errorf("Stop() should be called once on WaitForIdle error, called %d times", mock.stopCalls)
+	if int(mock.stopCalls.Load()) != 1 {
+		t.Errorf("Stop() should be called once on WaitForIdle error, called %d times", int(mock.stopCalls.Load()))
 	}
 }
 
 func TestSessionManager_Handle_StartError(t *testing.T) {
-	mock := &mockSession{alive: false, startErr: context.DeadlineExceeded}
+	mock := &mockSession{startErr: context.DeadlineExceeded}
 	cfg := newTestConfig(t, "")
 	mgr := newSessionManager(cfg, mock)
 
@@ -255,7 +278,7 @@ func TestSessionManager_Handle_StartError(t *testing.T) {
 // ──────────────────────────────────────────────────────────────────────── //
 
 func TestSessionManager_IdleTimer_Fires(t *testing.T) {
-	mock := &mockSession{alive: false}
+	mock := newMockSession(false)
 	cfg := newTestConfig(t, "")
 	cfg.IdleTimeout = 20 * time.Millisecond
 	mgr := newSessionManager(cfg, mock)
@@ -267,21 +290,22 @@ func TestSessionManager_IdleTimer_Fires(t *testing.T) {
 		t.Fatalf("Handle() error: %v", err)
 	}
 
-	// Wait for idle timer to fire (budget: 200ms)
+	// Wait for idle timer to fire (budget: 200ms).
+	// Use atomic load directly to avoid data race detected by -race flag.
 	deadline := time.Now().Add(200 * time.Millisecond)
 	for time.Now().Before(deadline) {
-		if mock.stopCalls > 0 {
+		if mock.stopCalls.Load() > 0 {
 			break
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	if mock.stopCalls == 0 {
+	if mock.stopCalls.Load() == 0 {
 		t.Error("idle timer should have called Stop() by now")
 	}
 }
 
 func TestSessionManager_IdleTimer_ResetOnNewMessage(t *testing.T) {
-	mock := &mockSession{alive: false}
+	mock := newMockSession(false)
 	cfg := newTestConfig(t, "")
 	cfg.IdleTimeout = 100 * time.Millisecond
 	mgr := newSessionManager(cfg, mock)
@@ -303,13 +327,13 @@ func TestSessionManager_IdleTimer_ResetOnNewMessage(t *testing.T) {
 	}
 
 	// Immediately after second Handle, Stop should NOT have been called yet
-	if mock.stopCalls > 0 {
+	if int(mock.stopCalls.Load()) > 0 {
 		t.Error("Stop() should not be called immediately after second Handle (timer reset)")
 	}
 }
 
 func TestSessionManager_Shutdown_StopsSession(t *testing.T) {
-	mock := &mockSession{alive: true}
+	mock := newMockSession(true)
 	cfg := newTestConfig(t, "")
 	cfg.IdleTimeout = 10 * time.Second // long timer — Shutdown should cancel it
 	mgr := newSessionManager(cfg, mock)
@@ -325,13 +349,13 @@ func TestSessionManager_Shutdown_StopsSession(t *testing.T) {
 	defer shutCancel()
 	mgr.Shutdown(shutCtx)
 
-	if mock.stopCalls == 0 {
+	if int(mock.stopCalls.Load()) == 0 {
 		t.Error("Shutdown() should call Stop()")
 	}
 }
 
 func TestSessionManager_Shutdown_NoSession(t *testing.T) {
-	mock := &mockSession{alive: false}
+	mock := newMockSession(false)
 	cfg := newTestConfig(t, "")
 	mgr := newSessionManager(cfg, mock)
 
@@ -349,7 +373,7 @@ func TestHandleMessage_SelfLoop(t *testing.T) {
 	defer srv.Close()
 
 	client := newTestClient(t, srv.URL)
-	mock := &mockSession{alive: false}
+	mock := newMockSession(false)
 	cfg := newTestConfig(t, "")
 	mgr := newSessionManager(cfg, mock)
 
@@ -363,7 +387,7 @@ func TestHandleMessage_SelfLoop(t *testing.T) {
 	handleMessage(context.Background(), cfg, client, mgr, "@testuser", msg)
 
 	// Session.Start must NOT be called
-	if mock.startCalls > 0 {
+	if int(mock.startCalls.Load()) > 0 {
 		t.Error("Start() should not be called for self-loop messages")
 	}
 	// mark_as_read must be called
@@ -384,7 +408,7 @@ func TestHandleMessage_WorkdirGone(t *testing.T) {
 	defer srv.Close()
 
 	client := newTestClient(t, srv.URL)
-	mock := &mockSession{alive: false}
+	mock := newMockSession(false)
 	cfg := newTestConfig(t, "/nonexistent/path/xyz_bridge_test")
 	mgr := newSessionManager(cfg, mock)
 
@@ -398,7 +422,7 @@ func TestHandleMessage_WorkdirGone(t *testing.T) {
 	handleMessage(context.Background(), cfg, client, mgr, "@testuser", msg)
 
 	// Session.Start must NOT be called
-	if mock.startCalls > 0 {
+	if int(mock.startCalls.Load()) > 0 {
 		t.Error("Start() should not be called when workdir is missing")
 	}
 
@@ -427,7 +451,7 @@ func TestHandleMessage_Success(t *testing.T) {
 	defer srv.Close()
 
 	client := newTestClient(t, srv.URL)
-	mock := &mockSession{alive: false}
+	mock := newMockSession(false)
 	cfg := newTestConfig(t, "") // uses t.TempDir() which exists
 	mgr := newSessionManager(cfg, mock)
 
@@ -441,11 +465,11 @@ func TestHandleMessage_Success(t *testing.T) {
 	handleMessage(context.Background(), cfg, client, mgr, "@testuser", msg)
 
 	// Session should have been started and injected
-	if mock.startCalls != 1 {
-		t.Errorf("Start() called %d times, want 1", mock.startCalls)
+	if int(mock.startCalls.Load()) != 1 {
+		t.Errorf("Start() called %d times, want 1", int(mock.startCalls.Load()))
 	}
-	if len(mock.injectCalls) != 1 {
-		t.Errorf("InjectMessage() called %d times, want 1", len(mock.injectCalls))
+	if len(mock.injectList) != 1 {
+		t.Errorf("InjectMessage() called %d times, want 1", len(mock.injectList))
 	}
 
 	// mark_as_read must be called
@@ -466,7 +490,7 @@ func TestHandleMessage_HandleError_SendsErrorDM(t *testing.T) {
 	defer srv.Close()
 
 	client := newTestClient(t, srv.URL)
-	mock := &mockSession{alive: false, startErr: context.DeadlineExceeded}
+	mock := &mockSession{startErr: context.DeadlineExceeded}
 	cfg := newTestConfig(t, "")
 	mgr := newSessionManager(cfg, mock)
 
@@ -479,15 +503,22 @@ func TestHandleMessage_HandleError_SendsErrorDM(t *testing.T) {
 
 	handleMessage(context.Background(), cfg, client, mgr, "@testuser", msg)
 
-	// send_message (error DM) should be called
-	found := false
+	// send_message (error DM) and mark_as_read must both be called
+	hasSendMsg := false
+	hasAck := false
 	for _, name := range toolCalls {
 		if name == "send_message" {
-			found = true
+			hasSendMsg = true
+		}
+		if name == "mark_as_read" {
+			hasAck = true
 		}
 	}
-	if !found {
+	if !hasSendMsg {
 		t.Errorf("send_message not called on Handle error; tool calls: %v", toolCalls)
+	}
+	if !hasAck {
+		t.Errorf("mark_as_read not called on Handle error; tool calls: %v", toolCalls)
 	}
 }
 
@@ -501,7 +532,7 @@ func TestHandleMessage_WorkdirExists_NoErrorDM(t *testing.T) {
 	defer srv.Close()
 
 	client := newTestClient(t, srv.URL)
-	mock := &mockSession{alive: false}
+	mock := newMockSession(false)
 
 	wd := t.TempDir() // guaranteed to exist
 	cfg := newTestConfig(t, wd)
@@ -525,7 +556,7 @@ func TestHandleMessage_WorkdirExists_NoErrorDM(t *testing.T) {
 			// (We can't inspect the body here easily, so just ensure start was called)
 		}
 	}
-	if mock.startCalls == 0 {
+	if int(mock.startCalls.Load()) == 0 {
 		t.Error("Start() should be called when workdir exists")
 	}
 }
