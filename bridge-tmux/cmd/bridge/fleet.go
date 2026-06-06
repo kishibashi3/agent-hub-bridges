@@ -24,7 +24,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"regexp"
 	"sync"
@@ -148,7 +148,8 @@ func personaToConfig(p PersonaConfig, global *config) *config {
 
 // RunFleet は全 persona を並列に起動し、ctx がキャンセルされるまで動かす。
 // 全 persona goroutine が終了したあとに最初のエラーを返す。
-func RunFleet(ctx context.Context, global *config, fleet *FleetConfig) error {
+// health は fleet 全体で共有する HealthState (health server 無効時でも non-nil)。
+func RunFleet(ctx context.Context, global *config, fleet *FleetConfig, health *HealthState) error {
 	var (
 		wg   sync.WaitGroup
 		mu   sync.Mutex
@@ -161,8 +162,9 @@ func RunFleet(ctx context.Context, global *config, fleet *FleetConfig) error {
 		go func() {
 			defer wg.Done()
 			cfg := personaToConfig(p, global)
-			log.Printf("[fleet] starting persona @%s (workdir=%s)", cfg.User, cfg.Workdir)
-			if err := runPersona(ctx, cfg, p.Env); err != nil {
+			slog.Info("fleet persona starting", "handle", "@"+cfg.User, "workdir", cfg.Workdir)
+			if err := runPersona(ctx, cfg, p.Env, health); err != nil {
+				health.RecordError("@"+cfg.User, err.Error())
 				mu.Lock()
 				errs = append(errs, fmt.Errorf("persona @%s: %w", cfg.User, err))
 				mu.Unlock()
@@ -176,7 +178,8 @@ func RunFleet(ctx context.Context, global *config, fleet *FleetConfig) error {
 
 // runPersona は 1 persona の MCP 接続・ポーリングループを管理する。
 // ctx がキャンセルされた場合は nil を返す。
-func runPersona(ctx context.Context, cfg *config, extraEnv map[string]string) error {
+func runPersona(ctx context.Context, cfg *config, extraEnv map[string]string, health *HealthState) error {
+	selfHandle := "@" + cfg.User
 	mcpConfigPath, err := writeMCPConfig(cfg)
 	if err != nil {
 		return fmt.Errorf("writeMCPConfig: %w", err)
@@ -204,8 +207,7 @@ func runPersona(ctx context.Context, cfg *config, extraEnv map[string]string) er
 		}
 		return fmt.Errorf("register: %w", err)
 	}
-	log.Printf("[fleet] @%s registered: %s", cfg.User,
-		firstLine(registered))
+	slog.Info("fleet persona registered", "handle", selfHandle, "result", firstLine(registered))
 
 	session := tmux.NewSession(tmux.SessionOptions{
 		UserID:           cfg.User,
@@ -220,6 +222,11 @@ func runPersona(ctx context.Context, cfg *config, extraEnv map[string]string) er
 		Env:              extraEnv,
 	})
 	manager := newSessionManager(cfg, session)
+	// idle timer が発火したとき health state を更新する
+	manager.onIdle = func() {
+		health.SetSessionAlive(selfHandle, false)
+		slog.Info("persona session killed by idle timer", "handle", selfHandle)
+	}
 	defer func() {
 		shutCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
@@ -228,10 +235,10 @@ func runPersona(ctx context.Context, cfg *config, extraEnv map[string]string) er
 
 	// 接続・再接続ループ
 	for {
-		if err := runBridge(ctx, cfg, client, manager); ctx.Err() != nil {
+		if err := runBridge(ctx, cfg, client, manager, health); ctx.Err() != nil {
 			return nil
 		} else if err != nil {
-			log.Printf("[fleet] @%s runBridge ended: %v", cfg.User, err)
+			slog.Warn("fleet persona runBridge ended", "handle", selfHandle, "err", err)
 		}
 
 		sleepWithContext(ctx, cfg.ReconnectBackoff)
@@ -240,11 +247,11 @@ func runPersona(ctx context.Context, cfg *config, extraEnv map[string]string) er
 		}
 
 		if err := client.Initialize(ctx); err != nil {
-			log.Printf("[fleet] @%s re-initialize failed: %v", cfg.User, err)
+			slog.Warn("fleet persona re-initialize failed", "handle", selfHandle, "err", err)
 			continue
 		}
 		if _, err := client.Register(ctx, cfg.DisplayName, "stateful"); err != nil {
-			log.Printf("[fleet] @%s re-register failed: %v", cfg.User, err)
+			slog.Warn("fleet persona re-register failed", "handle", selfHandle, "err", err)
 			continue
 		}
 	}

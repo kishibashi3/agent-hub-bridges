@@ -303,7 +303,7 @@ func TestRunFleet_ContextCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // 即キャンセル
 
-	err := RunFleet(ctx, global, fleet)
+	err := RunFleet(ctx, global, fleet, NewHealthState("fleet"))
 	// ctx がキャンセル済みなら各 persona は nil を返すため RunFleet も nil
 	if err != nil {
 		t.Errorf("RunFleet with cancelled ctx: got err %v, want nil", err)

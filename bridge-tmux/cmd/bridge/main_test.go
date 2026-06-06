@@ -384,7 +384,7 @@ func TestHandleMessage_SelfLoop(t *testing.T) {
 		Body:   "self message",
 	}
 
-	handleMessage(context.Background(), cfg, client, mgr, "@testuser", msg)
+	handleMessage(context.Background(), cfg, client, mgr, NewHealthState("single"), "@testuser", msg)
 
 	// Session.Start must NOT be called
 	if int(mock.startCalls.Load()) > 0 {
@@ -419,7 +419,7 @@ func TestHandleMessage_WorkdirGone(t *testing.T) {
 		Body:   "do something",
 	}
 
-	handleMessage(context.Background(), cfg, client, mgr, "@testuser", msg)
+	handleMessage(context.Background(), cfg, client, mgr, NewHealthState("single"), "@testuser", msg)
 
 	// Session.Start must NOT be called
 	if int(mock.startCalls.Load()) > 0 {
@@ -462,7 +462,7 @@ func TestHandleMessage_Success(t *testing.T) {
 		Body:   "do the task",
 	}
 
-	handleMessage(context.Background(), cfg, client, mgr, "@testuser", msg)
+	handleMessage(context.Background(), cfg, client, mgr, NewHealthState("single"), "@testuser", msg)
 
 	// Session should have been started and injected
 	if int(mock.startCalls.Load()) != 1 {
@@ -501,7 +501,7 @@ func TestHandleMessage_HandleError_SendsErrorDM(t *testing.T) {
 		Body:   "fail task",
 	}
 
-	handleMessage(context.Background(), cfg, client, mgr, "@testuser", msg)
+	handleMessage(context.Background(), cfg, client, mgr, NewHealthState("single"), "@testuser", msg)
 
 	// send_message (error DM) and mark_as_read must both be called
 	hasSendMsg := false
@@ -545,7 +545,7 @@ func TestHandleMessage_WorkdirExists_NoErrorDM(t *testing.T) {
 		Body:   "task",
 	}
 
-	handleMessage(context.Background(), cfg, client, mgr, "@testuser", msg)
+	handleMessage(context.Background(), cfg, client, mgr, NewHealthState("single"), "@testuser", msg)
 
 	// Must NOT send an error DM about workdir
 	for _, name := range toolCalls {

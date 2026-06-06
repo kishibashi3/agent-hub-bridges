@@ -15,7 +15,7 @@
 //   GITHUB_PAT       required
 //   AGENT_HUB_TENANT optional
 //
-// Issue: #110
+// Issue: #110, #142
 package main
 
 import (
@@ -23,7 +23,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -61,6 +61,10 @@ type config struct {
 	// FleetFile は --fleet フラグで指定した YAML ファイルパス。
 	// 空文字なら single-persona モード (--user フラグ使用)。
 	FleetFile string
+	// LogLevel は --log-level フラグ。debug/info/warn/error (default: info)。
+	LogLevel string
+	// HealthPort は --health-port フラグ。0 なら /health サーバー無効。
+	HealthPort int
 }
 
 func parseConfig() (*config, error) {
@@ -72,6 +76,8 @@ func parseConfig() (*config, error) {
 		idleTimeout = flag.Duration("idle-timeout", 10*time.Minute, "idle kill timeout")
 		noBypass    = flag.Bool("no-bypass-permissions", false, "disable --dangerously-skip-permissions")
 		fleetFile   = flag.String("fleet", "", "fleet YAML config file (multi-persona mode)")
+		logLevel    = flag.String("log-level", "info", "log level: debug|info|warn|error")
+		healthPort  = flag.Int("health-port", 0, "HTTP /health port (0 = disabled)")
 	)
 	flag.Parse()
 
@@ -136,6 +142,8 @@ func parseConfig() (*config, error) {
 		ReconnectBackoff: 5 * time.Second,
 		MaxRetries:       10,
 		FleetFile:        *fleetFile,
+		LogLevel:         *logLevel,
+		HealthPort:       *healthPort,
 	}, nil
 }
 
@@ -156,6 +164,9 @@ type SessionManager struct {
 	idleTimer *time.Timer
 	timerDone chan struct{} // AfterFunc goroutine 完了通知; nil = timer 未設定
 	timerMu   sync.Mutex
+	// onIdle は idle timeout で session が停止したときに呼ばれるコールバック。
+	// nil なら何もしない。HealthState.SetSessionAlive(false) の通知用。
+	onIdle func()
 }
 
 func newSessionManager(cfg *config, session tmux.SessionIface) *SessionManager {
@@ -185,7 +196,7 @@ func (m *SessionManager) Handle(ctx context.Context, prompt string) error {
 
 	// Tier2 が停止していれば spawn する
 	if !m.session.IsAlive() {
-		log.Printf("[manager] session cold — spawning Tier2: claude-bridge-%s", m.cfg.User)
+		slog.Info("session cold — spawning Tier2", "handle", "@"+m.cfg.User)
 		if err := m.session.Start(ctx); err != nil {
 			return fmt.Errorf("spawn: %w", err)
 		}
@@ -198,7 +209,7 @@ func (m *SessionManager) Handle(ctx context.Context, prompt string) error {
 
 	// 応答完了まで待つ
 	if err := m.session.WaitForIdle(ctx); err != nil {
-		log.Printf("[manager] WaitForIdle error — resetting session: %v", err)
+		slog.Warn("WaitForIdle error — resetting session", "handle", "@"+m.cfg.User, "err", err)
 		_ = m.session.Stop(ctx) // タイムアウト時はセッションをリセット
 		return err
 	}
@@ -209,11 +220,15 @@ func (m *SessionManager) Handle(ctx context.Context, prompt string) error {
 	m.timerDone = done
 	m.idleTimer = time.AfterFunc(m.cfg.IdleTimeout, func() {
 		defer close(done) // Handle() が待てるよう完了を通知する
-		log.Printf("[manager] idle timeout (%.0fs) — stopping session claude-bridge-%s",
-			m.cfg.IdleTimeout.Seconds(), m.cfg.User)
+		slog.Info("idle timeout — stopping session",
+			"handle", "@"+m.cfg.User,
+			"timeout_s", m.cfg.IdleTimeout.Seconds())
 		ctx2, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		_ = m.session.Stop(ctx2)
+		if m.onIdle != nil {
+			m.onIdle()
+		}
 	})
 	m.timerMu.Unlock()
 
@@ -295,7 +310,7 @@ func writeMCPConfig(cfg *config) (string, error) {
 		os.Remove(f.Name())
 		return "", err
 	}
-	log.Printf("[config] wrote MCP config: %s", f.Name())
+	slog.Debug("wrote MCP config", "path", f.Name())
 	return f.Name(), nil
 }
 
@@ -303,12 +318,14 @@ func writeMCPConfig(cfg *config) (string, error) {
 // ポーリングループ                                                         //
 // ──────────────────────────────────────────────────────────────────────── //
 
-func runBridge(ctx context.Context, cfg *config, client *agenthub.Client, manager *SessionManager) error {
+func runBridge(ctx context.Context, cfg *config, client *agenthub.Client, manager *SessionManager, health *HealthState) error {
 	selfHandle := "@" + cfg.User
 	consecutiveFailures := 0
 
-	log.Printf("[bridge] polling inbox every %.0fs (user=%s, idle_timeout=%.0fs)",
-		cfg.PollInterval.Seconds(), selfHandle, cfg.IdleTimeout.Seconds())
+	slog.Info("polling inbox",
+		"handle", selfHandle,
+		"poll_s", cfg.PollInterval.Seconds(),
+		"idle_timeout_s", cfg.IdleTimeout.Seconds())
 
 	for {
 		select {
@@ -320,7 +337,7 @@ func runBridge(ctx context.Context, cfg *config, client *agenthub.Client, manage
 		msgs, err := client.GetMessages(ctx)
 		if err != nil {
 			consecutiveFailures++
-			log.Printf("[bridge] get_messages error (#%d): %v", consecutiveFailures, err)
+			slog.Warn("get_messages error", "consecutive", consecutiveFailures, "err", err)
 			if cfg.MaxRetries > 0 && consecutiveFailures >= cfg.MaxRetries {
 				return fmt.Errorf("circuit breaker: %d consecutive get_messages failures", consecutiveFailures)
 			}
@@ -330,7 +347,7 @@ func runBridge(ctx context.Context, cfg *config, client *agenthub.Client, manage
 		consecutiveFailures = 0
 
 		for _, msg := range msgs {
-			handleMessage(ctx, cfg, client, manager, selfHandle, msg)
+			handleMessage(ctx, cfg, client, manager, health, selfHandle, msg)
 		}
 
 		sleepWithContext(ctx, cfg.PollInterval)
@@ -342,12 +359,13 @@ func handleMessage(
 	cfg *config,
 	client *agenthub.Client,
 	manager *SessionManager,
+	health *HealthState,
 	selfHandle string,
 	msg agenthub.Message,
 ) {
 	// 自己ループ防止
 	if msg.Sender == selfHandle {
-		log.Printf("[bridge] skip self-sent message %s", msg.ID)
+		slog.Debug("skip self-sent message", "msg_id", msg.ID)
 		_ = client.MarkAsRead(ctx, msg.ID)
 		return
 	}
@@ -355,8 +373,7 @@ func handleMessage(
 	// issue #51: workdir がなければ error DM を返して ack して早期 return
 	// (crash-ack ループ防止。workdir が存在しなくなった場合は bridge を再起動すること)
 	if _, err := os.Stat(cfg.Workdir); err != nil {
-		log.Printf("[bridge] workdir %q gone — sending error DM and acking %s (issue #51)",
-			cfg.Workdir, msg.ID)
+		slog.Error("workdir gone — sending error DM and acking", "workdir", cfg.Workdir, "msg_id", msg.ID)
 		sendCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		defer cancel()
 		_ = client.SendMessage(sendCtx, msg.Sender,
@@ -365,24 +382,31 @@ func handleMessage(
 		return
 	}
 
-	log.Printf("[bridge] <- message %s from %s: %s", msg.ID, msg.Sender, truncate(msg.Body, 120))
+	slog.Info("message received",
+		"msg_id", msg.ID,
+		"from", msg.Sender,
+		"body_preview", truncate(msg.Body, 120))
 
 	prompt := formatPrompt(selfHandle, msg)
 	if err := manager.Handle(ctx, prompt); err != nil {
-		log.Printf("[bridge] Handle error for %s: %v", msg.ID, err)
+		slog.Error("Handle error", "msg_id", msg.ID, "from", msg.Sender, "err", err)
+		health.RecordError(selfHandle, err.Error())
+		health.SetSessionAlive(selfHandle, false)
 		// エラーを送信元に返す
 		errMsg := fmt.Sprintf("(auto) bridge-tmux error: %v", err)
 		sendCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		defer cancel()
 		if sendErr := client.SendMessage(sendCtx, msg.Sender, errMsg, msg.ID); sendErr != nil {
-			log.Printf("[bridge] fallback send_message failed: %v", sendErr)
+			slog.Error("fallback send_message failed", "err", sendErr)
 		}
 	} else {
-		log.Printf("[bridge] ✓ processed %s from %s", msg.ID, msg.Sender)
+		slog.Info("message processed", "msg_id", msg.ID, "from", msg.Sender)
+		health.RecordMessage(selfHandle)
+		health.SetSessionAlive(selfHandle, true)
 	}
 
 	if err := client.MarkAsRead(ctx, msg.ID); err != nil {
-		log.Printf("[bridge] mark_as_read %s failed: %v", msg.ID, err)
+		slog.Warn("mark_as_read failed", "msg_id", msg.ID, "err", err)
 	}
 }
 
@@ -390,15 +414,30 @@ func handleMessage(
 // main                                                                     //
 // ──────────────────────────────────────────────────────────────────────── //
 
-func main() {
-	log.SetFlags(log.LstdFlags | log.Lmsgprefix)
-	log.SetPrefix("")
+func setupLogger(level string) {
+	var l slog.Level
+	switch level {
+	case "debug":
+		l = slog.LevelDebug
+	case "warn":
+		l = slog.LevelWarn
+	case "error":
+		l = slog.LevelError
+	default:
+		l = slog.LevelInfo
+	}
+	handler := slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: l})
+	slog.SetDefault(slog.New(handler))
+}
 
+func main() {
 	cfg, err := parseConfig()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "config error: %v\n", err)
 		os.Exit(2)
 	}
+
+	setupLogger(cfg.LogLevel)
 
 	// ANTHROPIC_API_KEY を unset: Tier2 (claude CLI) が API キー課金ではなく
 	// subscription (claude.ai) で動くよう強制する。fleet / single 両モード共通。
@@ -409,33 +448,44 @@ func main() {
 
 	// fleet モード: YAML ファイルから複数 persona を並列起動
 	if cfg.FleetFile != "" {
-		log.Printf("[main] bridge-tmux fleet mode (fleet=%s)", cfg.FleetFile)
+		slog.Info("fleet mode", "fleet_file", cfg.FleetFile)
 		fleet, err := LoadFleetConfig(cfg.FleetFile)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "fleet config error: %v\n", err)
 			os.Exit(2)
 		}
-		log.Printf("[main] fleet: %d personas", len(fleet.Personas))
-		if err := RunFleet(ctx, cfg, fleet); err != nil && ctx.Err() == nil {
-			log.Fatalf("fleet error: %v", err)
+		slog.Info("fleet personas", "count", len(fleet.Personas))
+		// fleet モードの health state (health server 無効でも常に作成)
+		fleetHealth := NewHealthState("fleet")
+		for _, p := range fleet.Personas {
+			fleetHealth.EnsurePersona("@" + p.Handle)
 		}
-		log.Println("[main] fleet shutdown complete")
+		StartHealthServer(ctx, cfg.HealthPort, fleetHealth)
+		if err := RunFleet(ctx, cfg, fleet, fleetHealth); err != nil && ctx.Err() == nil {
+			slog.Error("fleet error", "err", err)
+			os.Exit(1)
+		}
+		slog.Info("fleet shutdown complete")
 		return
 	}
 
-	log.Printf("[main] bridge-tmux starting (user=@%s, workdir=%s, idle=%.0fs)",
-		cfg.User, cfg.Workdir, cfg.IdleTimeout.Seconds())
+	slog.Info("bridge-tmux starting",
+		"handle", "@"+cfg.User,
+		"workdir", cfg.Workdir,
+		"idle_timeout_s", cfg.IdleTimeout.Seconds())
 
 	// MCP config ファイルを書く (Tier2 用; ANTHROPIC_API_KEY は含めない)
 	mcpConfigPath, err := writeMCPConfig(cfg)
 	if err != nil {
-		log.Fatalf("writeMCPConfig: %v", err)
+		slog.Error("writeMCPConfig failed", "err", err)
+		os.Exit(1)
 	}
-	// defer os.Remove の後に log.Fatalf を呼ぶと os.Exit(1) で defer がスキップされ
+	// defer os.Remove の後に os.Exit を呼ぶと defer がスキップされ
 	// PAT を含む tempfile が /tmp に残留する。以降の fatal は fatalCleanup を使う。
-	fatalCleanup := func(format string, args ...any) {
+	fatalCleanup := func(msg string, args ...any) {
 		os.Remove(mcpConfigPath)
-		log.Fatalf(format, args...)
+		slog.Error(msg, args...)
+		os.Exit(1)
 	}
 	defer os.Remove(mcpConfigPath)
 
@@ -446,20 +496,26 @@ func main() {
 		agenthub.WithClientName("bridge-tmux"),
 	)
 	if err != nil {
-		fatalCleanup("agenthub.New: %v", err)
+		fatalCleanup("agenthub.New failed", "err", err)
 	}
 
 	// MCP initialize
 	if err := client.Initialize(ctx); err != nil {
-		fatalCleanup("MCP initialize: %v", err)
+		fatalCleanup("MCP initialize failed", "err", err)
 	}
 
 	// register
 	registered, err := client.Register(ctx, cfg.DisplayName, "stateful")
 	if err != nil {
-		fatalCleanup("register: %v", err)
+		fatalCleanup("register failed", "err", err)
 	}
-	log.Printf("[main] registered: %s", strings.SplitN(registered, "\n", 2)[0])
+	slog.Info("registered", "result", strings.SplitN(registered, "\n", 2)[0])
+
+	// health state + server (single mode)
+	selfHandle := "@" + cfg.User
+	health := NewHealthState("single")
+	health.EnsurePersona(selfHandle)
+	StartHealthServer(ctx, cfg.HealthPort, health)
 
 	// session manager
 	session := tmux.NewSession(tmux.SessionOptions{
@@ -474,6 +530,11 @@ func main() {
 		ResponseTimeout:  cfg.ResponseTimeout,
 	})
 	manager := newSessionManager(cfg, session)
+	// idle timer が発火したとき、health state の session_alive を false にする
+	manager.onIdle = func() {
+		health.SetSessionAlive(selfHandle, false)
+		slog.Info("persona session killed by idle timer", "handle", selfHandle)
+	}
 	defer func() {
 		shutCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
@@ -482,17 +543,17 @@ func main() {
 
 	// ポーリングループ (reconnect あり)
 	for {
-		err := runBridge(ctx, cfg, client, manager)
+		err := runBridge(ctx, cfg, client, manager, health)
 		if ctx.Err() != nil {
-			log.Println("[main] shutting down")
+			slog.Info("shutting down")
 			return
 		}
 		if err != nil {
-			log.Printf("[main] runBridge ended: %v", err)
+			slog.Warn("runBridge ended with error", "err", err)
 		}
 
 		// MCP セッションを再確立する
-		log.Printf("[main] reconnecting in %.0fs...", cfg.ReconnectBackoff.Seconds())
+		slog.Info("reconnecting", "backoff_s", cfg.ReconnectBackoff.Seconds())
 		sleepWithContext(ctx, cfg.ReconnectBackoff)
 		if ctx.Err() != nil {
 			return
@@ -500,12 +561,12 @@ func main() {
 
 		// re-initialize
 		if err := client.Initialize(ctx); err != nil {
-			log.Printf("[main] re-initialize failed: %v", err)
+			slog.Warn("re-initialize failed", "err", err)
 			continue
 		}
 		// re-register 失敗時も continue して再 initialize から試みる
 		if _, err := client.Register(ctx, cfg.DisplayName, "stateful"); err != nil {
-			log.Printf("[main] re-register failed: %v", err)
+			slog.Warn("re-register failed", "err", err)
 			continue
 		}
 	}
