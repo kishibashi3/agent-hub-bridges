@@ -1048,14 +1048,14 @@ class TestSanitizeToolInput:
         assert result["api_key"] == "***"
 
     def test_key_exact_masked(self) -> None:
-        """'key' キー（完全一致）は '***' に置換される。"""
+        """'key' キー(完全一致)は '***' に置換される。"""
         from agent_hub_bridges.claude.telemetry import _sanitize_tool_input
 
         result = _sanitize_tool_input({"key": "encryption-key-value"})
         assert result["key"] == "***"
 
     def test_pat_exact_masked(self) -> None:
-        """'pat' キー（完全一致）は '***' に置換される。"""
+        """'pat' キー(完全一致)は '***' に置換される。"""
         from agent_hub_bridges.claude.telemetry import _sanitize_tool_input
 
         result = _sanitize_tool_input({"pat": "ghp_xxxx"})
@@ -1115,8 +1115,8 @@ class TestSanitizeToolInput:
     def test_all_sensitive_keywords_in_keys(self) -> None:
         """_SENSITIVE_KEYWORDS の全キーワードを含むキーがマスクされる。"""
         from agent_hub_bridges.claude.telemetry import (
-            _sanitize_tool_input,
             _SENSITIVE_KEYWORDS,
+            _sanitize_tool_input,
         )
 
         # 各キーワードをキー名に含むエントリを生成して全てマスクされることを確認

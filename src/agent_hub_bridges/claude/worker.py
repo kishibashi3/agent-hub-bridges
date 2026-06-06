@@ -26,8 +26,8 @@ import sys
 import tempfile
 import time
 from collections.abc import Callable, Iterator
-from typing import Any
 from pathlib import Path
+from typing import Any
 
 import anyio
 from agent_hub_sdk import AgentHub, CommandRouter, HubSession, IncomingMessage
