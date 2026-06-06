@@ -47,6 +47,9 @@ type SessionIface interface {
 	WaitForIdle(ctx context.Context) error
 }
 
+// Compile-time assertion: *Session must implement SessionIface.
+var _ SessionIface = (*Session)(nil)
+
 // realRunner is the production tmuxRunner using exec.Command.
 type realRunner struct{}
 
