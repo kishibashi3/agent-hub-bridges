@@ -365,7 +365,10 @@ func (s *Session) buildCLICommand() string {
 		parts = append(parts, "--continue")
 	}
 	if s.BypassPerms {
-		parts = append(parts, "--dangerously-skip-permissions")
+		// --dangerously-skip-permissions は interactive dialog を表示して pane が静止し
+		// Start() の spawn タイムアウトを引き起こす。--permission-mode bypassPermissions
+		// は dialog なしで即起動する (bridge-claude と同じ方式)。
+		parts = append(parts, "--permission-mode", "bypassPermissions")
 	}
 	if s.Model != "" {
 		parts = append(parts, "--model", shellQuote(s.Model))

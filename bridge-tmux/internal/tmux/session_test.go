@@ -129,8 +129,10 @@ func TestBuildCLICommand_Basic(t *testing.T) {
 func TestBuildCLICommand_BypassPerms(t *testing.T) {
 	s := &Session{ClaudeCLI: "claude", MCPConfigPath: "/tmp/c.json", BypassPerms: true}
 	got := s.buildCLICommand()
-	if !strings.Contains(got, "--dangerously-skip-permissions") {
-		t.Errorf("missing --dangerously-skip-permissions: %q", got)
+	// --dangerously-skip-permissions は interactive dialog を表示して spawn timeout に
+	// なるため --permission-mode bypassPermissions を使う (issue #41 調査で発覚)。
+	if !strings.Contains(got, "--permission-mode") || !strings.Contains(got, "bypassPermissions") {
+		t.Errorf("expected --permission-mode bypassPermissions: %q", got)
 	}
 }
 

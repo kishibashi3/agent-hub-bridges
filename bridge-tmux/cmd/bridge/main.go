@@ -532,6 +532,12 @@ func main() {
 	}
 	slog.Info("registered", "result", strings.SplitN(registered, "\n", 2)[0])
 
+	// SSE ストリームを開いてサーバー ping に自動応答する (issue #41)
+	if err := client.StartSSE(ctx); err != nil {
+		fatalCleanup("StartSSE failed", "err", err)
+	}
+	defer client.StopSSE()
+
 	// health state + server (single mode)
 	selfHandle := "@" + cfg.User
 	health := NewHealthState("single")
@@ -574,13 +580,15 @@ func main() {
 		}
 
 		// MCP セッションを再確立する
+		// SSE goroutine を先に停止してから sleep → re-initialize → re-register → re-StartSSE
+		client.StopSSE()
 		slog.Info("reconnecting", "backoff_s", cfg.ReconnectBackoff.Seconds())
 		sleepWithContext(ctx, cfg.ReconnectBackoff)
 		if ctx.Err() != nil {
 			return
 		}
 
-		// re-initialize
+		// re-initialize (Initialize() が sessionID をクリアしてから新規ハンドシェイク)
 		if err := client.Initialize(ctx); err != nil {
 			slog.Warn("re-initialize failed", "err", err)
 			continue
@@ -588,6 +596,11 @@ func main() {
 		// re-register 失敗時も continue して再 initialize から試みる
 		if _, err := client.Register(ctx, cfg.DisplayName, "stateful"); err != nil {
 			slog.Warn("re-register failed", "err", err)
+			continue
+		}
+		// SSE ストリームを再開する
+		if err := client.StartSSE(ctx); err != nil {
+			slog.Warn("re-StartSSE failed", "err", err)
 			continue
 		}
 	}
