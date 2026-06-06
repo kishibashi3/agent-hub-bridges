@@ -76,8 +76,13 @@ codex = [
 claude_p = [
     # claude CLI は Claude Code に付属。Python 追加 deps なし。
 ]
+tmux = [
+    # bridge-tmux: on-demand tmux セッションで interactive Claude Code を動かす bridge。
+    # claude CLI は Claude Code に付属。tmux は OS 標準 or brew install tmux。
+    # Python 追加 deps なし。issue #110 参照。
+]
 all = [
-    "agent-hub-bridges[claude,slack,gemini,a2a,client_codex,codex,claude_p]",
+    "agent-hub-bridges[claude,slack,gemini,a2a,client_codex,codex,claude_p,tmux]",
 ]
 dev = [
     "pytest>=8.0.0",
@@ -95,6 +100,7 @@ agent-hub-bridge-a2a      = "agent_hub_bridges.a2a.cli:main"
 agent-hub-client-codex    = "agent_hub_bridges.client_codex.cli:main"
 agent-hub-bridge-codex    = "agent_hub_bridges.codex.cli:main"
 agent-hub-bridge-claude-p = "agent_hub_bridges.claude_p.cli:main"
+agent-hub-bridge-tmux     = "agent_hub_bridges.tmux.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/kishibashi3/agent-hub-bridges"
