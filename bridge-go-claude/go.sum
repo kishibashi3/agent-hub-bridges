@@ -1,2 +1,4 @@
 github.com/kishibashi3/agent-hub-sdk/go v0.0.0-20260606012745-03cf3940735f h1:BmnRw5Ii73ximvKjruHmL5qQD7LVtQg7R7Hbd2K9akY=
 github.com/kishibashi3/agent-hub-sdk/go v0.0.0-20260606012745-03cf3940735f/go.mod h1:Fb860Wvq9zooPdu173ugC98eywi2KTJ6izLn7pnGjXA=
+github.com/kishibashi3/agent-hub-sdk/go v0.0.0-20260606144821-746cf63fa9c3 h1:ZwRxY++FbC3yvSKkJh9dDKk5LqJ+NeRyhVPVNLpz9oc=
+github.com/kishibashi3/agent-hub-sdk/go v0.0.0-20260606144821-746cf63fa9c3/go.mod h1:Fb860Wvq9zooPdu173ugC98eywi2KTJ6izLn7pnGjXA=

@@ -567,6 +567,7 @@ func main() {
 	// newClientAndRegister は毎回新しい Client を生成する。
 	// reconnect 時に古い sessionID を持つ Client を再利用すると re-initialize が
 	// HTTP 400 (missing/invalid session) で失敗するため、新規生成が必要。
+	// StartSSE で MCP セッション keepalive 用 SSE ストリームを開始する (issue #41)。
 	newClientAndRegister := func() (*agenthub.Client, error) {
 		c, err := agenthub.New(
 			cfg.AgentHubURL, cfg.GitHubPAT, cfg.User, cfg.Tenant,
@@ -580,6 +581,11 @@ func main() {
 		}
 		if _, err := c.Register(ctx, cfg.DisplayName, "stateless"); err != nil {
 			return nil, fmt.Errorf("register: %w", err)
+		}
+		// SSE ストリームを開始してサーバー ping に自動応答する。
+		// これにより claude subprocess 実行中の MCP セッション expire を防ぐ。
+		if err := c.StartSSE(ctx); err != nil {
+			return nil, fmt.Errorf("start SSE: %w", err)
 		}
 		return c, nil
 	}
@@ -597,11 +603,15 @@ func main() {
 		err := runBridge(ctx, cfg, client, mcpConfigPath, selfHandle)
 		if ctx.Err() != nil {
 			slog.Info("bridge-go-claude shutting down")
+			client.StopSSE()
 			return
 		}
 		if err != nil {
 			slog.Warn("runBridge ended with error — reconnecting", "err", err)
 		}
+
+		// 旧 Client の SSE goroutine を停止してから新 Client を生成する。
+		client.StopSSE()
 
 		slog.Info("reconnecting", "backoff_s", cfg.ReconnectBackoff.Seconds())
 		sleepWithContext(ctx, cfg.ReconnectBackoff)
