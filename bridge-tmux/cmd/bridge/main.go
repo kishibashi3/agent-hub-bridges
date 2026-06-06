@@ -81,6 +81,11 @@ func parseConfig() (*config, error) {
 	)
 	flag.Parse()
 
+	// --log-level 不正値は早期エラー (runtime fallback 禁止 — issue #149)
+	if err := validateLogLevel(*logLevel); err != nil {
+		return nil, err
+	}
+
 	// --fleet と --user は排他
 	if *fleetFile != "" && *user != "" {
 		return nil, fmt.Errorf("--fleet and --user are mutually exclusive")
@@ -413,6 +418,17 @@ func handleMessage(
 // ──────────────────────────────────────────────────────────────────────── //
 // main                                                                     //
 // ──────────────────────────────────────────────────────────────────────── //
+
+// validateLogLevel は log-level 文字列が有効か検証する。
+// parseConfig から呼び出し、不正値を早期エラーにする (issue #149)。
+func validateLogLevel(level string) error {
+	switch level {
+	case "debug", "info", "warn", "error":
+		return nil
+	default:
+		return fmt.Errorf("--log-level %q is invalid: must be debug|info|warn|error", level)
+	}
+}
 
 func setupLogger(level string) {
 	var l slog.Level
