@@ -180,6 +180,44 @@ func TestFormatPrompt(t *testing.T) {
 // truncate                                                                 //
 // ──────────────────────────────────────────────────────────────────────── //
 
+// ──────────────────────────────────────────────────────────────────────── //
+// validateLogLevel                                                         //
+// ──────────────────────────────────────────────────────────────────────── //
+
+func TestValidateLogLevel_Valid(t *testing.T) {
+	for _, level := range []string{"debug", "info", "warn", "error"} {
+		if err := validateLogLevel(level); err != nil {
+			t.Errorf("validateLogLevel(%q) = %v, want nil", level, err)
+		}
+	}
+}
+
+func TestValidateLogLevel_Invalid(t *testing.T) {
+	for _, level := range []string{"banana", "INFO", "DEBUG", "", "verbose", "trace"} {
+		if err := validateLogLevel(level); err == nil {
+			t.Errorf("validateLogLevel(%q) = nil, want error", level)
+		}
+	}
+}
+
+func TestValidateLogLevel_ErrorMessage(t *testing.T) {
+	err := validateLogLevel("banana")
+	if err == nil {
+		t.Fatal("want error, got nil")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "banana") {
+		t.Errorf("error message should contain invalid value, got: %q", msg)
+	}
+	if !strings.Contains(msg, "debug|info|warn|error") {
+		t.Errorf("error message should list valid values, got: %q", msg)
+	}
+}
+
+// ──────────────────────────────────────────────────────────────────────── //
+// truncate                                                                 //
+// ──────────────────────────────────────────────────────────────────────── //
+
 func TestTruncate_Short(t *testing.T) {
 	if got := truncate("hello", 10); got != "hello" {
 		t.Errorf("truncate(%q, 10) = %q, want %q", "hello", got, "hello")
