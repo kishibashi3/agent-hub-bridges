@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"flag"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -211,6 +212,62 @@ func TestValidateLogLevel_ErrorMessage(t *testing.T) {
 	}
 	if !strings.Contains(msg, "debug|info|warn|error") {
 		t.Errorf("error message should list valid values, got: %q", msg)
+	}
+}
+
+// ──────────────────────────────────────────────────────────────────────── //
+// parseConfig — --spawn-timeout (issue #153)                              //
+// ──────────────────────────────────────────────────────────────────────── //
+
+// TestParseConfig_SpawnTimeout_Default verifies that SpawnTimeout defaults to
+// 60s when --spawn-timeout is not provided.
+func TestParseConfig_SpawnTimeout_Default(t *testing.T) {
+	// parseConfig calls flag.Parse(), which reads os.Args.
+	// We must set up a clean flag set + env; reset after the test.
+	origArgs := os.Args
+	defer func() { os.Args = origArgs }()
+
+	t.Setenv("AGENT_HUB_URL", "http://localhost:3000/mcp")
+	t.Setenv("GITHUB_PAT", "ghp_test")
+	t.Setenv("CLAUDE_CLI_PATH", "true") // "true" is always on PATH
+
+	// Reset flag package state so flag.Parse() starts fresh.
+	flag.CommandLine = flag.NewFlagSet(os.Args[0], flag.ContinueOnError)
+
+	os.Args = []string{"bridge-tmux", "--user", "testpersona", "--workdir", t.TempDir()}
+	cfg, err := parseConfig()
+	if err != nil {
+		t.Fatalf("parseConfig() error: %v", err)
+	}
+	if cfg.SpawnTimeout != 60*time.Second {
+		t.Errorf("SpawnTimeout default = %v, want 60s", cfg.SpawnTimeout)
+	}
+}
+
+// TestParseConfig_SpawnTimeout_Override verifies that --spawn-timeout overrides
+// the 60s default (issue #153).
+func TestParseConfig_SpawnTimeout_Override(t *testing.T) {
+	origArgs := os.Args
+	defer func() { os.Args = origArgs }()
+
+	t.Setenv("AGENT_HUB_URL", "http://localhost:3000/mcp")
+	t.Setenv("GITHUB_PAT", "ghp_test")
+	t.Setenv("CLAUDE_CLI_PATH", "true")
+
+	flag.CommandLine = flag.NewFlagSet(os.Args[0], flag.ContinueOnError)
+
+	os.Args = []string{
+		"bridge-tmux",
+		"--user", "testpersona",
+		"--workdir", t.TempDir(),
+		"--spawn-timeout", "120s",
+	}
+	cfg, err := parseConfig()
+	if err != nil {
+		t.Fatalf("parseConfig() error: %v", err)
+	}
+	if cfg.SpawnTimeout != 120*time.Second {
+		t.Errorf("SpawnTimeout = %v, want 120s", cfg.SpawnTimeout)
 	}
 }
 
