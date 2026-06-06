@@ -69,15 +69,16 @@ type config struct {
 
 func parseConfig() (*config, error) {
 	var (
-		user        = flag.String("user", "", "agent-hub handle (single-persona mode, without @)")
-		displayName = flag.String("display-name", "", "display name (optional)")
-		workdir     = flag.String("workdir", "", "peer workdir with CLAUDE.md (default: cwd)")
-		model       = flag.String("model", "", "Claude model (default: claude default)")
-		idleTimeout = flag.Duration("idle-timeout", 10*time.Minute, "idle kill timeout")
-		noBypass    = flag.Bool("no-bypass-permissions", false, "disable --dangerously-skip-permissions")
-		fleetFile   = flag.String("fleet", "", "fleet YAML config file (multi-persona mode)")
-		logLevel    = flag.String("log-level", "info", "log level: debug|info|warn|error")
-		healthPort  = flag.Int("health-port", 0, "HTTP /health port (0 = disabled)")
+		user         = flag.String("user", "", "agent-hub handle (single-persona mode, without @)")
+		displayName  = flag.String("display-name", "", "display name (optional)")
+		workdir      = flag.String("workdir", "", "peer workdir with CLAUDE.md (default: cwd)")
+		model        = flag.String("model", "", "Claude model (default: claude default)")
+		idleTimeout  = flag.Duration("idle-timeout", 10*time.Minute, "idle kill timeout")
+		spawnTimeout = flag.Duration("spawn-timeout", 60*time.Second, "timeout for Tier2 (claude) initial output after spawn")
+		noBypass     = flag.Bool("no-bypass-permissions", false, "disable --dangerously-skip-permissions")
+		fleetFile    = flag.String("fleet", "", "fleet YAML config file (multi-persona mode)")
+		logLevel     = flag.String("log-level", "info", "log level: debug|info|warn|error")
+		healthPort   = flag.Int("health-port", 0, "HTTP /health port (0 = disabled)")
 	)
 	flag.Parse()
 
@@ -140,7 +141,7 @@ func parseConfig() (*config, error) {
 		Model:            *model,
 		BypassPerms:      !*noBypass,
 		IdleTimeout:      *idleTimeout,
-		SpawnTimeout:     60 * time.Second,
+		SpawnTimeout:     *spawnTimeout,
 		ActivityIdle:     8 * time.Second,
 		ResponseTimeout:  5 * time.Minute,
 		PollInterval:     5 * time.Second,
@@ -491,7 +492,8 @@ func main() {
 	slog.Info("bridge-tmux starting",
 		"handle", "@"+cfg.User,
 		"workdir", cfg.Workdir,
-		"idle_timeout_s", cfg.IdleTimeout.Seconds())
+		"idle_timeout_s", cfg.IdleTimeout.Seconds(),
+		"spawn_timeout_s", cfg.SpawnTimeout.Seconds())
 
 	// MCP config ファイルを書く (Tier2 用; ANTHROPIC_API_KEY は含めない)
 	mcpConfigPath, err := writeMCPConfig(cfg)
