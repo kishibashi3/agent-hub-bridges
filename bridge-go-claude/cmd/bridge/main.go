@@ -6,20 +6,24 @@
 //  1. MCP initialize ハンドシェイク (agent-hub-sdk/go)
 //  2. register で agent-hub に自 peer を登録
 //  3. ポーリングループ: get_messages → process → mark_as_read
-//     - message 受信 → claude を subprocess で起動 (-p, --output-format stream-json)
+//     - message 受信 → claude を subprocess で起動 (--input-format stream-json)
+//     - stdin に initialize control_request + user message JSON を書く
+//     - stdout の stream-json を監視して result イベントでエラー検知
 //     - claude が mcp__agent-hub__send_message ツールを呼んで返信する
-//     - bridge は subprocess の完了を待つ (stream-json を監視してエラー検知)
 //     - subprocess エラー時のみ Go SDK SendMessage でエラー通知を送る
 //  4. SIGTERM/Ctrl+C でグレースフルシャットダウン
 //
 // bridge-tmux との違い:
 //   - tmux 不要 — セッション管理・spawn 検知の複雑さがない
 //   - on-demand: メッセージごとに claude subprocess を起動して終了を待つ
-//   - stream-json 出力を解析してエラー検知 (tmux は stdout スニフで idle 判定)
+//   - interactive mode (--input-format stream-json): print mode (-p) より効率的
+//     (2026-06-15 以降の headless モード課金変更への対応)
 //
 // 参考実装:
 //   - bridge-tmux (bridge-go-claude/../bridge-tmux): MCP config, polling, エラー処理
 //   - agent-hub-bridge-claude / bridges/claude (Python): on-demand 設計, prompt format
+//   - claude_agent_sdk/_internal/transport/subprocess_cli.py: --input-format stream-json
+//   - claude_agent_sdk/_internal/query.py: control_request initialize protocol
 //
 // 環境変数:
 //   AGENT_HUB_URL      required    agent-hub MCP エンドポイント
@@ -42,7 +46,6 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"sync"
 	"syscall"
 	"time"
 
@@ -272,23 +275,27 @@ type streamEvent struct {
 	Result  string `json:"result"`
 }
 
-// runClaude は claude を -p (print) モードで subprocess として起動し、
-// stream-json 出力を監視してエラーを検知する。
+// runClaude は claude を interactive モード (--input-format stream-json) で
+// subprocess として起動し、stdin に initialize + user message を書き込み、
+// stdout の stream-json を監視してエラーを検知する。
 //
 // 設計:
+//   - Python SDK (subprocess_cli.py) と同一プロトコル:
+//     args: --output-format stream-json --verbose --input-format stream-json
+//     stdin: control_request{subtype:initialize} → user message JSON
 //   - claude は MCP config (agent-hub) を持つため、mcp__agent-hub__send_message で
 //     自分で返信する。bridge は send_message を呼ばない (エラー時を除く)。
 //   - stream-json の "result" イベントで is_error=true を検知した場合、error を返す。
 //   - subprocess の exit code が非ゼロでも result イベントが得られていれば
 //     そちらを優先する (claude が partial result を出して失敗するケースを考慮)。
 //   - ctx がキャンセルされると exec.CommandContext が subprocess を kill する。
-//   - session keepalive: subprocess 実行中に bridge 側 MCP セッションが expire する
-//     問題を防ぐため、keepalive goroutine が定期的に GetMessages を呼ぶ。
-//     keepalive と MarkAsRead の競合を防ぐため clientMu で保護する。
+//
+// senderHandle は user message の session_id フィールドに設定し、
+// claude が返信先を識別できるようにする。
 //
 // cfg.SubprocessTimeout > 0 の場合は追加タイムアウトを設ける。
 // 0 の場合は ctx のキャンセルのみで制御する。
-func runClaude(ctx context.Context, cfg *config, client *agenthub.Client, clientMu *sync.Mutex, mcpConfigPath, prompt string) error {
+func runClaude(ctx context.Context, cfg *config, mcpConfigPath, senderHandle, prompt string) error {
 	runCtx := ctx
 	if cfg.SubprocessTimeout > 0 {
 		var cancel context.CancelFunc
@@ -296,10 +303,12 @@ func runClaude(ctx context.Context, cfg *config, client *agenthub.Client, client
 		defer cancel()
 	}
 
+	// Python SDK (subprocess_cli.py L225, L244) と同一引数順序。
+	// --input-format stream-json が interactive mode を有効にする。
 	args := []string{
-		"-p", prompt,
 		"--output-format", "stream-json",
-		"--verbose", // required with --output-format stream-json in print mode
+		"--verbose",
+		"--input-format", "stream-json",
 		"--permission-mode", "bypassPermissions",
 		"--mcp-config", mcpConfigPath,
 	}
@@ -311,6 +320,10 @@ func runClaude(ctx context.Context, cfg *config, client *agenthub.Client, client
 	cmd.Dir = cfg.Workdir
 	cmd.Stderr = os.Stderr // claude の stderr をそのまま bridge の stderr に流す
 
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return fmt.Errorf("stdin pipe: %w", err)
+	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return fmt.Errorf("stdout pipe: %w", err)
@@ -321,36 +334,40 @@ func runClaude(ctx context.Context, cfg *config, client *agenthub.Client, client
 	}
 	slog.Debug("claude subprocess started", "pid", cmd.Process.Pid)
 
-	// keepalive goroutine: subprocess 実行中に MCP セッションが expire するのを防ぐ。
-	// Get/MarkAsRead と競合しないよう clientMu でシリアライズする。
-	// subprocess 終了後の MarkAsRead より前に完全停止するため WaitGroup を使う。
-	const keepaliveInterval = 30 * time.Second
-	keepaliveDone := make(chan struct{})
-	var keepaliveWg sync.WaitGroup
-	keepaliveWg.Add(1)
-	go func() {
-		defer keepaliveWg.Done()
-		ticker := time.NewTicker(keepaliveInterval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-keepaliveDone:
-				return
-			case <-ticker.C:
-				clientMu.Lock()
-				_, kaErr := client.GetMessages(runCtx)
-				clientMu.Unlock()
-				if kaErr != nil {
-					slog.Debug("keepalive get_messages failed", "err", kaErr)
-				} else {
-					slog.Debug("keepalive get_messages ok")
-				}
-			}
-		}
-	}()
+	// ── stdin: initialize control_request ──────────────────────────────── //
+	// Python SDK (query.py) が送る形式に準拠。
+	reqID := fmt.Sprintf("req_1_%d", time.Now().UnixNano())
+	initReq := map[string]any{
+		"type":       "control_request",
+		"request_id": reqID,
+		"request":    map[string]any{"subtype": "initialize"},
+	}
+	initBytes, _ := json.Marshal(initReq)
+	if _, err := fmt.Fprintf(stdin, "%s\n", initBytes); err != nil {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		return fmt.Errorf("write initialize control_request: %w", err)
+	}
 
-	// stream-json をスキャンして result イベントを探す。
-	// エラーがあれば resultErr に記録して後で返す。
+	// ── stdin: user message ────────────────────────────────────────────── //
+	// Python SDK (client.py L210-216) と同一フォーマット。
+	// session_id に senderHandle を設定して claude が返信先を識別できるようにする。
+	userMsg := map[string]any{
+		"type":               "user",
+		"session_id":         senderHandle,
+		"message":            map[string]any{"role": "user", "content": prompt},
+		"parent_tool_use_id": nil,
+	}
+	userBytes, _ := json.Marshal(userMsg)
+	if _, err := fmt.Fprintf(stdin, "%s\n", userBytes); err != nil {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		return fmt.Errorf("write user message: %w", err)
+	}
+	// stdin を閉じて EOF を通知する (これ以上入力はない)
+	_ = stdin.Close()
+
+	// ── stdout: stream-json を監視して result イベントを待つ ────────────── //
 	var resultErr error
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 512*1024), 512*1024) // 512 KB — tool result は大きくなる可能性あり
@@ -376,11 +393,6 @@ func runClaude(ctx context.Context, cfg *config, client *agenthub.Client, client
 	if scanErr := scanner.Err(); scanErr != nil {
 		slog.Warn("stream-json scan error", "err", scanErr)
 	}
-
-	// keepalive goroutine を停止してから cmd.Wait() する。
-	// これにより MarkAsRead の前に keepalive が完全終了することを保証する。
-	close(keepaliveDone)
-	keepaliveWg.Wait()
 
 	// subprocess の終了を待つ。
 	waitErr := cmd.Wait()
@@ -409,14 +421,10 @@ func runClaude(ctx context.Context, cfg *config, client *agenthub.Client, client
 //  3. プロンプト生成 → claude subprocess 起動 → 完了待ち
 //  4. subprocess エラー時: SendMessage でエラー通知
 //  5. MarkAsRead (成功・失敗問わず)
-//
-// clientMu は client への全 MCP 呼び出しを直列化するための mutex。
-// keepalive goroutine と MarkAsRead/SendMessage の競合を防ぐ。
 func handleMessage(
 	ctx context.Context,
 	cfg *config,
 	client *agenthub.Client,
-	clientMu *sync.Mutex,
 	mcpConfigPath string,
 	selfHandle string,
 	msg agenthub.Message,
@@ -424,10 +432,7 @@ func handleMessage(
 	// 自己ループ防止: bridge が送信したメッセージを再処理しない
 	if msg.Sender == selfHandle {
 		slog.Debug("skip self-sent message", "msg_id", msg.ID)
-		clientMu.Lock()
-		err := client.MarkAsRead(ctx, msg.ID)
-		clientMu.Unlock()
-		if err != nil {
+		if err := client.MarkAsRead(ctx, msg.ID); err != nil {
 			slog.Warn("mark_as_read (self-skip) failed", "msg_id", msg.ID, "err", err)
 		}
 		return
@@ -445,39 +450,30 @@ func handleMessage(
 			"workdir", cfg.Workdir, "msg_id", msg.ID)
 		sendCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		defer cancel()
-		clientMu.Lock()
 		_ = client.SendMessage(sendCtx, msg.Sender,
 			fmt.Sprintf("(auto) bridge workdir does not exist: %s", cfg.Workdir), msg.ID)
 		_ = client.MarkAsRead(ctx, msg.ID)
-		clientMu.Unlock()
-		cancel()
 		return
 	}
 
 	prompt := formatPrompt(selfHandle, msg)
-	// runClaude は内部で keepalive goroutine を走らせる。clientMu を渡して
-	// keepalive と MarkAsRead の競合を防ぐ。
-	if err := runClaude(ctx, cfg, client, clientMu, mcpConfigPath, prompt); err != nil {
+	if err := runClaude(ctx, cfg, mcpConfigPath, msg.Sender, prompt); err != nil {
 		slog.Error("claude subprocess error",
 			"msg_id", msg.ID, "from", msg.Sender, "err", err)
 		// エラーを送信元に通知する
 		errMsg := fmt.Sprintf("(auto) bridge-go-claude error: %v", err)
 		sendCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		defer cancel()
-		clientMu.Lock()
 		if sendErr := client.SendMessage(sendCtx, msg.Sender, errMsg, msg.ID); sendErr != nil {
 			slog.Error("fallback send_message failed", "msg_id", msg.ID, "err", sendErr)
 		}
-		clientMu.Unlock()
 	} else {
 		slog.Info("message processed", "msg_id", msg.ID, "from", msg.Sender)
 	}
 
-	clientMu.Lock()
 	if err := client.MarkAsRead(ctx, msg.ID); err != nil {
 		slog.Warn("mark_as_read failed", "msg_id", msg.ID, "err", err)
 	}
-	clientMu.Unlock()
 }
 
 // ──────────────────────────────────────────────────────────────────────── //
@@ -486,14 +482,11 @@ func handleMessage(
 
 // runBridge はポーリングループを回す。circuit breaker で MaxRetries 回連続失敗したら
 // error を返して呼出元の reconnect ループに入る。
-//
-// clientMu は client への全 MCP 呼び出しを直列化するための mutex。
-// handleMessage → runClaude の keepalive goroutine と MarkAsRead の競合を防ぐ。
+// 全 MCP 呼び出しはシングルスレッドで行われるため mutex は不要。
 func runBridge(
 	ctx context.Context,
 	cfg *config,
 	client *agenthub.Client,
-	clientMu *sync.Mutex,
 	mcpConfigPath string,
 	selfHandle string,
 ) error {
@@ -510,9 +503,7 @@ func runBridge(
 		default:
 		}
 
-		clientMu.Lock()
 		msgs, err := client.GetMessages(ctx)
-		clientMu.Unlock()
 		if err != nil {
 			consecutiveFailures++
 			slog.Warn("get_messages error",
@@ -527,7 +518,7 @@ func runBridge(
 		consecutiveFailures = 0
 
 		for _, msg := range msgs {
-			handleMessage(ctx, cfg, client, clientMu, mcpConfigPath, selfHandle, msg)
+			handleMessage(ctx, cfg, client, mcpConfigPath, selfHandle, msg)
 		}
 
 		sleepWithContext(ctx, cfg.PollInterval)
@@ -600,13 +591,10 @@ func main() {
 	slog.Info("registered", "handle", "@"+cfg.User)
 
 	selfHandle := "@" + cfg.User
-	// clientMu は client への全 MCP 呼び出しを直列化する。
-	// keepalive goroutine と polling/mark_as_read の競合を防ぐ。
-	var clientMu sync.Mutex
 
 	// ポーリングループ (reconnect あり)
 	for {
-		err := runBridge(ctx, cfg, client, &clientMu, mcpConfigPath, selfHandle)
+		err := runBridge(ctx, cfg, client, mcpConfigPath, selfHandle)
 		if ctx.Err() != nil {
 			slog.Info("bridge-go-claude shutting down")
 			return
@@ -630,9 +618,7 @@ func main() {
 			slog.Warn("reconnect failed", "err", err)
 			continue
 		}
-		clientMu.Lock()
 		client = newClient
-		clientMu.Unlock()
 		slog.Info("reconnected and re-registered", "handle", selfHandle)
 	}
 }
