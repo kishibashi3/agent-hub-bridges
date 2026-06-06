@@ -1126,12 +1126,14 @@ class TestSanitizeToolInput:
             assert result[k] == "***", f"{k!r} should be masked"
 
     def test_authorization_substring_masked(self) -> None:
-        """'authorization' を含むキーが substring match でマスクされる (issue #117)。"""
+        """'authorization' を含むキーが substring match でマスクされる (issue #117, #120)。"""
         from agent_hub_bridges.claude.telemetry import _sanitize_tool_input
 
         result = _sanitize_tool_input({
+            "authorization": "Bearer tok-direct",
             "x_authorization": "Bearer tok-abc",
             "authorization_header": "Basic dXNlcjpwYXNz",
         })
+        assert result["authorization"] == "***"
         assert result["x_authorization"] == "***"
         assert result["authorization_header"] == "***"
