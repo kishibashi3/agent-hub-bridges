@@ -104,6 +104,8 @@ func (s *Session) Start(ctx context.Context) error {
 	if err := exec.CommandContext(ctx,
 		"tmux", "send-keys", "-t", s.Name, cmdStr, "Enter",
 	).Run(); err != nil {
+		// send-keys 失敗時は空セッションが残留しないよう best-effort cleanup する (reviewer minor)
+		_ = s.Stop(ctx)
 		return fmt.Errorf("tmux send-keys (start): %w", err)
 	}
 
@@ -231,6 +233,12 @@ func (s *Session) WaitForIdle(ctx context.Context) error {
 		default:
 		}
 		time.Sleep(pollIntervalS)
+
+		// tmux セッションが死んだ場合は capturePaneText が "" を返し続ける。
+		// 「変化なし」→ idle timeout で false success にならないよう死活確認する。
+		if !s.IsAlive() {
+			return fmt.Errorf("session %s: tmux session died while waiting for response", s.Name)
+		}
 
 		content := s.capturePaneText()
 		if content != lastContent {
