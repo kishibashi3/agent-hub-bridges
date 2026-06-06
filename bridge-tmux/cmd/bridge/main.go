@@ -435,12 +435,15 @@ func setupLogger(level string) {
 	switch level {
 	case "debug":
 		l = slog.LevelDebug
+	case "info":
+		l = slog.LevelInfo
 	case "warn":
 		l = slog.LevelWarn
 	case "error":
 		l = slog.LevelError
 	default:
-		l = slog.LevelInfo
+		// validateLogLevel in parseConfig guarantees this branch is unreachable.
+		panic(fmt.Sprintf("setupLogger: unexpected log level %q", level))
 	}
 	handler := slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: l})
 	slog.SetDefault(slog.New(handler))
