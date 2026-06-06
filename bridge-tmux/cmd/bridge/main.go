@@ -58,21 +58,29 @@ type config struct {
 	PollInterval     time.Duration
 	ReconnectBackoff time.Duration
 	MaxRetries       int
+	// FleetFile は --fleet フラグで指定した YAML ファイルパス。
+	// 空文字なら single-persona モード (--user フラグ使用)。
+	FleetFile string
 }
 
 func parseConfig() (*config, error) {
 	var (
-		user        = flag.String("user", "", "agent-hub handle (required, without @)")
+		user        = flag.String("user", "", "agent-hub handle (single-persona mode, without @)")
 		displayName = flag.String("display-name", "", "display name (optional)")
 		workdir     = flag.String("workdir", "", "peer workdir with CLAUDE.md (default: cwd)")
 		model       = flag.String("model", "", "Claude model (default: claude default)")
 		idleTimeout = flag.Duration("idle-timeout", 10*time.Minute, "idle kill timeout")
 		noBypass    = flag.Bool("no-bypass-permissions", false, "disable --dangerously-skip-permissions")
+		fleetFile   = flag.String("fleet", "", "fleet YAML config file (multi-persona mode)")
 	)
 	flag.Parse()
 
-	if *user == "" {
-		return nil, fmt.Errorf("--user is required")
+	// --fleet と --user は排他
+	if *fleetFile != "" && *user != "" {
+		return nil, fmt.Errorf("--fleet and --user are mutually exclusive")
+	}
+	if *fleetFile == "" && *user == "" {
+		return nil, fmt.Errorf("either --user or --fleet is required")
 	}
 
 	url := os.Getenv("AGENT_HUB_URL")
@@ -84,17 +92,21 @@ func parseConfig() (*config, error) {
 		return nil, fmt.Errorf("GITHUB_PAT is not set")
 	}
 
+	// fleet モードでは workdir は persona ごとに YAML で指定するため省略可能。
+	// single モードでは必須 (未指定なら cwd を使う)。
 	wd := *workdir
-	if wd == "" {
-		var err error
-		wd, err = os.Getwd()
-		if err != nil {
-			return nil, fmt.Errorf("getwd: %w", err)
+	if *fleetFile == "" {
+		if wd == "" {
+			var err error
+			wd, err = os.Getwd()
+			if err != nil {
+				return nil, fmt.Errorf("getwd: %w", err)
+			}
 		}
-	}
-	wd, _ = filepath.Abs(wd)
-	if _, err := os.Stat(wd); err != nil {
-		return nil, fmt.Errorf("workdir %q: %w", wd, err)
+		wd, _ = filepath.Abs(wd)
+		if _, err := os.Stat(wd); err != nil {
+			return nil, fmt.Errorf("workdir %q: %w", wd, err)
+		}
 	}
 
 	// CLAUDE_CLI_PATH が未設定なら PATH 上の "claude" を使う (Claude Code の default install)
@@ -123,6 +135,7 @@ func parseConfig() (*config, error) {
 		PollInterval:     5 * time.Second,
 		ReconnectBackoff: 5 * time.Second,
 		MaxRetries:       10,
+		FleetFile:        *fleetFile,
 	}, nil
 }
 
@@ -387,6 +400,28 @@ func main() {
 		os.Exit(2)
 	}
 
+	// ANTHROPIC_API_KEY を unset: Tier2 (tmux claude) を subscription 課金に強制
+	os.Unsetenv("ANTHROPIC_API_KEY")
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer stop()
+
+	// fleet モード: YAML ファイルから複数 persona を並列起動
+	if cfg.FleetFile != "" {
+		log.Printf("[main] bridge-tmux fleet mode (fleet=%s)", cfg.FleetFile)
+		fleet, err := LoadFleetConfig(cfg.FleetFile)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "fleet config error: %v\n", err)
+			os.Exit(2)
+		}
+		log.Printf("[main] fleet: %d personas", len(fleet.Personas))
+		if err := RunFleet(ctx, cfg, fleet); err != nil && ctx.Err() == nil {
+			log.Fatalf("fleet error: %v", err)
+		}
+		log.Println("[main] fleet shutdown complete")
+		return
+	}
+
 	log.Printf("[main] bridge-tmux starting (user=@%s, workdir=%s, idle=%.0fs)",
 		cfg.User, cfg.Workdir, cfg.IdleTimeout.Seconds())
 
@@ -403,9 +438,6 @@ func main() {
 	}
 	defer os.Remove(mcpConfigPath)
 
-	// ANTHROPIC_API_KEY を unset: Tier2 (tmux claude) を subscription 課金に強制
-	os.Unsetenv("ANTHROPIC_API_KEY")
-
 	// hub client 初期化 (agent-hub-sdk/go)
 	// 必須パラメータは parseConfig() で検証済み。New() も fail-fast 検証を行う。
 	client, err := agenthub.New(
@@ -415,9 +447,6 @@ func main() {
 	if err != nil {
 		fatalCleanup("agenthub.New: %v", err)
 	}
-
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
-	defer stop()
 
 	// MCP initialize
 	if err := client.Initialize(ctx); err != nil {
