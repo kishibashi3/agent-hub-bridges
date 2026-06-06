@@ -97,6 +97,7 @@ func parseConfig() (*config, error) {
 		return nil, fmt.Errorf("workdir %q: %w", wd, err)
 	}
 
+	// CLAUDE_CLI_PATH が未設定なら PATH 上の "claude" を使う (Claude Code の default install)
 	claudeCLI := os.Getenv("CLAUDE_CLI_PATH")
 	if claudeCLI == "" {
 		claudeCLI = "claude"
@@ -130,10 +131,17 @@ func parseConfig() (*config, error) {
 // ──────────────────────────────────────────────────────────────────────── //
 
 // SessionManager は Tier2 セッションのライフサイクルと idle timer を管理する。
+//
+// # AfterFunc goroutine との race 防止
+//
+// time.AfterFunc の goroutine が session.Stop() を実行中に Handle() が
+// session.Start() を呼ぶと race になる。timerDone channel を使って
+// timer.Stop() が false (= 発火済み) だった場合に goroutine の完了を待つ。
 type SessionManager struct {
 	session   *tmux.Session
 	cfg       *config
 	idleTimer *time.Timer
+	timerDone chan struct{} // AfterFunc goroutine 完了通知; nil = timer 未設定
 	timerMu   sync.Mutex
 }
 
@@ -157,11 +165,19 @@ func newSessionManager(cfg *config, mcpConfigPath string) *SessionManager {
 
 // Handle は 1 件のメッセージを処理する (Cold なら spawn → inject → wait_for_idle)。
 func (m *SessionManager) Handle(ctx context.Context, prompt string) error {
-	// idle timer をキャンセル (wake-on-message)
+	// idle timer をキャンセルする (wake-on-message)。
+	// timer.Stop() が false = goroutine が既に発火済み → 完了を待ってから進む。
+	// これにより session.Stop() (goroutine) と session.Start() (Handle) の race を防ぐ。
 	m.timerMu.Lock()
 	if m.idleTimer != nil {
-		m.idleTimer.Stop()
+		if !m.idleTimer.Stop() && m.timerDone != nil {
+			done := m.timerDone
+			m.timerMu.Unlock()
+			<-done // AfterFunc goroutine の session.Stop() 完了を待つ
+			m.timerMu.Lock()
+		}
 		m.idleTimer = nil
+		m.timerDone = nil
 	}
 	m.timerMu.Unlock()
 
@@ -187,7 +203,10 @@ func (m *SessionManager) Handle(ctx context.Context, prompt string) error {
 
 	// 処理完了後 idle timer を開始する
 	m.timerMu.Lock()
+	done := make(chan struct{})
+	m.timerDone = done
 	m.idleTimer = time.AfterFunc(m.cfg.IdleTimeout, func() {
+		defer close(done) // Handle() が待てるよう完了を通知する
 		log.Printf("[manager] idle timeout (%.0fs) — stopping session %s",
 			m.cfg.IdleTimeout.Seconds(), m.session.Name)
 		ctx2, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -203,7 +222,12 @@ func (m *SessionManager) Handle(ctx context.Context, prompt string) error {
 func (m *SessionManager) Shutdown(ctx context.Context) {
 	m.timerMu.Lock()
 	if m.idleTimer != nil {
-		m.idleTimer.Stop()
+		if !m.idleTimer.Stop() && m.timerDone != nil {
+			done := m.timerDone
+			m.timerMu.Unlock()
+			<-done
+			m.timerMu.Lock()
+		}
 	}
 	m.timerMu.Unlock()
 	_ = m.session.Stop(ctx)
@@ -326,6 +350,19 @@ func handleMessage(
 		return
 	}
 
+	// issue #51: workdir がなければ error DM を返して ack して早期 return
+	// (crash-ack ループ防止。workdir が存在しなくなった場合は bridge を再起動すること)
+	if _, err := os.Stat(cfg.Workdir); err != nil {
+		log.Printf("[bridge] workdir %q gone — sending error DM and acking %s (issue #51)",
+			cfg.Workdir, msg.ID)
+		sendCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+		_ = client.SendMessage(sendCtx, msg.Sender,
+			fmt.Sprintf("(auto) bridge workdir does not exist: %s", cfg.Workdir), msg.ID)
+		_ = client.MarkAsRead(ctx, msg.ID)
+		return
+	}
+
 	log.Printf("[bridge] <- message %s from %s: %s", msg.ID, msg.Sender, truncate(msg.Body, 120))
 
 	prompt := formatPrompt(selfHandle, msg)
@@ -340,11 +377,6 @@ func handleMessage(
 		}
 	} else {
 		log.Printf("[bridge] ✓ processed %s from %s", msg.ID, msg.Sender)
-	}
-
-	// workdir チェック (存在しない場合は ack して skip)
-	if _, err := os.Stat(cfg.Workdir); err != nil {
-		log.Printf("[bridge] workdir %q gone — skipping ack for %s", cfg.Workdir, msg.ID)
 	}
 
 	if err := client.MarkAsRead(ctx, msg.ID); err != nil {
@@ -374,6 +406,12 @@ func main() {
 	if err != nil {
 		log.Fatalf("writeMCPConfig: %v", err)
 	}
+	// defer os.Remove の後に log.Fatalf を呼ぶと os.Exit(1) で defer がスキップされ
+	// PAT を含む tempfile が /tmp に残留する。以降の fatal は fatalCleanup を使う。
+	fatalCleanup := func(format string, args ...any) {
+		os.Remove(mcpConfigPath)
+		log.Fatalf(format, args...)
+	}
 	defer os.Remove(mcpConfigPath)
 
 	// ANTHROPIC_API_KEY を unset: Tier2 (tmux claude) を subscription 課金に強制
@@ -386,7 +424,7 @@ func main() {
 		agenthub.WithClientName("bridge-tmux"),
 	)
 	if err != nil {
-		log.Fatalf("agenthub.New: %v", err)
+		fatalCleanup("agenthub.New: %v", err)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
@@ -394,13 +432,13 @@ func main() {
 
 	// MCP initialize
 	if err := client.Initialize(ctx); err != nil {
-		log.Fatalf("MCP initialize: %v", err)
+		fatalCleanup("MCP initialize: %v", err)
 	}
 
 	// register
 	registered, err := client.Register(ctx, cfg.DisplayName, "stateful")
 	if err != nil {
-		log.Fatalf("register: %v", err)
+		fatalCleanup("register: %v", err)
 	}
 	log.Printf("[main] registered: %s", strings.SplitN(registered, "\n", 2)[0])
 
@@ -435,8 +473,10 @@ func main() {
 			log.Printf("[main] re-initialize failed: %v", err)
 			continue
 		}
+		// re-register 失敗時も continue して再 initialize から試みる
 		if _, err := client.Register(ctx, cfg.DisplayName, "stateful"); err != nil {
 			log.Printf("[main] re-register failed: %v", err)
+			continue
 		}
 	}
 }
