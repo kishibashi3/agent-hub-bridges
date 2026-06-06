@@ -209,6 +209,12 @@ func runPersona(ctx context.Context, cfg *config, extraEnv map[string]string, he
 	}
 	slog.Info("fleet persona registered", "handle", selfHandle, "result", firstLine(registered))
 
+	// SSE ストリームを開いてサーバー ping に自動応答する (issue #41)
+	if err := client.StartSSE(ctx); err != nil {
+		return fmt.Errorf("StartSSE: %w", err)
+	}
+	defer client.StopSSE()
+
 	session := tmux.NewSession(tmux.SessionOptions{
 		UserID:           cfg.User,
 		Workdir:          cfg.Workdir,
@@ -241,6 +247,8 @@ func runPersona(ctx context.Context, cfg *config, extraEnv map[string]string, he
 			slog.Warn("fleet persona runBridge ended", "handle", selfHandle, "err", err)
 		}
 
+		// SSE goroutine を先に停止してから sleep → re-initialize → re-register → re-StartSSE
+		client.StopSSE()
 		sleepWithContext(ctx, cfg.ReconnectBackoff)
 		if ctx.Err() != nil {
 			return nil
@@ -252,6 +260,10 @@ func runPersona(ctx context.Context, cfg *config, extraEnv map[string]string, he
 		}
 		if _, err := client.Register(ctx, cfg.DisplayName, "stateful"); err != nil {
 			slog.Warn("fleet persona re-register failed", "handle", selfHandle, "err", err)
+			continue
+		}
+		if err := client.StartSSE(ctx); err != nil {
+			slog.Warn("fleet persona re-StartSSE failed", "handle", selfHandle, "err", err)
 			continue
 		}
 	}
