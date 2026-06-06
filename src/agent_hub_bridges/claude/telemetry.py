@@ -365,20 +365,40 @@ def _get_tracer() -> Any:
 
 
 # ---------------------------------------------------------------------------
-# _sanitize_tool_input (issue #109)
+# _sanitize_tool_input (issue #109, #112)
 # ---------------------------------------------------------------------------
 
-_SENSITIVE_KEYS: frozenset[str] = frozenset(
-    {"password", "token", "secret", "key", "api_key", "pat", "authorization"}
+# サブワード合成パターンでマスクするキーワード (issue #112)。
+# substring match を適用するため、短すぎて false positive になる単語は含めない。
+# 例: "key" は exact match 専用 (_SENSITIVE_KEYS_EXACT) で管理する。
+_SENSITIVE_KEYWORDS: tuple[str, ...] = (
+    "password",
+    "secret",
+    "token",
+    "credential",
+    "authorization",
+    "api_key",
+    "private_key",
+    "access_key",
 )
+
+# 完全一致専用 (短すぎて substring match では false positive になるもの)
+_SENSITIVE_KEYS_EXACT: frozenset[str] = frozenset({"key", "pat"})
+
 _TOOL_ARG_MAX_LEN: int = 200
 
 
 def _sanitize_tool_input(tool_input: dict[str, Any]) -> dict[str, str]:
-    """tool_input を span 属性用に sanitize する (issue #109).
+    """tool_input を span 属性用に sanitize する (issue #109, #112).
 
     各 value を ``str`` に変換して ``_TOOL_ARG_MAX_LEN`` 文字に truncate する。
-    key 名が ``_SENSITIVE_KEYS`` に含まれる場合は値を ``"***"`` に置換する。
+    key 名が機密情報と判断される場合は値を ``"***"`` に置換する。
+
+    機密判定ロジック (issue #112):
+    - ``_SENSITIVE_KEYS_EXACT`` に完全一致する場合 ("key", "pat")
+    - ``_SENSITIVE_KEYWORDS`` のいずれかを substring として含む場合
+      (例: "api_token", "access_token", "client_secret" 等のサブワード合成を捕捉)
+    - 大文字小文字を区別しない
 
     Args:
         tool_input: ``ToolUseBlock.input`` の dict。
@@ -388,7 +408,8 @@ def _sanitize_tool_input(tool_input: dict[str, Any]) -> dict[str, str]:
     """
     result: dict[str, str] = {}
     for k, v in tool_input.items():
-        if k.lower() in _SENSITIVE_KEYS:
+        lower = k.lower()
+        if lower in _SENSITIVE_KEYS_EXACT or any(kw in lower for kw in _SENSITIVE_KEYWORDS):
             result[k] = "***"
         else:
             result[k] = str(v)[:_TOOL_ARG_MAX_LEN]

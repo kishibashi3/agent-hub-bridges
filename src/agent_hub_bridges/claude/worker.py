@@ -26,6 +26,7 @@ import sys
 import tempfile
 import time
 from collections.abc import Callable, Iterator
+from typing import Any
 from pathlib import Path
 
 import anyio
@@ -1052,7 +1053,7 @@ async def _handle_one(
     # issue #109: 全 tool_use を追跡して OTel child span に記録する。
     # _pending_tool_uses: tool_use_id → (name, input, start_time_ns)
     # tool_uses: 完了した ToolUseRecord のリスト (emit_span に渡す)
-    _pending_tool_uses: dict[str, tuple[str, dict, int]] = {}
+    _pending_tool_uses: dict[str, tuple[str, dict[str, Any], int]] = {}  # issue #113
     tool_uses: list[ToolUseRecord] = []
 
     async for sdk_msg in claude.receive_response():
