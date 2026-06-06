@@ -74,6 +74,13 @@ User=pi
 EnvironmentFile=/etc/bridge-tmux/reviewer.env
 ExecStart=/usr/local/bin/bridge-tmux --user reviewer --workdir /opt/reviewer
 Restart=always
+# KillSignal=SIGINT: systemd のデフォルト kill signal は SIGTERM だが、
+# Go の signal.NotifyContext は SIGTERM と SIGINT の両方を捕捉する。
+# 念のため SIGINT を指定しておくことで、bridge が KeyboardInterrupt 経路
+# (= graceful shutdown → defer 実行) を確実に通れるようにする。
+# SIGTERM を使う場合は main() の signal.NotifyContext に SIGTERM も含まれるため
+# 同様に graceful shutdown される。どちらでも動作するが、SIGINT の方が
+# interactive terminal での手動テストと同じ経路を踏む。
 KillSignal=SIGINT
 ```
 
