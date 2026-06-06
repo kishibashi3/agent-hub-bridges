@@ -380,10 +380,14 @@ func main() {
 	os.Unsetenv("ANTHROPIC_API_KEY")
 
 	// hub client 初期化 (agent-hub-sdk/go)
-	client := agenthub.New(
+	// 必須パラメータは parseConfig() で検証済み。New() も fail-fast 検証を行う。
+	client, err := agenthub.New(
 		cfg.AgentHubURL, cfg.GitHubPAT, cfg.User, cfg.Tenant,
 		agenthub.WithClientName("bridge-tmux"),
 	)
+	if err != nil {
+		log.Fatalf("agenthub.New: %v", err)
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
