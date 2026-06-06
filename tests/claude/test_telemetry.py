@@ -1040,8 +1040,8 @@ class TestSanitizeToolInput:
         assert result["password"] == "***"
         assert result["cmd"] == "ls"
 
-    def test_api_key_exact_masked(self) -> None:
-        """'api_key' キーは '***' に置換される。"""
+    def test_api_key_substring_masked(self) -> None:
+        """'api_key' キーは _SENSITIVE_KEYWORDS の substring match でマスクされる (issue #116)。"""
         from agent_hub_bridges.claude.telemetry import _sanitize_tool_input
 
         result = _sanitize_tool_input({"api_key": "sk-abc123"})
@@ -1124,3 +1124,14 @@ class TestSanitizeToolInput:
         result = _sanitize_tool_input(tool_input)
         for k in tool_input:
             assert result[k] == "***", f"{k!r} should be masked"
+
+    def test_authorization_substring_masked(self) -> None:
+        """'authorization' を含むキーが substring match でマスクされる (issue #117)。"""
+        from agent_hub_bridges.claude.telemetry import _sanitize_tool_input
+
+        result = _sanitize_tool_input({
+            "x_authorization": "Bearer tok-abc",
+            "authorization_header": "Basic dXNlcjpwYXNz",
+        })
+        assert result["x_authorization"] == "***"
+        assert result["authorization_header"] == "***"

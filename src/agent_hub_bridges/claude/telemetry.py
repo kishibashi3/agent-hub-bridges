@@ -371,6 +371,9 @@ def _get_tracer() -> Any:
 # サブワード合成パターンでマスクするキーワード (issue #112)。
 # substring match を適用するため、短すぎて false positive になる単語は含めない。
 # 例: "key" は exact match 専用 (_SENSITIVE_KEYS_EXACT) で管理する。
+#
+# 設計ポリシー (issue #115): false negative (機密漏洩) を false positive (過剰マスク) より優先する。
+# "token" を含む diagnostic フィールド (token_count 等) がマスクされる可能性はあるが許容する。
 _SENSITIVE_KEYWORDS: tuple[str, ...] = (
     "password",
     "secret",
