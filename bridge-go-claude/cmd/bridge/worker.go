@@ -481,9 +481,11 @@ func runGracefulDrain(
 			_ = client.MarkAsRead(drainCtx, m.ID)
 			continue
 		}
-		// コマンドはシャットダウン中はスキップ (次回起動の polling loop が処理する)
+		// コマンドメッセージはシャットダウン中は MarkAsRead せずスキップする。
+		// 意図的に未読のまま留保 → 次回起動時の startupCatchup が CommandRouter 経由で処理する。
+		// 自己ループ・cursor-seen と異なり MarkAsRead を呼ばないのはこのため。
 		if len(m.Body) > 0 && m.Body[0] == '/' {
-			slog.Info("[drain] skipping command message during shutdown", "msg_id", m.ID)
+			slog.Info("[drain] skipping command message during shutdown (留保 → 次回起動で処理)", "msg_id", m.ID)
 			continue
 		}
 		pending = append(pending, m)
