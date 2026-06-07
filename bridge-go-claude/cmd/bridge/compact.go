@@ -1,7 +1,7 @@
 // compact.go — compact サマリーのアーカイブ (issue #131)
 //
 // idle compact watchdog は on-demand bridge には不要なため削除済み (issue #179)。
-// compact は SIGTERM 受信時に runShutdownCompact() から呼ばれる (issue #178)。
+// compact は SIGTERM 受信時に runGracefulDrain() から呼ばれる (issue #178)。
 //
 // appendCompactSummary: compact サマリーを daily/YYYY-MM-DD.md に追記する。
 // compactArchiveDirFor: archive ディレクトリを解決するヘルパー。
