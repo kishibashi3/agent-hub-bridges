@@ -218,6 +218,16 @@ func runHubSession(
 				continue
 			}
 
+			// issue #176: MarkAsRead を handleOne 前に呼ぶ。
+			// polling bridge では処理前に MarkAsRead しないと次回 GetMessages で
+			// 同一メッセージが返ってきて二重 dispatch が発生する。
+			// cursor check が secondary guard として機能するが、in-memory cursor は
+			// reconnect でリセットされるため、server-side の既読状態を先に確定させる。
+			if err := client.MarkAsRead(ctx, msg.ID); err != nil {
+				slog.Warn("runHubSession: pre-process mark_as_read failed; cursor will guard on retry",
+					"msg_id", msg.ID, "err", err)
+			}
+
 			// issue #102: stream 競合防止のため handleOne の前後で busy フラグを set/clear
 			// on-demand では subprocess が毎回 spawn されるため実質的な競合はないが、
 			// compact watchdog との二重起動を防ぐために維持する。
@@ -228,12 +238,10 @@ func runHubSession(
 				slog.Error("runHubSession: handleOne error", "msg_id", msg.ID, "err", handleErr)
 			}
 
-			// process → save_cursor → MarkAsRead の順 (crash-safe — issue #37)
+			// issue #37, #176: process → save_cursor の順 (crash-safe secondary guard)。
+			// MarkAsRead は上記で処理前に呼び済み。
 			saveCursor(cfg.User, msg.Timestamp)
 			cursor = msg.Timestamp
-			if err := client.MarkAsRead(ctx, msg.ID); err != nil {
-				slog.Warn("runHubSession: mark_as_read failed", "msg_id", msg.ID, "err", err)
-			}
 		}
 
 		sleepWithContext(ctx, cfg.PollInterval)
@@ -305,6 +313,16 @@ func startupCatchup(
 		gapTracker.onMessageReceived(msg.ID)
 		watchdog.reset()
 
+		// issue #176: MarkAsRead を handleOne 前に呼ぶ。
+		// polling bridge では処理前に MarkAsRead しないと次回 GetMessages で
+		// 同一メッセージが返ってきて二重 dispatch が発生する。
+		// cursor check が secondary guard として機能するが、in-memory cursor は
+		// reconnect でリセットされるため、server-side の既読状態を先に確定させる。
+		if err := client.MarkAsRead(ctx, msg.ID); err != nil {
+			slog.Warn("[startup-catchup] pre-process mark_as_read failed; cursor will guard on retry",
+				"msg_id", msg.ID, "err", err)
+		}
+
 		watchdog.setBusy()
 		handleErr := handleOne(ctx, client, runner, msg, cfg, tracker, journal)
 		watchdog.clearBusy()
@@ -312,9 +330,10 @@ func startupCatchup(
 			slog.Error("[startup-catchup] handleOne error", "msg_id", msg.ID, "err", handleErr)
 		}
 
+		// issue #37, #176: process → save_cursor の順 (crash-safe secondary guard)。
+		// MarkAsRead は上記で処理前に呼び済み。
 		saveCursor(cfg.User, msg.Timestamp)
 		cursor = msg.Timestamp
-		_ = client.MarkAsRead(ctx, msg.ID)
 	}
 
 	return cursor, nil
@@ -322,7 +341,7 @@ func startupCatchup(
 
 // handleOne は message 1 件を Claude に流して応答を待つ。
 // Python の _handle_one() に相当。
-// hub.ack (MarkAsRead) は caller が担当する。
+// hub.MarkAsRead は caller が handleOne 呼び出し前に担当する (issue #176)。
 // claude subprocess は on-demand で spawn/exit される (runner.query 内部で処理)。
 func handleOne(
 	ctx context.Context,
