@@ -221,6 +221,7 @@ func writeJSON(w io.Writer, v any) error {
 // isCompact=true のとき blocking command 検出をスキップする。
 func readUntilResult(ctx context.Context, scanner *bufio.Scanner, stdinWriter io.Writer, tracker *activityTracker, isCompact bool) error {
 	var resultErr error
+	resultReceived := false
 
 	for scanner.Scan() {
 		select {
@@ -278,6 +279,7 @@ func readUntilResult(ctx context.Context, scanner *bufio.Scanner, stdinWriter io
 		}
 
 		if ev.Type == "result" {
+			resultReceived = true
 			if ev.IsError {
 				resultErr = fmt.Errorf("claude result error (subtype=%s): %s",
 					ev.Subtype, truncate(ev.Result, 300))
@@ -288,6 +290,11 @@ func readUntilResult(ctx context.Context, scanner *bufio.Scanner, stdinWriter io
 
 	if scanErr := scanner.Err(); scanErr != nil {
 		slog.Warn("runner: stream-json scan error", "err", scanErr)
+		return scanErr
+	}
+	// subprocess がクラッシュ等で result イベントを送出せずに終了した場合をエラーとして扱う
+	if !resultReceived {
+		return fmt.Errorf("claude subprocess exited without sending result event (EOF)")
 	}
 	return resultErr
 }

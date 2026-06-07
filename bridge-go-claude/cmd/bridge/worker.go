@@ -167,9 +167,9 @@ func runHubSession(
 
 	// startup catchup: bridge 起動時に未読メッセージを処理する (issue #98)
 	cursor, err = startupCatchup(
-		ctx, cfg, client, mcpConfigPath,
+		ctx, cfg, client,
 		runner, cursor,
-		tracker, gapTracker, watchdog, journal, router,
+		tracker, gapTracker, watchdog, journal,
 	)
 	if err != nil {
 		slog.Warn("runHubSession: startup catchup error (continuing)", "err", err)
@@ -248,14 +248,12 @@ func startupCatchup(
 	ctx context.Context,
 	cfg *config,
 	client *agenthub.Client,
-	mcpConfigPath string,
 	runner *claudeRunner,
 	cursor string,
 	tracker *activityTracker,
 	gapTracker *messageGapTracker,
 	watchdog *idleCompactWatchdog,
 	journal *Journal,
-	router *agenthub.CommandRouter,
 ) (string, error) {
 	msgs, err := client.GetMessages(ctx)
 	if err != nil {
