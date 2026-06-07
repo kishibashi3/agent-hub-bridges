@@ -32,6 +32,7 @@
 span 属性 (GenAI semantic conventions + custom):
   Root span:
   - ``message.id``: 受信した agent-hub message ID (caused_by_id; custom)
+  - ``gen_ai.system``: LLM provider (固定値 ``"anthropic"``; otelite の /api/genai/usage 集計に必須)
   - ``gen_ai.request.model``: model name
   - ``gen_ai.usage.input_tokens``: input tokens
   - ``gen_ai.usage.output_tokens``: output tokens
@@ -466,6 +467,7 @@ def emit_span(
 
     Root span 属性 (ドット区切り — アンダースコア不可):
         - ``message.id``: 受信した agent-hub message ID (caused_by_id)
+        - ``gen_ai.system``: LLM provider name (固定値 ``"anthropic"``)
         - ``gen_ai.request.model``: model name
         - ``gen_ai.usage.input_tokens``: input tokens (int)
         - ``gen_ai.usage.output_tokens``: output tokens (int)
@@ -521,6 +523,7 @@ def emit_span(
             "bridge_claude.send_message", context=ctx
         ) as span:
             span.set_attribute("message.id", caused_by_id)
+            span.set_attribute("gen_ai.system", "anthropic")
             span.set_attribute("gen_ai.request.model", model)
             span.set_attribute("gen_ai.usage.input_tokens", input_tokens)
             span.set_attribute("gen_ai.usage.output_tokens", output_tokens)

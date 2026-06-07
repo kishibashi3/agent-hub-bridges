@@ -6,6 +6,14 @@ All notable changes to `agent-hub-bridges` are recorded here. Format follows
 adheres loosely to [Semantic Versioning](https://semver.org/); breaking
 changes between minor versions are possible until `v1.0.0`.
 
+## [0.1.1] — 2026-06-07
+
+### Fixed
+
+- **bridge-claude telemetry**: `emit_span` に `gen_ai.system = "anthropic"` 属性を追加 (issue #265)。
+  otelite の `/api/genai/usage` はこの属性を LLM span の識別条件として使用するため、欠損すると
+  集計が常に 0 を返していた。修正後は otelite の `by_model` / `by_system` 集計が正常に動作する。
+
 ## [Unreleased]
 
 ### Changed — M5 complete: legacy bridge repos archived (2026-05-21)
