@@ -10,7 +10,7 @@
 //  3. hub session ループ: journal replay → startup catchup → polling loop
 //     - message 受信 → CommandRouter → MarkAsRead → handleOne → runner.query (on-demand subprocess)
 //     - cursor 永続化 (MarkAsRead は handleOne 前に完了済み — issue #176)
-//  4. SIGTERM/Ctrl+C でグレースフルシャットダウン
+//  4. SIGTERM/Ctrl+C → runShutdownCompact() で /compact 実行 → graceful shutdown (issue #178)
 //
 // Python bridge との主な対応:
 //   worker.py:               → worker.go
@@ -35,8 +35,7 @@
 //   AGENT_HUB_JOURNAL_DIR       optional    journal ディレクトリ
 //   AGENT_HUB_BUSY_WINDOW_S     optional    /status busy 判定ウィンドウ秒数 (default: 60)
 //   AGENT_HUB_PUSH_SILENT_THRESHOLD_S optional gap 警告閾値秒数 (default: 25)
-//   BRIDGE_COMPACT_IDLE_MINUTES optional    auto-compact idle 閾値分 (default: 30)
-//   BRIDGE_COMPACT_ARCHIVE_DIR  optional    compact archive ディレクトリ
+//   BRIDGE_COMPACT_ARCHIVE_DIR  optional    compact archive ディレクトリ (SIGTERM compact 時に使用)
 //   BRIDGE_INVENTORY            optional    bridge inventory ファイルパス
 //   AGENT_HUB_BRIDGE_MAX_RETRIES optional   circuit breaker 連続失敗上限 (default: 10, 0=無限)
 //

@@ -1,8 +1,9 @@
 // worker.go — Bridge worker main loop (Python: worker.py の直訳)
 //
-// runWorker: bridge のメインエントリポイント。cursor / journal / tracker / gap_tracker /
-//   compact_watchdog を初期化して runHubSession を reconnect ループで回す。
+// runWorker: bridge のメインエントリポイント。cursor / journal / tracker / gap_tracker を
+//   初期化して runHubSession を reconnect ループで回す。
 //   claudeRunner は状態を持たない (on-demand) ため reconnect をまたいで単一インスタンスを共有する。
+//   SIGTERM 受信時は runShutdownCompact() で compact してから終了する (issue #178)。
 //
 // runHubSession: 1 回ぶんの hub session を最後まで走らせる。
 //   journal replay → startup catchup → polling loop (CommandRouter + handleOne)
@@ -15,6 +16,9 @@
 // journalledSend: journal write → hub.SendMessage → journal delete の順で送信を永続化する。
 //
 // replayJournal: 起動時に pending journal entries を replay する (issue #183)。
+//
+// runShutdownCompact: SIGTERM 時に /compact を実行してから exit する (issue #178)。
+//   idle compact watchdog は on-demand bridge では不要なため削除済み (issue #179)。
 package main
 
 import (
@@ -27,6 +31,9 @@ import (
 	agenthub "github.com/kishibashi3/agent-hub-sdk/go"
 )
 
+// shutdownCompactTimeout は SIGTERM 時の compact に与える最大時間。
+const shutdownCompactTimeout = 5 * time.Minute
+
 const (
 	defaultReconnectBackoffS = 5.0
 	maxRetriesEnv            = "AGENT_HUB_BRIDGE_MAX_RETRIES"
@@ -35,27 +42,24 @@ const (
 
 // runWorker はブリッジの outer loop。
 // Python の run_worker() + run_with_reconnect() に相当。
-// cursor / journal / tracker / gap_tracker / compact_watchdog を
+// cursor / journal / tracker / gap_tracker を
 // outer loop をまたいで共有する (= reconnect 後も状態を持ち越す)。
 //
 // claudeRunner は on-demand モードのため状態を持たず、
 // runnerHolder ではなく単一インスタンスを複数 hub session をまたいで再利用する。
+//
+// SIGTERM 受信時は runShutdownCompact() で compact してから終了する (issue #178)。
+// idle compact watchdog は on-demand bridge では不要なため削除済み (issue #179)。
 func runWorker(ctx context.Context, cfg *config, mcpConfigPath string) {
 	// reconnect をまたいで共有する state
 	cursor := loadCursor(cfg.User)
 	journal := newJournal(cfg.User)
 	tracker := &activityTracker{}
 	gapTracker := &messageGapTracker{}
-	watchdog := newIdleCompactWatchdog(cfg.Workdir)
 
 	// on-demand モード: runner は状態を持たないため単一インスタンスを使い回す。
 	// Python の ClaudeSDKClient と違い、subprocess はフィールドに保持しない。
 	runner := newClaudeRunner(cfg, mcpConfigPath)
-
-	// compact watchdog を background goroutine として起動 (issue #60)
-	watchdogCtx, watchdogCancel := context.WithCancel(ctx)
-	defer watchdogCancel()
-	go watchdog.watchAndCompactLazy(watchdogCtx, runner.compact)
 
 	// circuit breaker (issue #82)
 	maxRetries := cfg.MaxRetries // 0 = unlimited
@@ -65,6 +69,8 @@ func runWorker(ctx context.Context, cfg *config, mcpConfigPath string) {
 		select {
 		case <-ctx.Done():
 			slog.Info("runWorker: shutting down")
+			// issue #178: SIGTERM 時に compact してから exit
+			runShutdownCompact(runner, cfg)
 			return
 		default:
 		}
@@ -72,12 +78,14 @@ func runWorker(ctx context.Context, cfg *config, mcpConfigPath string) {
 		// hub セッション開始
 		newCursor, err := runHubSession(
 			ctx, cfg, mcpConfigPath,
-			runner, cursor, tracker, gapTracker, watchdog, journal,
+			runner, cursor, tracker, gapTracker, journal,
 		)
 		cursor = newCursor // セッション終了時点の cursor を引き継ぐ
 
 		if ctx.Err() != nil {
 			slog.Info("runWorker: context cancelled, shutting down")
+			// issue #178: SIGTERM 時に compact してから exit
+			runShutdownCompact(runner, cfg)
 			return
 		}
 
@@ -124,7 +132,6 @@ func runHubSession(
 	cursor string,
 	tracker *activityTracker,
 	gapTracker *messageGapTracker,
-	watchdog *idleCompactWatchdog,
 	journal *Journal,
 ) (string, error) {
 	// --- hub client 初期化 ---
@@ -169,7 +176,7 @@ func runHubSession(
 	cursor, err = startupCatchup(
 		ctx, cfg, client,
 		runner, cursor,
-		tracker, gapTracker, watchdog, journal,
+		tracker, gapTracker, journal,
 	)
 	if err != nil {
 		slog.Warn("runHubSession: startup catchup error (continuing)", "err", err)
@@ -207,9 +214,6 @@ func runHubSession(
 			// issue #26: safety-net 発火推定 (gap 計測)
 			gapTracker.onMessageReceived(msg.ID)
 
-			// issue #60: idle タイマーリセット
-			watchdog.reset()
-
 			// issue #37: cursor skip — 再起動後の重複 dispatch 防止
 			if cursor != "" && msg.Timestamp <= cursor {
 				slog.Info("runHubSession: skipping already-seen message",
@@ -228,12 +232,7 @@ func runHubSession(
 					"msg_id", msg.ID, "err", err)
 			}
 
-			// issue #102: stream 競合防止のため handleOne の前後で busy フラグを set/clear
-			// on-demand では subprocess が毎回 spawn されるため実質的な競合はないが、
-			// compact watchdog との二重起動を防ぐために維持する。
-			watchdog.setBusy()
 			handleErr := handleOne(ctx, client, runner, msg, cfg, tracker, journal)
-			watchdog.clearBusy()
 			if handleErr != nil {
 				slog.Error("runHubSession: handleOne error", "msg_id", msg.ID, "err", handleErr)
 			}
@@ -260,7 +259,6 @@ func startupCatchup(
 	cursor string,
 	tracker *activityTracker,
 	gapTracker *messageGapTracker,
-	watchdog *idleCompactWatchdog,
 	journal *Journal,
 ) (string, error) {
 	msgs, err := client.GetMessages(ctx)
@@ -311,7 +309,6 @@ func startupCatchup(
 		}
 
 		gapTracker.onMessageReceived(msg.ID)
-		watchdog.reset()
 
 		// issue #176: MarkAsRead を handleOne 前に呼ぶ。
 		// polling bridge では処理前に MarkAsRead しないと次回 GetMessages で
@@ -323,9 +320,7 @@ func startupCatchup(
 				"msg_id", msg.ID, "err", err)
 		}
 
-		watchdog.setBusy()
 		handleErr := handleOne(ctx, client, runner, msg, cfg, tracker, journal)
-		watchdog.clearBusy()
 		if handleErr != nil {
 			slog.Error("[startup-catchup] handleOne error", "msg_id", msg.ID, "err", handleErr)
 		}
@@ -423,5 +418,23 @@ func replayJournal(ctx context.Context, client *agenthub.Client, journal *Journa
 		}
 		journal.delete(entry.ID)
 		slog.Info("replayJournal: entry replayed successfully", "id", entry.ID)
+	}
+}
+
+// runShutdownCompact は SIGTERM 受信時に /compact を実行する (issue #178)。
+// cancelled context ではなく context.Background() + shutdownCompactTimeout で実行する。
+// compact 失敗は WARN ログのみ (bridge の終了を妨げない)。
+func runShutdownCompact(runner *claudeRunner, cfg *config) {
+	slog.Info("[shutdown-compact] SIGTERM received — running /compact before exit")
+	ctx, cancel := context.WithTimeout(context.Background(), shutdownCompactTimeout)
+	defer cancel()
+	summary, err := runner.compact(ctx)
+	if err != nil {
+		slog.Warn("[shutdown-compact] /compact failed", "err", err)
+		return
+	}
+	slog.Info("[shutdown-compact] /compact completed")
+	if archiveDir := compactArchiveDirFor(cfg.Workdir); archiveDir != "" {
+		appendCompactSummary(summary, archiveDir)
 	}
 }
