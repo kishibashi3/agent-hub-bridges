@@ -360,7 +360,10 @@ func handleOne(
 		"msg_id", msg.ID, "from", msg.Sender, "body_preview", truncate(msg.Body, 120))
 
 	prompt := formatPrompt("@"+cfg.User, msg)
-	if err := runner.query(ctx, prompt, msg.Sender, tracker); err != nil {
+	usage, err := runner.query(ctx, prompt, msg.Sender, tracker)
+	// issue #267: telemetry span は query 成否に関わらず emit する (usage があれば記録)
+	emitSpan(msg.ID, cfg.Model, usage)
+	if err != nil {
 		slog.Error("handleOne: claude query error", "msg_id", msg.ID, "err", err)
 		errMsg := fmt.Sprintf("(auto) bridge-claude2 error: %v", err)
 		_ = journalledSend(ctx, client, journal, msg.Sender, errMsg, msg.ID)
