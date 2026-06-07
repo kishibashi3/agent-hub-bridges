@@ -225,6 +225,20 @@ class TestSpanAttributes:
         )
         span.set_attribute.assert_any_call("gen_ai.request.model", "o3")
 
+    def test_span_sets_gen_ai_system_anthropic(self, monkeypatch) -> None:
+        """gen_ai.system = 'anthropic' が必須属性として記録される。
+
+        otelite の /api/genai/usage はこの属性でフィルタリングするため、
+        欠損すると集計が 0 になる (issue #TBD)。
+        """
+        span = self._inject_mock_tracer(monkeypatch)
+        telemetry.emit_span(
+            caused_by_id="00000000-0000-0000-0000-000000000001",
+            model="claude-sonnet-4-6",
+            result=_make_result(),
+        )
+        span.set_attribute.assert_any_call("gen_ai.system", "anthropic")
+
     def test_span_sets_input_tokens(self, monkeypatch) -> None:
         span = self._inject_mock_tracer(monkeypatch)
         telemetry.emit_span(
