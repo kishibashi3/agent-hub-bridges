@@ -98,7 +98,7 @@ def _compact_archive_dir(workdir: Path | None) -> Path | None:
         return Path(env_val)
     if workdir is not None:
         return workdir / "daily"
-    return None
+    return None  # archive 無効 (workdir も BRIDGE_COMPACT_ARCHIVE_DIR も未設定)
 
 
 def _append_compact_summary(summary: str, archive_dir: Path) -> None:
@@ -279,6 +279,42 @@ class _IdleCompactWatchdog:
         """idle 閾値を超えていれば ``True``。"""
         return self.idle_elapsed() >= self._idle_s
 
+    async def _run_compact_and_archive(self, client: ClaudeSDKClient) -> None:
+        """/compact を実行しサマリーを archive に追記する (issue #160).
+
+        ``watch_and_compact`` / ``watch_and_compact_lazy`` の共通実装。
+        以下を順に行う:
+
+        1. ``client.query("/compact")`` で /compact をトリガー。
+        2. ``receive_response()`` ストリームから ``AssistantMessage`` の
+           ``TextBlock`` を収集してサマリーテキストを組み立てる。
+        3. ``self._archive_dir`` が設定されていれば
+           :func:`_append_compact_summary` で daily ファイルに追記する。
+
+        RuntimeError / Exception のキャッチは呼び出し元 (``watch_and_compact``
+        / ``watch_and_compact_lazy``) で行う。本メソッドは例外をそのまま上げる。
+
+        Args:
+            client: ``ClaudeSDKClient`` インスタンス (``runner.client``)。
+        """
+        await client.query("/compact")
+        # issue #131: サマリーテキストを AssistantMessage から収集する
+        summary_parts: list[str] = []
+        async for sdk_msg in client.receive_response():
+            if isinstance(sdk_msg, AssistantMessage):
+                for block in sdk_msg.content:
+                    if isinstance(block, TextBlock):
+                        summary_parts.append(block.text)
+            if isinstance(sdk_msg, ResultMessage):
+                break
+        logger.info("[auto-compact] /compact completed, timer reset")
+        # issue #131: サマリーを daily ファイルに追記する
+        if self._archive_dir is not None:
+            summary = "\n\n".join(summary_parts).strip()
+            if not summary:
+                summary = "(no summary text captured from /compact response)"
+            _append_compact_summary(summary, self._archive_dir)
+
     async def watch_and_compact(self, runner: ClaudeRunner) -> None:
         """background task: idle 検知 → ``/compact`` 実行 → タイマーリセット。
 
@@ -313,23 +349,7 @@ class _IdleCompactWatchdog:
             )
             try:
                 client = runner.client  # RuntimeError if restarting
-                await client.query("/compact")
-                # issue #131: サマリーテキストを AssistantMessage から収集する
-                _summary_parts: list[str] = []
-                async for sdk_msg in client.receive_response():
-                    if isinstance(sdk_msg, AssistantMessage):
-                        for block in sdk_msg.content:
-                            if isinstance(block, TextBlock):
-                                _summary_parts.append(block.text)
-                    if isinstance(sdk_msg, ResultMessage):
-                        break
-                logger.info("[auto-compact] /compact completed, timer reset")
-                # issue #131: サマリーを daily ファイルに追記する
-                if self._archive_dir is not None:
-                    _summary = "\n\n".join(_summary_parts).strip()
-                    if not _summary:
-                        _summary = "(no summary text captured from /compact response)"
-                    _append_compact_summary(_summary, self._archive_dir)
+                await self._run_compact_and_archive(client)
             except cancelled_exc:
                 raise
             except RuntimeError:
@@ -383,25 +403,7 @@ class _IdleCompactWatchdog:
             )
             try:
                 client = runner.client  # RuntimeError if restarting
-                await client.query("/compact")
-                # issue #131: サマリーテキストを AssistantMessage から収集する
-                _summary_parts_lazy: list[str] = []
-                async for sdk_msg in client.receive_response():
-                    if isinstance(sdk_msg, AssistantMessage):
-                        for block in sdk_msg.content:
-                            if isinstance(block, TextBlock):
-                                _summary_parts_lazy.append(block.text)
-                    if isinstance(sdk_msg, ResultMessage):
-                        break
-                logger.info("[auto-compact] /compact completed, timer reset")
-                # issue #131: サマリーを daily ファイルに追記する
-                if self._archive_dir is not None:
-                    _summary_lazy = "\n\n".join(_summary_parts_lazy).strip()
-                    if not _summary_lazy:
-                        _summary_lazy = (
-                            "(no summary text captured from /compact response)"
-                        )
-                    _append_compact_summary(_summary_lazy, self._archive_dir)
+                await self._run_compact_and_archive(client)
             except cancelled_exc:
                 raise
             except RuntimeError:
