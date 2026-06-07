@@ -26,6 +26,7 @@ import sys
 import tempfile
 import time
 from collections.abc import Callable, Iterator
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -77,6 +78,60 @@ _BUSY_WINDOW_S = float(os.environ.get("AGENT_HUB_BUSY_WINDOW_S", "60"))
 # watchdog は _COMPACT_CHECK_INTERVAL_S ごとに idle を確認する。
 _COMPACT_IDLE_S = float(os.environ.get("BRIDGE_COMPACT_IDLE_MINUTES", "30")) * 60
 _COMPACT_CHECK_INTERVAL_S = 60.0
+
+# issue #131: compact サマリー archive。
+# BRIDGE_COMPACT_ARCHIVE_DIR が設定されていればそちらを使う。
+# 未設定なら workdir/daily/ に保存する。
+_COMPACT_ARCHIVE_DIR_ENV = "BRIDGE_COMPACT_ARCHIVE_DIR"
+
+
+def _compact_archive_dir(workdir: Path | None) -> Path | None:
+    """compact サマリーの archive ディレクトリを返す (issue #131).
+
+    解決順位:
+      1. ``BRIDGE_COMPACT_ARCHIVE_DIR`` 環境変数 (明示指定)
+      2. ``{workdir}/daily/`` (workdir が設定されている場合)
+      3. ``None`` (archive 無効 — workdir も env も未設定)
+    """
+    env_val = os.environ.get(_COMPACT_ARCHIVE_DIR_ENV)
+    if env_val:
+        return Path(env_val)
+    if workdir is not None:
+        return workdir / "daily"
+    return None
+
+
+def _append_compact_summary(summary: str, archive_dir: Path) -> None:
+    """compaction サマリーを ``daily/YYYY-MM-DD.md`` に追記する (issue #131).
+
+    書き込み失敗は WARNING ログのみで bridge を落とさない。
+
+    フォーマット::
+
+        ## compact @ 2026-06-07T13:45:30Z
+
+        <summary text>
+
+    Args:
+        summary: /compact レスポンスから収集したサマリーテキスト。
+        archive_dir: 保存先ディレクトリ (通常 ``{workdir}/daily/``)。
+    """
+    try:
+        archive_dir.mkdir(parents=True, exist_ok=True)
+        now = datetime.now(UTC)
+        date_str = now.strftime("%Y-%m-%d")
+        now_str = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+        daily_file = archive_dir / f"{date_str}.md"
+        entry = f"\n## compact @ {now_str}\n\n{summary}\n"
+        with open(daily_file, "a", encoding="utf-8") as f:
+            f.write(entry)
+        logger.info("[auto-compact] summary appended to %s", daily_file)
+    except Exception:
+        logger.warning(
+            "[auto-compact] failed to write compact summary to %s",
+            archive_dir,
+            exc_info=True,
+        )
 
 
 class _ActivityTracker:
@@ -185,11 +240,14 @@ class _IdleCompactWatchdog:
         self,
         idle_s: float = _COMPACT_IDLE_S,
         check_interval_s: float = _COMPACT_CHECK_INTERVAL_S,
+        workdir: Path | None = None,
     ) -> None:
         self._idle_s = idle_s
         self._check_interval_s = check_interval_s
         self._last_activity: float = time.monotonic()
         self._processing: bool = False
+        # issue #131: archive ディレクトリ (None なら保存しない)
+        self._archive_dir: Path | None = _compact_archive_dir(workdir)
 
     def reset(self) -> None:
         """メッセージ受信時に呼ぶ。idle タイマーをリセットする。"""
@@ -256,10 +314,22 @@ class _IdleCompactWatchdog:
             try:
                 client = runner.client  # RuntimeError if restarting
                 await client.query("/compact")
+                # issue #131: サマリーテキストを AssistantMessage から収集する
+                _summary_parts: list[str] = []
                 async for sdk_msg in client.receive_response():
+                    if isinstance(sdk_msg, AssistantMessage):
+                        for block in sdk_msg.content:
+                            if isinstance(block, TextBlock):
+                                _summary_parts.append(block.text)
                     if isinstance(sdk_msg, ResultMessage):
                         break
                 logger.info("[auto-compact] /compact completed, timer reset")
+                # issue #131: サマリーを daily ファイルに追記する
+                if self._archive_dir is not None:
+                    _summary = "\n\n".join(_summary_parts).strip()
+                    if not _summary:
+                        _summary = "(no summary text captured from /compact response)"
+                    _append_compact_summary(_summary, self._archive_dir)
             except cancelled_exc:
                 raise
             except RuntimeError:
@@ -314,10 +384,24 @@ class _IdleCompactWatchdog:
             try:
                 client = runner.client  # RuntimeError if restarting
                 await client.query("/compact")
+                # issue #131: サマリーテキストを AssistantMessage から収集する
+                _summary_parts_lazy: list[str] = []
                 async for sdk_msg in client.receive_response():
+                    if isinstance(sdk_msg, AssistantMessage):
+                        for block in sdk_msg.content:
+                            if isinstance(block, TextBlock):
+                                _summary_parts_lazy.append(block.text)
                     if isinstance(sdk_msg, ResultMessage):
                         break
                 logger.info("[auto-compact] /compact completed, timer reset")
+                # issue #131: サマリーを daily ファイルに追記する
+                if self._archive_dir is not None:
+                    _summary_lazy = "\n\n".join(_summary_parts_lazy).strip()
+                    if not _summary_lazy:
+                        _summary_lazy = (
+                            "(no summary text captured from /compact response)"
+                        )
+                    _append_compact_summary(_summary_lazy, self._archive_dir)
             except cancelled_exc:
                 raise
             except RuntimeError:
@@ -506,7 +590,8 @@ async def run_worker(config: Config) -> None:
 
     # issue #60: idle 後の自動 /compact watchdog。
     # reconnect をまたいで 1 インスタンスを共有する (= cursor / tracker と同様)。
-    compact_watchdog = _IdleCompactWatchdog()
+    # issue #131: workdir を渡して compact サマリーを daily ファイルに保存する。
+    compact_watchdog = _IdleCompactWatchdog(workdir=config.workdir)
 
     # issue #91: AGENT_HUB_TELEMETRY_URL が設定されている場合、subprocess の OTel を有効化。
     telemetry_url = os.environ.get("AGENT_HUB_TELEMETRY_URL")

@@ -12,6 +12,11 @@
   - watch_and_compact(): cancellation は外に伝播する
   - watch_and_compact_lazy(): _processing == True の間は /compact をスキップ (issue #102)
   - watch_and_compact_lazy(): clear_busy() 後は /compact が実行される (issue #102)
+  - _compact_archive_dir(): workdir / env var の解決順位 (issue #131)
+  - _append_compact_summary(): daily ファイル追記・エラー時の graceful 処理 (issue #131)
+  - watch_and_compact(): サマリーが daily ファイルに保存される (issue #131)
+  - watch_and_compact(): archive_dir=None の場合はファイル保存しない (issue #131)
+  - watch_and_compact(): AssistantMessage なし → fallback テキスト保存 (issue #131)
 
 実装の都合上、watch_and_compact() は while True ループのため、
 anyio.move_on_after() で 1 イテレーション後に cancel する。
@@ -21,15 +26,19 @@ from __future__ import annotations
 
 import time
 from collections.abc import AsyncIterator
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import anyio
 import pytest
-from claude_agent_sdk import ResultMessage
+from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock
 
 from agent_hub_bridges.claude.worker import (
+    _COMPACT_ARCHIVE_DIR_ENV,
     _COMPACT_CHECK_INTERVAL_S,
     _COMPACT_IDLE_S,
+    _append_compact_summary,
+    _compact_archive_dir,
     _IdleCompactWatchdog,
 )
 
@@ -69,6 +78,29 @@ def _make_mock_runner(*, compact_raises: Exception | None = None) -> MagicMock:
     else:
         mock_client.query = AsyncMock()
     mock_client.receive_response = lambda: _async_iter(_make_result_message())
+    mock_runner = MagicMock()
+    mock_runner.client = mock_client
+    return mock_runner
+
+
+def _make_mock_runner_with_summary(summary_text: str) -> MagicMock:
+    """/compact が AssistantMessage (summary) + ResultMessage を返す mock runner。
+
+    issue #131: サマリーテキストを含む AssistantMessage を返すことで
+    archive 保存ロジックをテストする。
+    """
+    mock_client = MagicMock()
+    mock_client.query = AsyncMock()
+
+    assistant_msg = AssistantMessage(
+        content=[TextBlock(text=summary_text)],
+        model="claude-sonnet-4-6",
+    )
+
+    mock_client.receive_response = lambda: _async_iter(
+        assistant_msg,
+        _make_result_message(),
+    )
     mock_runner = MagicMock()
     mock_runner.client = mock_client
     return mock_runner
@@ -478,3 +510,205 @@ class TestWatchAndCompactLazy:
             cancelled = True
 
         assert not cancelled
+
+
+# ---------------------------------------------------------------------------
+# compact サマリー archive — issue #131
+# ---------------------------------------------------------------------------
+
+
+class TestCompactArchiveDir:
+    """_compact_archive_dir() の解決順位テスト。"""
+
+    def test_returns_workdir_daily_by_default(self, tmp_path: Path) -> None:
+        """workdir が設定されていれば workdir/daily/ を返す。"""
+        result = _compact_archive_dir(tmp_path)
+        assert result == tmp_path / "daily"
+
+    def test_returns_none_when_no_workdir_and_no_env(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """workdir も env も未設定なら None を返す。"""
+        monkeypatch.delenv(_COMPACT_ARCHIVE_DIR_ENV, raising=False)
+        result = _compact_archive_dir(None)
+        assert result is None
+
+    def test_env_var_takes_priority_over_workdir(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """BRIDGE_COMPACT_ARCHIVE_DIR が設定されていれば env の値を優先する。"""
+        env_dir = tmp_path / "custom-archive"
+        monkeypatch.setenv(_COMPACT_ARCHIVE_DIR_ENV, str(env_dir))
+        result = _compact_archive_dir(tmp_path / "workdir")
+        assert result == env_dir
+
+    def test_env_var_works_without_workdir(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """workdir=None でも env var が設定されていれば返す。"""
+        env_dir = tmp_path / "env-archive"
+        monkeypatch.setenv(_COMPACT_ARCHIVE_DIR_ENV, str(env_dir))
+        result = _compact_archive_dir(None)
+        assert result == env_dir
+
+
+class TestAppendCompactSummary:
+    """_append_compact_summary() の動作テスト。"""
+
+    def test_creates_daily_file_with_summary(self, tmp_path: Path) -> None:
+        """archive ディレクトリと日次ファイルを作成し、サマリーを追記する。"""
+        archive_dir = tmp_path / "daily"
+        _append_compact_summary("Test summary content.", archive_dir)
+
+        # ファイルが作成されること
+        md_files = list(archive_dir.glob("*.md"))
+        assert len(md_files) == 1
+
+        content = md_files[0].read_text(encoding="utf-8")
+        assert "## compact @" in content
+        assert "Test summary content." in content
+
+    def test_appends_multiple_entries(self, tmp_path: Path) -> None:
+        """同一ファイルに複数エントリを追記できる。"""
+        archive_dir = tmp_path / "daily"
+        _append_compact_summary("First summary.", archive_dir)
+        _append_compact_summary("Second summary.", archive_dir)
+
+        md_files = list(archive_dir.glob("*.md"))
+        assert len(md_files) == 1
+        content = md_files[0].read_text(encoding="utf-8")
+        assert "First summary." in content
+        assert "Second summary." in content
+        # 2 つのセクションヘッダがあること
+        assert content.count("## compact @") == 2
+
+    def test_creates_archive_dir_if_not_exists(self, tmp_path: Path) -> None:
+        """archive ディレクトリが存在しなくても自動作成する。"""
+        archive_dir = tmp_path / "nested" / "daily"
+        assert not archive_dir.exists()
+        _append_compact_summary("Summary.", archive_dir)
+        assert archive_dir.exists()
+
+    def test_write_failure_does_not_raise(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """書き込みに失敗しても例外を上げず WARNING ログのみ。"""
+        import logging
+
+        # 存在するファイルと同名の path を archive_dir に指定 → mkdir が失敗する
+        fake_archive_dir = tmp_path / "not-a-dir.txt"
+        fake_archive_dir.write_text("I am a file, not a dir", encoding="utf-8")
+
+        with caplog.at_level(logging.WARNING, logger="agent_hub_bridges.claude.worker"):
+            _append_compact_summary("Summary.", fake_archive_dir)
+
+        assert "failed to write compact summary" in caplog.text
+
+
+class TestCompactSummaryArchiveIntegration:
+    """watch_and_compact() + archive 保存の統合テスト (issue #131)。"""
+
+    @pytest.mark.asyncio
+    async def test_summary_saved_to_daily_file(self, tmp_path: Path) -> None:
+        """idle → /compact 実行 → AssistantMessage のサマリーが daily ファイルに保存される。"""
+        wd = _IdleCompactWatchdog(
+            idle_s=0.0, check_interval_s=0.001, workdir=tmp_path
+        )
+        wd._last_activity = time.monotonic() - 1000.0
+        runner = _make_mock_runner_with_summary("This is the compacted context summary.")
+
+        with anyio.move_on_after(0.1):
+            await wd.watch_and_compact(runner)
+
+        daily_dir = tmp_path / "daily"
+        assert daily_dir.exists(), "daily/ ディレクトリが作成されていること"
+        md_files = list(daily_dir.glob("*.md"))
+        assert len(md_files) >= 1
+        content = md_files[0].read_text(encoding="utf-8")
+        assert "## compact @" in content
+        assert "This is the compacted context summary." in content
+
+    @pytest.mark.asyncio
+    async def test_no_file_written_when_workdir_none(self, tmp_path: Path) -> None:
+        """workdir=None (= _archive_dir=None) の場合はファイルを書かない。"""
+        wd = _IdleCompactWatchdog(idle_s=0.0, check_interval_s=0.001)
+        # workdir を渡さない → _archive_dir は None
+        assert wd._archive_dir is None
+
+        wd._last_activity = time.monotonic() - 1000.0
+        runner = _make_mock_runner_with_summary("Summary that should not be saved.")
+
+        with anyio.move_on_after(0.1):
+            await wd.watch_and_compact(runner)
+
+        # 例外が上がらないことを確認 (workdir なしでも正常終了)
+        assert True
+
+    @pytest.mark.asyncio
+    async def test_fallback_text_when_no_assistant_message(
+        self, tmp_path: Path
+    ) -> None:
+        """AssistantMessage がない /compact レスポンス → fallback テキストを保存する。"""
+        wd = _IdleCompactWatchdog(
+            idle_s=0.0, check_interval_s=0.001, workdir=tmp_path
+        )
+        wd._last_activity = time.monotonic() - 1000.0
+        # ResultMessage のみを返す (AssistantMessage なし)
+        runner = _make_mock_runner()
+
+        with anyio.move_on_after(0.1):
+            await wd.watch_and_compact(runner)
+
+        daily_dir = tmp_path / "daily"
+        assert daily_dir.exists()
+        md_files = list(daily_dir.glob("*.md"))
+        assert len(md_files) >= 1
+        content = md_files[0].read_text(encoding="utf-8")
+        assert "(no summary text captured from /compact response)" in content
+
+    @pytest.mark.asyncio
+    async def test_env_var_overrides_workdir_for_archive(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """BRIDGE_COMPACT_ARCHIVE_DIR が workdir/daily より優先される。"""
+        custom_archive = tmp_path / "custom-archive"
+        monkeypatch.setenv(_COMPACT_ARCHIVE_DIR_ENV, str(custom_archive))
+
+        workdir = tmp_path / "workdir"
+        workdir.mkdir()
+        wd = _IdleCompactWatchdog(
+            idle_s=0.0, check_interval_s=0.001, workdir=workdir
+        )
+        wd._last_activity = time.monotonic() - 1000.0
+        runner = _make_mock_runner_with_summary("Custom archive summary.")
+
+        with anyio.move_on_after(0.1):
+            await wd.watch_and_compact(runner)
+
+        # custom_archive に保存されること
+        assert custom_archive.exists()
+        md_files = list(custom_archive.glob("*.md"))
+        assert len(md_files) >= 1
+        assert "Custom archive summary." in md_files[0].read_text(encoding="utf-8")
+
+        # workdir/daily には保存されないこと
+        assert not (workdir / "daily").exists()
+
+    @pytest.mark.asyncio
+    async def test_lazy_summary_saved_to_daily_file(self, tmp_path: Path) -> None:
+        """watch_and_compact_lazy() でも daily ファイルへのサマリー保存が動作する。"""
+        wd = _IdleCompactWatchdog(
+            idle_s=0.0, check_interval_s=0.001, workdir=tmp_path
+        )
+        wd._last_activity = time.monotonic() - 1000.0
+        runner = _make_mock_runner_with_summary("Lazy compact summary.")
+
+        with anyio.move_on_after(0.1):
+            await wd.watch_and_compact_lazy(lambda: runner)
+
+        daily_dir = tmp_path / "daily"
+        assert daily_dir.exists()
+        md_files = list(daily_dir.glob("*.md"))
+        assert len(md_files) >= 1
+        content = md_files[0].read_text(encoding="utf-8")
+        assert "Lazy compact summary." in content
