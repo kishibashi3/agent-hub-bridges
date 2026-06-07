@@ -229,7 +229,7 @@ class TestSpanAttributes:
         """gen_ai.system = 'anthropic' が必須属性として記録される。
 
         otelite の /api/genai/usage はこの属性でフィルタリングするため、
-        欠損すると集計が 0 になる (issue #TBD)。
+        欠損すると集計が 0 になる (issue #265)。
         """
         span = self._inject_mock_tracer(monkeypatch)
         telemetry.emit_span(
