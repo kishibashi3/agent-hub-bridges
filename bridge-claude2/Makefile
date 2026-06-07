@@ -1,4 +1,4 @@
-BINARY := bridge-go-claude
+BINARY := bridge-claude2
 CMD     := ./cmd/bridge
 
 .PHONY: build build-arm64 vet test clean
@@ -21,4 +21,4 @@ clean:
 # 使用例:
 #   make build
 #   AGENT_HUB_URL=http://localhost:3000/mcp GITHUB_PAT=ghp_... \
-#     ./bridge-go-claude --user bridges-go-impl --workdir /path/to/workdir
+#     ./bridge-claude2 --user bridges-go-impl --workdir /path/to/workdir

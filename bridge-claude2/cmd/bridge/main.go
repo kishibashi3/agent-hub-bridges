@@ -1,4 +1,4 @@
-// bridge-go-claude: Go ネイティブ bridge for Claude Code.
+// bridge-claude2: Go ネイティブ bridge for Claude Code.
 //
 // Python bridge-claude (bridges/claude/worker.py) を Go に直訳した実装。
 // 構造は Python bridge と同等: runner.go が ClaudeRunner+ClaudeSDKClient、
@@ -118,7 +118,7 @@ func parseConfig() (*config, error) {
 	flag.Parse()
 
 	if *showVersion {
-		fmt.Printf("bridge-go-claude/%s (agent-hub-bridges)\n", version)
+		fmt.Printf("bridge-claude2/%s (agent-hub-bridges)\n", version)
 		os.Exit(0)
 	}
 
@@ -261,7 +261,7 @@ func writeMCPConfig(cfg *config) (string, error) {
 		},
 	}
 
-	f, err := os.CreateTemp("", fmt.Sprintf("bridge-go-claude-%s-*.json", cfg.User))
+	f, err := os.CreateTemp("", fmt.Sprintf("bridge-claude2-%s-*.json", cfg.User))
 	if err != nil {
 		return "", fmt.Errorf("create mcp config temp file: %w", err)
 	}
@@ -325,7 +325,7 @@ func main() {
 
 	setupLogger(cfg.LogLevel)
 
-	slog.Info("bridge-go-claude starting",
+	slog.Info("bridge-claude2 starting",
 		"version", version,
 		"handle", "@"+cfg.User,
 		"workdir", cfg.Workdir,
@@ -350,7 +350,7 @@ func main() {
 	// worker を起動 (内部で reconnect loop を回す)
 	runWorker(ctx, cfg, mcpConfigPath)
 
-	slog.Info("bridge-go-claude stopped")
+	slog.Info("bridge-claude2 stopped")
 }
 
 // ──────────────────────────────────────────────────────────────────────── //

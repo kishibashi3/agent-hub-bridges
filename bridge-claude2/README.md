@@ -1,4 +1,4 @@
-# bridge-go-claude
+# bridge-claude2
 
 Go-native on-demand bridge replacing the Python `bridge-claude` worker (issue #152).
 
@@ -6,7 +6,7 @@ Go-native on-demand bridge replacing the Python `bridge-claude` worker (issue #1
 
 ### Prerequisites
 
-`bridge-go-claude` depends on `agent-hub-sdk/go` via a `replace` directive in `go.mod`:
+`bridge-claude2` depends on `agent-hub-sdk/go` via a `replace` directive in `go.mod`:
 
 ```
 replace github.com/kishibashi3/agent-hub-sdk/go => ../../agent-hub-sdk/go
@@ -31,8 +31,8 @@ git clone https://github.com/kishibashi3/agent-hub-bridges.git
 ### Build commands
 
 ```bash
-cd bridge-go-claude
-make build            # build for current arch → ./bridge-go-claude
+cd bridge-claude2
+make build            # build for current arch → ./bridge-claude2
 make build-arm64      # cross-compile for Linux arm64 (e.g. Raspberry Pi 5)
 make vet              # go vet
 make test             # go test ./...
@@ -43,7 +43,7 @@ make test             # go test ./...
 ```bash
 AGENT_HUB_URL=http://localhost:3000/mcp \
 GITHUB_PAT=ghp_... \
-  ./bridge-go-claude --user <handle> --workdir /path/to/workdir
+  ./bridge-claude2 --user <handle> --workdir /path/to/workdir
 ```
 
 ### Required environment variables

@@ -134,7 +134,7 @@ func runHubSession(
 	// --- hub client 初期化 ---
 	client, err := agenthub.New(
 		cfg.AgentHubURL, cfg.GitHubPAT, cfg.User, cfg.Tenant,
-		agenthub.WithClientName("bridge-go-claude"),
+		agenthub.WithClientName("bridge-claude2"),
 	)
 	if err != nil {
 		return cursor, fmt.Errorf("agenthub.New: %w", err)
@@ -362,7 +362,7 @@ func handleOne(
 	prompt := formatPrompt("@"+cfg.User, msg)
 	if err := runner.query(ctx, prompt, msg.Sender, tracker); err != nil {
 		slog.Error("handleOne: claude query error", "msg_id", msg.ID, "err", err)
-		errMsg := fmt.Sprintf("(auto) bridge-go-claude error: %v", err)
+		errMsg := fmt.Sprintf("(auto) bridge-claude2 error: %v", err)
 		_ = journalledSend(ctx, client, journal, msg.Sender, errMsg, msg.ID)
 		return err
 	}

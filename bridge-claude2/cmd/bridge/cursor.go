@@ -18,7 +18,7 @@ import (
 
 const (
 	cursorFileEnv      = "AGENT_HUB_CURSOR_FILE"
-	cursorFileTemplate = "/tmp/bridge-go-claude-%s-cursor.json"
+	cursorFileTemplate = "/tmp/bridge-claude2-%s-cursor.json"
 )
 
 type cursorData struct {
