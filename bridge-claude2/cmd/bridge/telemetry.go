@@ -40,6 +40,7 @@ import (
 
 var (
 	globalTracer trace.Tracer
+	globalTP     *sdktrace.TracerProvider
 	telOnce      sync.Once
 )
 
@@ -75,9 +76,21 @@ func initTelemetry(serviceName string) {
 			sdktrace.WithResource(res),
 		)
 
+		globalTP = tp
 		globalTracer = tp.Tracer("bridge-claude2")
 		slog.Info("[telemetry] OTLP span emit enabled", "endpoint", endpoint, "service", serviceName)
 	})
+}
+
+// shutdownTelemetry は TracerProvider を正常停止し、バッファ内 span を flush する。
+// main で defer 呼び出しすること。AGENT_HUB_TELEMETRY_URL 未設定時は no-op。
+func shutdownTelemetry() {
+	if globalTP == nil {
+		return
+	}
+	if err := globalTP.Shutdown(context.Background()); err != nil {
+		slog.Warn("[telemetry] TracerProvider shutdown error", "err", err)
+	}
 }
 
 // emitSpan は 1 メッセージ処理後に OTLP span を emit する (issue #267)。
@@ -87,6 +100,7 @@ func emitSpan(causedByID, model string, usage queryUsage) {
 	if globalTracer == nil {
 		return
 	}
+	model = orDefault(model, "claude-default")
 	defer func() {
 		if r := recover(); r != nil {
 			slog.Warn("[telemetry] emitSpan panic (non-fatal)", "recover", r)

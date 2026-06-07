@@ -349,6 +349,7 @@ func main() {
 
 	// issue #267: telemetry 初期化 (AGENT_HUB_TELEMETRY_URL 未設定なら no-op)
 	initTelemetry("@" + cfg.User)
+	defer shutdownTelemetry()
 
 	// worker を起動 (内部で reconnect loop を回す)
 	runWorker(ctx, cfg, mcpConfigPath)
