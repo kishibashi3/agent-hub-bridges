@@ -3,10 +3,10 @@
 // runWorker: bridge のメインエントリポイント。cursor / journal / tracker / gap_tracker を
 //   初期化して runHubSession を reconnect ループで回す。
 //   claudeRunner は状態を持たない (on-demand) ため reconnect をまたいで単一インスタンスを共有する。
-//   SIGTERM 受信時は runShutdownCompact() で compact してから終了する (issue #178)。
 //
 // runHubSession: 1 回ぶんの hub session を最後まで走らせる。
 //   journal replay → startup catchup → polling loop (CommandRouter + handleOne)
+//   SIGTERM 受信時は polling loop 内で runGracefulDrain() を呼んでから exit する (issue #178)。
 //
 // startupCatchup: bridge 起動時に未読メッセージを処理する (issue #98)。
 //
@@ -17,7 +17,9 @@
 //
 // replayJournal: 起動時に pending journal entries を replay する (issue #183)。
 //
-// runShutdownCompact: SIGTERM 時に /compact を実行してから exit する (issue #178)。
+// runGracefulDrain: SIGTERM 時の graceful drain (issue #178)。
+//   compact → 未処理メッセージ確認 → メッセージがあれば処理 → exit。
+//   active session (client が生きている) 内で呼ぶことで final poll が可能になる。
 //   idle compact watchdog は on-demand bridge では不要なため削除済み (issue #179)。
 package main
 
@@ -30,9 +32,6 @@ import (
 
 	agenthub "github.com/kishibashi3/agent-hub-sdk/go"
 )
-
-// shutdownCompactTimeout は SIGTERM 時の compact に与える最大時間。
-const shutdownCompactTimeout = 5 * time.Minute
 
 const (
 	defaultReconnectBackoffS = 5.0
@@ -48,7 +47,7 @@ const (
 // claudeRunner は on-demand モードのため状態を持たず、
 // runnerHolder ではなく単一インスタンスを複数 hub session をまたいで再利用する。
 //
-// SIGTERM 受信時は runShutdownCompact() で compact してから終了する (issue #178)。
+// SIGTERM 受信時の graceful drain は runHubSession 内の polling loop で実施する (issue #178)。
 // idle compact watchdog は on-demand bridge では不要なため削除済み (issue #179)。
 func runWorker(ctx context.Context, cfg *config, mcpConfigPath string) {
 	// reconnect をまたいで共有する state
@@ -68,9 +67,8 @@ func runWorker(ctx context.Context, cfg *config, mcpConfigPath string) {
 	for {
 		select {
 		case <-ctx.Done():
-			slog.Info("runWorker: shutting down")
-			// issue #178: SIGTERM 時に compact してから exit
-			runShutdownCompact(runner, cfg)
+			// active session 開始前に SIGTERM → drain 対象の client がないためそのまま exit
+			slog.Info("runWorker: shutting down (no active session)")
 			return
 		default:
 		}
@@ -83,9 +81,8 @@ func runWorker(ctx context.Context, cfg *config, mcpConfigPath string) {
 		cursor = newCursor // セッション終了時点の cursor を引き継ぐ
 
 		if ctx.Err() != nil {
+			// issue #178: runHubSession 内の polling loop で graceful drain 済み
 			slog.Info("runWorker: context cancelled, shutting down")
-			// issue #178: SIGTERM 時に compact してから exit
-			runShutdownCompact(runner, cfg)
 			return
 		}
 
@@ -188,6 +185,9 @@ func runHubSession(
 	for {
 		select {
 		case <-ctx.Done():
+			// issue #178: graceful drain — compact → 未処理メッセージ確認 → 処理 → exit
+			// client が生きているこのタイミングで drain を実施する。
+			runGracefulDrain(client, runner, cfg, cursor, tracker, journal, selfHandle)
 			return cursor, ctx.Err()
 		default:
 		}
@@ -421,20 +421,90 @@ func replayJournal(ctx context.Context, client *agenthub.Client, journal *Journa
 	}
 }
 
-// runShutdownCompact は SIGTERM 受信時に /compact を実行する (issue #178)。
-// cancelled context ではなく context.Background() + shutdownCompactTimeout で実行する。
-// compact 失敗は WARN ログのみ (bridge の終了を妨げない)。
-func runShutdownCompact(runner *claudeRunner, cfg *config) {
-	slog.Info("[shutdown-compact] SIGTERM received — running /compact before exit")
-	ctx, cancel := context.WithTimeout(context.Background(), shutdownCompactTimeout)
+// runGracefulDrain は SIGTERM 受信後の graceful drain を実行する (issue #178)。
+//
+// フロー:
+//  1. /compact を実行 (cancelled ctx ではなく drainCtx を使う)
+//  2. compact 完了後に GetMessages で未処理メッセージを確認
+//  3. compact 中に届いたメッセージがあれば処理してから exit
+//  4. メッセージがなければ compact 完了後に exit
+//
+// drain タイムアウト = compactTimeout(5分) + SubprocessTimeout + 1分バッファ。
+// compact・message 処理の失敗は WARN/ERROR ログのみ (exit を妨げない)。
+// active session 内 (client が生きている polling loop の ctx.Done() 分岐) で呼ぶこと。
+func runGracefulDrain(
+	client *agenthub.Client,
+	runner *claudeRunner,
+	cfg *config,
+	cursor string,
+	tracker *activityTracker,
+	journal *Journal,
+	selfHandle string,
+) {
+	const compactTimeout = 5 * time.Minute
+	drainTimeout := compactTimeout + cfg.SubprocessTimeout + time.Minute
+	drainCtx, cancel := context.WithTimeout(context.Background(), drainTimeout)
 	defer cancel()
-	summary, err := runner.compact(ctx)
+
+	slog.Info("[drain] graceful drain started",
+		"compact_timeout_s", compactTimeout.Seconds(),
+		"drain_timeout_s", drainTimeout.Seconds(),
+	)
+
+	// Step 1: /compact
+	slog.Info("[drain] running /compact")
+	summary, err := runner.compact(drainCtx)
 	if err != nil {
-		slog.Warn("[shutdown-compact] /compact failed", "err", err)
+		slog.Warn("[drain] /compact failed", "err", err)
+	} else {
+		slog.Info("[drain] /compact completed")
+		if archiveDir := compactArchiveDirFor(cfg.Workdir); archiveDir != "" {
+			appendCompactSummary(summary, archiveDir)
+		}
+	}
+
+	// Step 2: compact 中に届いたメッセージを確認
+	msgs, err := client.GetMessages(drainCtx)
+	if err != nil {
+		slog.Warn("[drain] final get_messages failed", "err", err)
 		return
 	}
-	slog.Info("[shutdown-compact] /compact completed")
-	if archiveDir := compactArchiveDirFor(cfg.Workdir); archiveDir != "" {
-		appendCompactSummary(summary, archiveDir)
+
+	// 未処理メッセージのみ抽出 (自己ループ・cursor 済み・コマンドを除く)
+	var pending []agenthub.Message
+	for _, m := range msgs {
+		if m.Sender == selfHandle {
+			_ = client.MarkAsRead(drainCtx, m.ID)
+			continue
+		}
+		if cursor != "" && m.Timestamp <= cursor {
+			_ = client.MarkAsRead(drainCtx, m.ID)
+			continue
+		}
+		// コマンドはシャットダウン中はスキップ (次回起動の polling loop が処理する)
+		if len(m.Body) > 0 && m.Body[0] == '/' {
+			slog.Info("[drain] skipping command message during shutdown", "msg_id", m.ID)
+			continue
+		}
+		pending = append(pending, m)
 	}
+
+	if len(pending) == 0 {
+		slog.Info("[drain] no pending messages, exiting cleanly")
+		return
+	}
+
+	// Step 3: compact 中に届いたメッセージを処理
+	slog.Info("[drain] processing messages received during compact", "count", len(pending))
+	for _, msg := range pending {
+		// issue #176 準拠: MarkAsRead を handleOne 前に呼ぶ
+		if err := client.MarkAsRead(drainCtx, msg.ID); err != nil {
+			slog.Warn("[drain] mark_as_read failed", "msg_id", msg.ID, "err", err)
+		}
+		if err := handleOne(drainCtx, client, runner, msg, cfg, tracker, journal); err != nil {
+			slog.Error("[drain] handleOne error", "msg_id", msg.ID, "err", err)
+		}
+		saveCursor(cfg.User, msg.Timestamp)
+	}
+	slog.Info("[drain] graceful drain completed")
 }

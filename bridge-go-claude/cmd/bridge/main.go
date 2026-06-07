@@ -10,7 +10,7 @@
 //  3. hub session ループ: journal replay → startup catchup → polling loop
 //     - message 受信 → CommandRouter → MarkAsRead → handleOne → runner.query (on-demand subprocess)
 //     - cursor 永続化 (MarkAsRead は handleOne 前に完了済み — issue #176)
-//  4. SIGTERM/Ctrl+C → runShutdownCompact() で /compact 実行 → graceful shutdown (issue #178)
+//  4. SIGTERM/Ctrl+C → runGracefulDrain() で compact + 未処理メッセージ処理 → exit (issue #178)
 //
 // Python bridge との主な対応:
 //   worker.py:               → worker.go
