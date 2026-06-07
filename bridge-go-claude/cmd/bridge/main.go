@@ -1,42 +1,49 @@
-// bridge-go-claude: Go ネイティブ on-demand bridge for Claude Code.
+// bridge-go-claude: Go ネイティブ bridge for Claude Code.
 //
-// tmux を使わず claude を subprocess で直接起動する。
+// Python bridge-claude (bridges/claude/worker.py) を Go に直訳した実装。
+// 構造は Python bridge と同等: runner.go が ClaudeRunner+ClaudeSDKClient、
+// worker.go が worker.py の main loop に相当する。
 //
 // 動作フロー:
 //  1. MCP initialize ハンドシェイク (agent-hub-sdk/go)
 //  2. register で agent-hub に自 peer を登録
-//  3. ポーリングループ: get_messages → process → mark_as_read
-//     - message 受信 → claude を subprocess で起動 (--input-format stream-json)
-//     - stdin に initialize control_request + user message JSON を書く
-//     - stdout の stream-json を監視して result イベントでエラー検知
-//     - claude が mcp__agent-hub__send_message ツールを呼んで返信する
-//     - subprocess エラー時のみ Go SDK SendMessage でエラー通知を送る
+//  3. hub session ループ: journal replay → startup catchup → polling loop
+//     - message 受信 → CommandRouter → handleOne → runner.query (persistent subprocess)
+//     - cursor 永続化 → MarkAsRead
 //  4. SIGTERM/Ctrl+C でグレースフルシャットダウン
 //
-// bridge-tmux との違い:
-//   - tmux 不要 — セッション管理・spawn 検知の複雑さがない
-//   - on-demand: メッセージごとに claude subprocess を起動して終了を待つ
-//   - interactive mode (--input-format stream-json): print mode (-p) より効率的
-//     (2026-06-15 以降の headless モード課金変更への対応)
-//
-// 参考実装:
-//   - bridge-tmux (bridge-go-claude/../bridge-tmux): MCP config, polling, エラー処理
-//   - agent-hub-bridge-claude / bridges/claude (Python): on-demand 設計, prompt format
-//   - claude_agent_sdk/_internal/transport/subprocess_cli.py: --input-format stream-json
-//   - claude_agent_sdk/_internal/query.py: control_request initialize protocol
+// Python bridge との主な対応:
+//   worker.py:               → worker.go
+//   claude_runner.py:        → runner.go
+//   cursor.py:               → cursor.go
+//   _common/journal.py:      → journal.go
+//   _common/inventory.py:    → inventory.go
+//   _common/reconnect.py:    → worker.go (runWorker の reconnect loop)
+//   blocking_commands.py:    → blocking.go
+//   CommandRouter (SDK):     → commands.go
+//   _ActivityTracker:        → tracker.go (activityTracker)
+//   _MessageGapTracker:      → tracker.go (messageGapTracker)
+//   _IdleCompactWatchdog:    → compact.go
 //
 // 環境変数:
-//   AGENT_HUB_URL      required    agent-hub MCP エンドポイント
-//   GITHUB_PAT         required    GitHub Personal Access Token
-//   AGENT_HUB_TENANT   optional    テナント ID (--tenant フラグが優先、省略 = default tenant)
-//   CLAUDE_CLI_PATH    optional    claude CLI のパス (省略 = PATH 上の "claude")
-//   AGENT_HUB_MODEL    optional    Claude model (省略 = --model フラグ > claude default)
+//   AGENT_HUB_URL               required    agent-hub MCP エンドポイント
+//   GITHUB_PAT                  required    GitHub Personal Access Token
+//   AGENT_HUB_TENANT            optional    テナント ID (--tenant フラグが優先)
+//   CLAUDE_CLI_PATH             optional    claude CLI のパス (省略 = PATH 上の "claude")
+//   AGENT_HUB_MODEL             optional    Claude model
+//   AGENT_HUB_CURSOR_FILE       optional    cursor ファイルパス
+//   AGENT_HUB_JOURNAL_DIR       optional    journal ディレクトリ
+//   AGENT_HUB_BUSY_WINDOW_S     optional    /status busy 判定ウィンドウ秒数 (default: 60)
+//   AGENT_HUB_PUSH_SILENT_THRESHOLD_S optional gap 警告閾値秒数 (default: 25)
+//   BRIDGE_COMPACT_IDLE_MINUTES optional    auto-compact idle 閾値分 (default: 30)
+//   BRIDGE_COMPACT_ARCHIVE_DIR  optional    compact archive ディレクトリ
+//   BRIDGE_INVENTORY            optional    bridge inventory ファイルパス
+//   AGENT_HUB_BRIDGE_MAX_RETRIES optional   circuit breaker 連続失敗上限 (default: 10, 0=無限)
 //
-// Issue: #155
+// Issue: #155 (original), features: #162-#170
 package main
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"flag"
@@ -46,17 +53,29 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
 	agenthub "github.com/kishibashi3/agent-hub-sdk/go"
 )
 
+// version はビルド時に ldflags で inject する。
+// go build -ldflags "-X main.version=0.6.0"
+var version = "dev"
+
 // ──────────────────────────────────────────────────────────────────────── //
 // 設定                                                                     //
 // ──────────────────────────────────────────────────────────────────────── //
 
-const defaultModel = "claude-sonnet-4-6"
+// stringSlice は --add-dir フラグの繰り返し指定を受け付けるカスタム型。
+type stringSlice []string
+
+func (s *stringSlice) String() string { return strings.Join(*s, ", ") }
+func (s *stringSlice) Set(v string) error {
+	*s = append(*s, v)
+	return nil
+}
 
 type config struct {
 	User        string
@@ -67,6 +86,8 @@ type config struct {
 	Workdir     string
 	ClaudeCLI   string
 	Model       string
+	Mode        string   // stateful | stateless | global (default: stateful)
+	AddDirs     []string // --add-dir で指定した追加ディレクトリ (繰り返し可)
 	LogLevel    string
 	// PollInterval は get_messages のポーリング間隔。
 	PollInterval time.Duration
@@ -74,8 +95,7 @@ type config struct {
 	ReconnectBackoff time.Duration
 	// MaxRetries は circuit breaker の連続失敗上限 (0 = 無制限)。
 	MaxRetries int
-	// SubprocessTimeout は claude subprocess の最大実行時間。
-	// 0 はタイムアウトなし (ctx のキャンセルのみ)。
+	// SubprocessTimeout は runner.query の最大実行時間 (0 = タイムアウトなし)。
 	SubprocessTimeout time.Duration
 }
 
@@ -86,19 +106,31 @@ func parseConfig() (*config, error) {
 		tenant            = flag.String("tenant", "", "agent-hub tenant ID (overrides AGENT_HUB_TENANT env)")
 		workdir           = flag.String("workdir", "", "peer workdir with CLAUDE.md (default: cwd)")
 		model             = flag.String("model", "", "Claude model override (default: AGENT_HUB_MODEL env or claude default)")
+		mode              = flag.String("mode", "stateful", "peer mode: stateful|stateless|global")
 		logLevel          = flag.String("log-level", "info", "log level: debug|info|warn|error")
 		pollInterval      = flag.Duration("poll-interval", 5*time.Second, "get_messages polling interval")
 		reconnectBackoff  = flag.Duration("reconnect-backoff", 5*time.Second, "backoff on MCP reconnect")
 		maxRetries        = flag.Int("max-retries", 10, "circuit breaker: max consecutive get_messages failures (0 = unlimited)")
-		subprocessTimeout = flag.Duration("subprocess-timeout", 10*time.Minute, "claude subprocess max runtime (0 = no timeout)")
+		subprocessTimeout = flag.Duration("subprocess-timeout", 10*time.Minute, "claude subprocess max runtime per query (0 = no timeout)")
+		showVersion       = flag.Bool("version", false, "print version and exit")
+		addDirs           stringSlice
 	)
+	flag.Var(&addDirs, "add-dir", "add extra directory to Claude context (repeatable)")
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Printf("bridge-go-claude/%s (agent-hub-bridges)\n", version)
+		os.Exit(0)
+	}
 
 	if err := validateLogLevel(*logLevel); err != nil {
 		return nil, err
 	}
 	if *user == "" {
 		return nil, fmt.Errorf("--user is required")
+	}
+	if *mode != "stateful" && *mode != "stateless" && *mode != "global" {
+		return nil, fmt.Errorf("--mode must be stateful|stateless|global, got %q", *mode)
 	}
 
 	url := os.Getenv("AGENT_HUB_URL")
@@ -123,6 +155,19 @@ func parseConfig() (*config, error) {
 		return nil, fmt.Errorf("workdir %q: %w", wd, err)
 	}
 
+	// --add-dir: 各パスの存在確認と絶対パス化
+	normalizedAddDirs := make([]string, 0, len(addDirs))
+	for _, d := range addDirs {
+		abs, err := filepath.Abs(d)
+		if err != nil {
+			return nil, fmt.Errorf("--add-dir %q: %w", d, err)
+		}
+		if _, err := os.Stat(abs); err != nil {
+			return nil, fmt.Errorf("--add-dir %q: %w", d, err)
+		}
+		normalizedAddDirs = append(normalizedAddDirs, abs)
+	}
+
 	// CLAUDE_CLI_PATH が未設定なら PATH 上の "claude" を使う
 	claudeCLI := os.Getenv("CLAUDE_CLI_PATH")
 	if claudeCLI == "" {
@@ -138,10 +183,10 @@ func parseConfig() (*config, error) {
 		resolvedModel = os.Getenv("AGENT_HUB_MODEL")
 	}
 
-	// display_name: --display-name フラグ > "{user} — go bridge (on-demand)"
+	// display_name: --display-name フラグ > "{user} — go bridge"
 	resolvedDisplayName := *displayName
 	if resolvedDisplayName == "" {
-		resolvedDisplayName = *user + " — go bridge (on-demand)"
+		resolvedDisplayName = *user + " — go bridge"
 	}
 
 	return &config{
@@ -153,6 +198,8 @@ func parseConfig() (*config, error) {
 		Workdir:           wd,
 		ClaudeCLI:         claudeCLI,
 		Model:             resolvedModel,
+		Mode:              *mode,
+		AddDirs:           normalizedAddDirs,
 		LogLevel:          *logLevel,
 		PollInterval:      *pollInterval,
 		ReconnectBackoff:  *reconnectBackoff,
@@ -196,7 +243,6 @@ func setupLogger(level string) {
 // 一時ファイルに書き出す。ファイルパスを返す。呼出元が defer os.Remove を担当する。
 //
 // PAT をコマンドライン引数 (ps で見える) に渡さないためファイル経由にする。
-// bridge-tmux の writeMCPConfig と同一設計。
 func writeMCPConfig(cfg *config) (string, error) {
 	headers := map[string]string{
 		"Authorization": "Bearer " + cfg.GitHubPAT,
@@ -220,19 +266,26 @@ func writeMCPConfig(cfg *config) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("create mcp config temp file: %w", err)
 	}
-	defer f.Close()
+	tmpPath := f.Name()
+	f.Close()
 
-	if err := os.Chmod(f.Name(), 0o600); err != nil {
-		os.Remove(f.Name())
+	if err := os.Chmod(tmpPath, 0o600); err != nil {
+		os.Remove(tmpPath)
 		return "", fmt.Errorf("chmod mcp config: %w", err)
 	}
-	if err := json.NewEncoder(f).Encode(payload); err != nil {
-		os.Remove(f.Name())
+
+	data, err := json.Marshal(payload)
+	if err != nil {
+		os.Remove(tmpPath)
+		return "", fmt.Errorf("marshal mcp config: %w", err)
+	}
+	if err := os.WriteFile(tmpPath, data, 0o600); err != nil {
+		os.Remove(tmpPath)
 		return "", fmt.Errorf("write mcp config: %w", err)
 	}
 
-	slog.Debug("wrote MCP config", "path", f.Name())
-	return f.Name(), nil
+	slog.Debug("wrote MCP config", "path", tmpPath)
+	return tmpPath, nil
 }
 
 // ──────────────────────────────────────────────────────────────────────── //
@@ -240,10 +293,7 @@ func writeMCPConfig(cfg *config) (string, error) {
 // ──────────────────────────────────────────────────────────────────────── //
 
 // formatPrompt は受信メッセージを claude への user prompt に変換する。
-//
-// Python bridge (bridges/claude/_common/prompt.py) の format_peer_message_prompt
-// と同等。claude が mcp__agent-hub__send_message を使って返信するよう促す。
-// caused_by に受信メッセージ ID を設定するよう指示する (issue #162)。
+// Python bridge (_common/prompt.py: format_peer_message_prompt) と同等。
 func formatPrompt(selfHandle string, msg agenthub.Message) string {
 	return fmt.Sprintf(
 		"あなたは agent-hub の peer worker `%s` として動いています。\n"+
@@ -264,269 +314,6 @@ func formatPrompt(selfHandle string, msg agenthub.Message) string {
 }
 
 // ──────────────────────────────────────────────────────────────────────── //
-// claude subprocess                                                        //
-// ──────────────────────────────────────────────────────────────────────── //
-
-// streamEvent は claude --output-format stream-json の 1 行を表す。
-// 完全なスキーマではなく、エラー検知に必要なフィールドのみ。
-type streamEvent struct {
-	Type    string `json:"type"`
-	Subtype string `json:"subtype"`
-	IsError bool   `json:"is_error"`
-	Result  string `json:"result"`
-}
-
-// runClaude は claude を interactive モード (--input-format stream-json) で
-// subprocess として起動し、stdin に initialize + user message を書き込み、
-// stdout の stream-json を監視してエラーを検知する。
-//
-// 設計:
-//   - Python SDK (subprocess_cli.py) と同一プロトコル:
-//     args: --output-format stream-json --verbose --input-format stream-json
-//     stdin: control_request{subtype:initialize} → user message JSON
-//   - claude は MCP config (agent-hub) を持つため、mcp__agent-hub__send_message で
-//     自分で返信する。bridge は send_message を呼ばない (エラー時を除く)。
-//   - stream-json の "result" イベントで is_error=true を検知した場合、error を返す。
-//   - subprocess の exit code が非ゼロでも result イベントが得られていれば
-//     そちらを優先する (claude が partial result を出して失敗するケースを考慮)。
-//   - ctx がキャンセルされると exec.CommandContext が subprocess を kill する。
-//
-// senderHandle は user message の session_id フィールドに設定し、
-// claude が返信先を識別できるようにする。
-//
-// cfg.SubprocessTimeout > 0 の場合は追加タイムアウトを設ける。
-// 0 の場合は ctx のキャンセルのみで制御する。
-func runClaude(ctx context.Context, cfg *config, mcpConfigPath, senderHandle, prompt string) error {
-	runCtx := ctx
-	if cfg.SubprocessTimeout > 0 {
-		var cancel context.CancelFunc
-		runCtx, cancel = context.WithTimeout(ctx, cfg.SubprocessTimeout)
-		defer cancel()
-	}
-
-	// Python SDK (subprocess_cli.py L225, L244) と同一引数順序。
-	// --input-format stream-json が interactive mode を有効にする。
-	args := []string{
-		"--output-format", "stream-json",
-		"--verbose",
-		"--input-format", "stream-json",
-		"--permission-mode", "bypassPermissions",
-		"--mcp-config", mcpConfigPath,
-	}
-	if cfg.Model != "" {
-		args = append(args, "--model", cfg.Model)
-	}
-
-	cmd := exec.CommandContext(runCtx, cfg.ClaudeCLI, args...)
-	cmd.Dir = cfg.Workdir
-	cmd.Stderr = os.Stderr // claude の stderr をそのまま bridge の stderr に流す
-
-	stdin, err := cmd.StdinPipe()
-	if err != nil {
-		return fmt.Errorf("stdin pipe: %w", err)
-	}
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return fmt.Errorf("stdout pipe: %w", err)
-	}
-
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("start claude subprocess: %w", err)
-	}
-	slog.Debug("claude subprocess started", "pid", cmd.Process.Pid)
-
-	// ── stdin: initialize control_request ──────────────────────────────── //
-	// Python SDK (query.py) が送る形式に準拠。
-	reqID := fmt.Sprintf("req_1_%d", time.Now().UnixNano())
-	initReq := map[string]any{
-		"type":       "control_request",
-		"request_id": reqID,
-		"request":    map[string]any{"subtype": "initialize"},
-	}
-	initBytes, _ := json.Marshal(initReq)
-	if _, err := fmt.Fprintf(stdin, "%s\n", initBytes); err != nil {
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
-		return fmt.Errorf("write initialize control_request: %w", err)
-	}
-
-	// ── stdin: user message ────────────────────────────────────────────── //
-	// Python SDK (client.py L210-216) と同一フォーマット。
-	// session_id に senderHandle を設定して claude が返信先を識別できるようにする。
-	userMsg := map[string]any{
-		"type":               "user",
-		"session_id":         senderHandle,
-		"message":            map[string]any{"role": "user", "content": prompt},
-		"parent_tool_use_id": nil,
-	}
-	userBytes, _ := json.Marshal(userMsg)
-	if _, err := fmt.Fprintf(stdin, "%s\n", userBytes); err != nil {
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
-		return fmt.Errorf("write user message: %w", err)
-	}
-	// stdin を閉じて EOF を通知する (これ以上入力はない)
-	_ = stdin.Close()
-
-	// ── stdout: stream-json を監視して result イベントを待つ ────────────── //
-	var resultErr error
-	scanner := bufio.NewScanner(stdout)
-	scanner.Buffer(make([]byte, 512*1024), 512*1024) // 512 KB — tool result は大きくなる可能性あり
-	for scanner.Scan() {
-		line := scanner.Text()
-		if line == "" {
-			continue
-		}
-		var ev streamEvent
-		if err := json.Unmarshal([]byte(line), &ev); err != nil {
-			slog.Debug("stream-json parse skip (non-JSON line)", "line", truncate(line, 120))
-			continue
-		}
-		slog.Debug("stream-json event", "type", ev.Type, "subtype", ev.Subtype)
-		if ev.Type == "result" {
-			if ev.IsError {
-				resultErr = fmt.Errorf("claude result error (subtype=%s): %s",
-					ev.Subtype, truncate(ev.Result, 300))
-			}
-			break // result イベントを受信したら読み取り完了
-		}
-	}
-	if scanErr := scanner.Err(); scanErr != nil {
-		slog.Warn("stream-json scan error", "err", scanErr)
-	}
-
-	// subprocess の終了を待つ。
-	waitErr := cmd.Wait()
-	slog.Debug("claude subprocess finished", "exit_err", waitErr)
-
-	// result イベントでエラーを検知していた場合はそちらを優先する。
-	if resultErr != nil {
-		return resultErr
-	}
-	// result イベントがなくて exit code が非ゼロの場合は wait エラーを返す。
-	if waitErr != nil {
-		return fmt.Errorf("claude subprocess exited with error: %w", waitErr)
-	}
-	return nil
-}
-
-// ──────────────────────────────────────────────────────────────────────── //
-// メッセージ処理                                                           //
-// ──────────────────────────────────────────────────────────────────────── //
-
-// handleMessage は 1 件のメッセージを処理する。
-//
-// 処理順:
-//  1. 自己ループ防止 (sender == selfHandle は skip + ack)
-//  2. workdir 存在確認 (なければエラー DM + ack)
-//  3. プロンプト生成 → claude subprocess 起動 → 完了待ち
-//  4. subprocess エラー時: SendMessage でエラー通知
-//  5. MarkAsRead (成功・失敗問わず)
-func handleMessage(
-	ctx context.Context,
-	cfg *config,
-	client *agenthub.Client,
-	mcpConfigPath string,
-	selfHandle string,
-	msg agenthub.Message,
-) {
-	// 自己ループ防止: bridge が送信したメッセージを再処理しない
-	if msg.Sender == selfHandle {
-		slog.Debug("skip self-sent message", "msg_id", msg.ID)
-		if err := client.MarkAsRead(ctx, msg.ID); err != nil {
-			slog.Warn("mark_as_read (self-skip) failed", "msg_id", msg.ID, "err", err)
-		}
-		return
-	}
-
-	slog.Info("message received",
-		"msg_id", msg.ID,
-		"from", msg.Sender,
-		"body_preview", truncate(msg.Body, 120))
-
-	// issue #51: workdir が存在しない場合はエラー DM を返して ack して早期 return
-	// (crash-ack ループ防止。workdir がなくなった場合は bridge を再起動すること)
-	if _, err := os.Stat(cfg.Workdir); err != nil {
-		slog.Error("workdir gone — sending error DM and acking",
-			"workdir", cfg.Workdir, "msg_id", msg.ID)
-		sendCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		defer cancel()
-		_ = client.SendMessage(sendCtx, msg.Sender,
-			fmt.Sprintf("(auto) bridge workdir does not exist: %s", cfg.Workdir), msg.ID)
-		_ = client.MarkAsRead(ctx, msg.ID)
-		return
-	}
-
-	prompt := formatPrompt(selfHandle, msg)
-	if err := runClaude(ctx, cfg, mcpConfigPath, msg.Sender, prompt); err != nil {
-		slog.Error("claude subprocess error",
-			"msg_id", msg.ID, "from", msg.Sender, "err", err)
-		// エラーを送信元に通知する
-		errMsg := fmt.Sprintf("(auto) bridge-go-claude error: %v", err)
-		sendCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		defer cancel()
-		if sendErr := client.SendMessage(sendCtx, msg.Sender, errMsg, msg.ID); sendErr != nil {
-			slog.Error("fallback send_message failed", "msg_id", msg.ID, "err", sendErr)
-		}
-	} else {
-		slog.Info("message processed", "msg_id", msg.ID, "from", msg.Sender)
-	}
-
-	if err := client.MarkAsRead(ctx, msg.ID); err != nil {
-		slog.Warn("mark_as_read failed", "msg_id", msg.ID, "err", err)
-	}
-}
-
-// ──────────────────────────────────────────────────────────────────────── //
-// ポーリングループ                                                         //
-// ──────────────────────────────────────────────────────────────────────── //
-
-// runBridge はポーリングループを回す。circuit breaker で MaxRetries 回連続失敗したら
-// error を返して呼出元の reconnect ループに入る。
-// 全 MCP 呼び出しはシングルスレッドで行われるため mutex は不要。
-func runBridge(
-	ctx context.Context,
-	cfg *config,
-	client *agenthub.Client,
-	mcpConfigPath string,
-	selfHandle string,
-) error {
-	consecutiveFailures := 0
-
-	slog.Info("polling inbox",
-		"handle", selfHandle,
-		"poll_interval_s", cfg.PollInterval.Seconds())
-
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
-
-		msgs, err := client.GetMessages(ctx)
-		if err != nil {
-			consecutiveFailures++
-			slog.Warn("get_messages error",
-				"consecutive", consecutiveFailures, "err", err)
-			if cfg.MaxRetries > 0 && consecutiveFailures >= cfg.MaxRetries {
-				return fmt.Errorf("circuit breaker: %d consecutive get_messages failures",
-					consecutiveFailures)
-			}
-			sleepWithContext(ctx, cfg.ReconnectBackoff)
-			continue
-		}
-		consecutiveFailures = 0
-
-		for _, msg := range msgs {
-			handleMessage(ctx, cfg, client, mcpConfigPath, selfHandle, msg)
-		}
-
-		sleepWithContext(ctx, cfg.PollInterval)
-	}
-}
-
-// ──────────────────────────────────────────────────────────────────────── //
 // main                                                                     //
 // ──────────────────────────────────────────────────────────────────────── //
 
@@ -540,11 +327,15 @@ func main() {
 	setupLogger(cfg.LogLevel)
 
 	slog.Info("bridge-go-claude starting",
+		"version", version,
 		"handle", "@"+cfg.User,
 		"workdir", cfg.Workdir,
+		"mode", cfg.Mode,
 		"model", orDefault(cfg.Model, "(claude default)"),
 		"poll_interval_s", cfg.PollInterval.Seconds(),
-		"subprocess_timeout_s", cfg.SubprocessTimeout.Seconds())
+		"subprocess_timeout_s", cfg.SubprocessTimeout.Seconds(),
+		"add_dirs_count", len(cfg.AddDirs),
+	)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
@@ -555,91 +346,18 @@ func main() {
 		slog.Error("writeMCPConfig failed", "err", err)
 		os.Exit(1)
 	}
-	// NOTE: defer os.Remove の後に os.Exit を呼ぶと defer がスキップされるため、
-	// 以降の fatal は fatalCleanup を経由する。
-	fatalCleanup := func(msg string, args ...any) {
-		os.Remove(mcpConfigPath)
-		slog.Error(msg, args...)
-		os.Exit(1)
-	}
 	defer os.Remove(mcpConfigPath)
 
-	// agent-hub SDK クライアント初期化
-	// newClientAndRegister は毎回新しい Client を生成する。
-	// reconnect 時に古い sessionID を持つ Client を再利用すると re-initialize が
-	// HTTP 400 (missing/invalid session) で失敗するため、新規生成が必要。
-	// StartSSE で MCP セッション keepalive 用 SSE ストリームを開始する (issue #41)。
-	newClientAndRegister := func() (*agenthub.Client, error) {
-		c, err := agenthub.New(
-			cfg.AgentHubURL, cfg.GitHubPAT, cfg.User, cfg.Tenant,
-			agenthub.WithClientName("bridge-go-claude"),
-		)
-		if err != nil {
-			return nil, fmt.Errorf("agenthub.New: %w", err)
-		}
-		if err := c.Initialize(ctx); err != nil {
-			return nil, fmt.Errorf("initialize: %w", err)
-		}
-		if _, err := c.Register(ctx, cfg.DisplayName, "stateless"); err != nil {
-			return nil, fmt.Errorf("register: %w", err)
-		}
-		// SSE ストリームを開始してサーバー ping に自動応答する。
-		// これにより claude subprocess 実行中の MCP セッション expire を防ぐ。
-		if err := c.StartSSE(ctx); err != nil {
-			return nil, fmt.Errorf("start SSE: %w", err)
-		}
-		return c, nil
-	}
+	// worker を起動 (内部で reconnect loop を回す)
+	runWorker(ctx, cfg, mcpConfigPath)
 
-	client, err := newClientAndRegister()
-	if err != nil {
-		fatalCleanup("initial connect failed", "err", err)
-	}
-	slog.Info("registered", "handle", "@"+cfg.User)
-
-	selfHandle := "@" + cfg.User
-
-	// ポーリングループ (reconnect あり)
-	for {
-		err := runBridge(ctx, cfg, client, mcpConfigPath, selfHandle)
-		if ctx.Err() != nil {
-			slog.Info("bridge-go-claude shutting down")
-			client.StopSSE()
-			return
-		}
-		if err != nil {
-			slog.Warn("runBridge ended with error — reconnecting", "err", err)
-		}
-
-		// 旧 Client の SSE goroutine を停止してから新 Client を生成する。
-		client.StopSSE()
-
-		slog.Info("reconnecting", "backoff_s", cfg.ReconnectBackoff.Seconds())
-		sleepWithContext(ctx, cfg.ReconnectBackoff)
-		if ctx.Err() != nil {
-			slog.Info("bridge-go-claude shutting down")
-			return
-		}
-
-		// 新しい Client を生成して reconnect する。
-		// 旧 Client の sessionID を引き継ぐと re-initialize が HTTP 400 で失敗するため
-		// 必ず新規生成する (テスト中に確認した問題 — fix)。
-		newClient, err := newClientAndRegister()
-		if err != nil {
-			slog.Warn("reconnect failed", "err", err)
-			continue
-		}
-		client = newClient
-		slog.Info("reconnected and re-registered", "handle", selfHandle)
-	}
+	slog.Info("bridge-go-claude stopped")
 }
 
 // ──────────────────────────────────────────────────────────────────────── //
 // ユーティリティ                                                           //
 // ──────────────────────────────────────────────────────────────────────── //
 
-// tenantValue は --tenant フラグと AGENT_HUB_TENANT 環境変数を統合して返す。
-// フラグが空なら env var にフォールバック。spawn-bridge.sh との互換性を保つ。
 func tenantValue(flagVal string) string {
 	if flagVal != "" {
 		return flagVal
