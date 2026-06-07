@@ -8,8 +8,8 @@
 //  1. MCP initialize ハンドシェイク (agent-hub-sdk/go)
 //  2. register で agent-hub に自 peer を登録
 //  3. hub session ループ: journal replay → startup catchup → polling loop
-//     - message 受信 → CommandRouter → handleOne → runner.query (persistent subprocess)
-//     - cursor 永続化 → MarkAsRead
+//     - message 受信 → CommandRouter → MarkAsRead → handleOne → runner.query (on-demand subprocess)
+//     - cursor 永続化 (MarkAsRead は handleOne 前に完了済み — issue #176)
 //  4. SIGTERM/Ctrl+C でグレースフルシャットダウン
 //
 // Python bridge との主な対応:
