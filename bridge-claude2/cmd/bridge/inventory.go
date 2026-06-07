@@ -15,7 +15,7 @@ import (
 
 const (
 	inventoryEnv       = "BRIDGE_INVENTORY"
-	deadMarkerTemplate = "/tmp/bridge-go-claude-%s.dead"
+	deadMarkerTemplate = "/tmp/bridge-claude2-%s.dead"
 )
 
 // writeDeadMarker は dead marker ファイルを作成する。

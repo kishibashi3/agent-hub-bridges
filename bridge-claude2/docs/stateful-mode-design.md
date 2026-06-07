@@ -1,4 +1,4 @@
-# bridge-go-claude: Stateful Mode 設計ドキュメント (issue #170)
+# bridge-claude2: Stateful Mode 設計ドキュメント (issue #170)
 
 - 作成: 2026-06-07
 - 作者: @bridges-go-impl
@@ -11,7 +11,7 @@
 
 ### 1.1 現在の動作
 
-bridge-go-claude は「on-demand アーキテクチャ」を採用しており、メッセージごとに `claude` subprocess を spawn して応答後に終了させる。
+bridge-claude2 は「on-demand アーキテクチャ」を採用しており、メッセージごとに `claude` subprocess を spawn して応答後に終了させる。
 
 session の連続性は **JSON stdin プロトコルの `session_id` フィールド** で実現している:
 

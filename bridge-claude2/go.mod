@@ -1,4 +1,4 @@
-module github.com/kishibashi3/agent-hub-bridges/bridge-go-claude
+module github.com/kishibashi3/agent-hub-bridges/bridge-claude2
 
 go 1.22.4
 
