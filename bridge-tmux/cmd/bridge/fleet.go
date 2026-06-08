@@ -6,6 +6,7 @@
 //
 // YAML schema:
 //
+//	health_port: 8080          # optional — /health port for agenthubctl status
 //	personas:
 //	  - handle: reviewer
 //	    workdir: /path/to/reviewer
@@ -20,107 +21,27 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"log/slog"
 	"os"
-	"regexp"
 	"sync"
 	"time"
 
 	agenthub "github.com/kishibashi3/agent-hub-sdk/go"
+	fleetpkg "github.com/kishibashi3/agent-hub-bridges/bridge-tmux/internal/fleet"
 	"github.com/kishibashi3/agent-hub-bridges/bridge-tmux/internal/tmux"
-	"gopkg.in/yaml.v3"
 )
 
-// envKeyRegex は有効な環境変数名のパターン (POSIX 準拠)。
-// キー名の無検証によるシェルインジェクションを防ぐ (Critical #1)。
-var envKeyRegex = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+// Type aliases so the rest of package main continues using the original names.
+type PersonaConfig = fleetpkg.PersonaConfig
+type FleetConfig = fleetpkg.FleetConfig
+type yamlDuration = fleetpkg.YAMLDuration
 
-// ──────────────────────────────────────────────────────────────────────── //
-// YAML 型定義                                                               //
-// ──────────────────────────────────────────────────────────────────────── //
-
-// yamlDuration は YAML で "10m" のような duration 文字列をパースするカスタム型。
-type yamlDuration struct {
-	time.Duration
-}
-
-func (d *yamlDuration) UnmarshalYAML(value *yaml.Node) error {
-	dur, err := time.ParseDuration(value.Value)
-	if err != nil {
-		return fmt.Errorf("invalid duration %q: %w", value.Value, err)
-	}
-	d.Duration = dur
-	return nil
-}
-
-// ──────────────────────────────────────────────────────────────────────── //
-// Config 型                                                                 //
-// ──────────────────────────────────────────────────────────────────────── //
-
-// PersonaConfig は fleet YAML の 1 persona エントリ。
-// bypass_permissions はデフォルト false (無効) — 有効にするには true を明示すること。
-type PersonaConfig struct {
-	Handle            string            `yaml:"handle"`
-	Workdir           string            `yaml:"workdir"`
-	DisplayName       string            `yaml:"display_name,omitempty"`
-	Model             string            `yaml:"model,omitempty"`
-	BypassPermissions bool              `yaml:"bypass_permissions,omitempty"`
-	IdleTimeout       yamlDuration      `yaml:"idle_timeout,omitempty"`
-	Env               map[string]string `yaml:"env,omitempty"`
-}
-
-// FleetConfig は bridge-fleet.yaml のトップレベル構造。
-type FleetConfig struct {
-	Personas []PersonaConfig `yaml:"personas"`
-}
-
-// ──────────────────────────────────────────────────────────────────────── //
-// ロード                                                                    //
-// ──────────────────────────────────────────────────────────────────────── //
-
-// LoadFleetConfig は YAML ファイルを読んで FleetConfig を返す。
-// 以下をバリデートする:
-//   - personas が空でないこと
-//   - 各 persona に handle / workdir が設定されていること
-//   - env キー名が POSIX 環境変数名パターンに一致すること (シェルインジェクション防止)
-//
-// YAML unknown フィールドは strict モードで拒否する (typo 早期検出)。
+// LoadFleetConfig delegates to the internal fleet package.
 func LoadFleetConfig(path string) (*FleetConfig, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("read fleet config %q: %w", path, err)
-	}
-
-	// KnownFields(true): unknown フィールドをエラーとして扱う (typo 早期検出)
-	var cfg FleetConfig
-	dec := yaml.NewDecoder(bytes.NewReader(data))
-	dec.KnownFields(true)
-	if err := dec.Decode(&cfg); err != nil {
-		return nil, fmt.Errorf("parse fleet config %q: %w", path, err)
-	}
-
-	if len(cfg.Personas) == 0 {
-		return nil, fmt.Errorf("fleet config %q: no personas defined", path)
-	}
-	for i, p := range cfg.Personas {
-		if p.Handle == "" {
-			return nil, fmt.Errorf("fleet config %q: persona[%d]: handle is required", path, i)
-		}
-		if p.Workdir == "" {
-			return nil, fmt.Errorf("fleet config %q: persona %q: workdir is required", path, p.Handle)
-		}
-		for k := range p.Env {
-			if !envKeyRegex.MatchString(k) {
-				return nil, fmt.Errorf("fleet config %q: persona %q: invalid env key %q"+
-					" (must match ^[A-Za-z_][A-Za-z0-9_]*$)", path, p.Handle, k)
-			}
-		}
-	}
-	return &cfg, nil
+	return fleetpkg.LoadFleetConfig(path)
 }
 
 // ──────────────────────────────────────────────────────────────────────── //
