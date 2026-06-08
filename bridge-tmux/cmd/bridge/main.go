@@ -621,9 +621,11 @@ func tenantValue(flagVal string) string {
 }
 
 func sleepWithContext(ctx context.Context, d time.Duration) {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
 	select {
 	case <-ctx.Done():
-	case <-time.After(d):
+	case <-timer.C:
 	}
 }
 

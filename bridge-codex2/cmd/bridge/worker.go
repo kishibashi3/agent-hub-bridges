@@ -221,12 +221,16 @@ func runHubSession(
 		}
 
 		// push を受信すれば即時ループ、なければ PollInterval 待機 (issue #198)
+		pollTimer := time.NewTimer(cfg.PollInterval)
 		select {
 		case <-ctx.Done():
+			pollTimer.Stop()
 			// 次ループ先頭の ctx.Done() check で drain が走る
 		case <-pushCh:
+			pollTimer.Stop()
 			slog.Debug("runHubSession: inbox push — immediate GetMessages")
-		case <-time.After(cfg.PollInterval):
+		case <-pollTimer.C:
+			// timer fired; already drained — Stop() unnecessary
 		}
 	}
 }
