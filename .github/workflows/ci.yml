@@ -41,3 +41,19 @@ jobs:
 
       - name: Pytest
         run: pytest -v
+
+  go-test:
+    name: go test (bridge-tmux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: bridge-tmux/go.mod
+          cache-dependency-path: bridge-tmux/go.sum
+
+      - name: go test
+        working-directory: bridge-tmux
+        run: go test ./cmd/agenthubctl/... ./internal/fleet/...

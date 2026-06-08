@@ -213,6 +213,8 @@ func TestRunRemove_WithoutAtPrefix(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "fleet.yaml")
 	if err := os.WriteFile(path, []byte(`personas:
+  - handle: reviewer
+    workdir: /tmp/reviewer
   - handle: planner
     workdir: /tmp/planner
 `), 0o644); err != nil {
