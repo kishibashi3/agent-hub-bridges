@@ -230,6 +230,7 @@ func runHubSession(
 			pollTimer.Stop()
 			slog.Debug("runHubSession: inbox push — immediate GetMessages")
 		case <-pollTimer.C:
+			// timer fired; already drained — Stop() unnecessary
 		}
 	}
 }
