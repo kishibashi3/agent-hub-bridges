@@ -49,7 +49,6 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -240,7 +239,7 @@ func validateLogLevel(level string) error {
 }
 
 // setupLogger はログレベルとログファイルパスに基づいて slog ハンドラを設定する。
-// logFile が空文字列でない場合、ログはファイル (append) と stderr の両方に書き出される。
+// logFile が空文字列でない場合、ログはファイル (append) のみに書き出される。
 // 返り値の close 関数はプロセス終了前に呼ぶこと (ファイルクローズ)。
 func setupLogger(level, logFile string) (close func()) {
 	var l slog.Level
@@ -264,7 +263,10 @@ func setupLogger(level, logFile string) (close func()) {
 	}
 
 	if err := os.MkdirAll(filepath.Dir(logFile), 0o755); err != nil {
-		fmt.Fprintf(os.Stderr, "setupLogger: cannot create log dir %q: %v\n", filepath.Dir(logFile), err)
+		fmt.Fprintf(os.Stderr, "setupLogger: cannot create log dir %q: %v — falling back to stderr\n", filepath.Dir(logFile), err)
+		handler := slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: l})
+		slog.SetDefault(slog.New(handler))
+		return func() {}
 	}
 	f, err := os.OpenFile(logFile, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
 	if err != nil {
@@ -274,8 +276,7 @@ func setupLogger(level, logFile string) (close func()) {
 		return func() {}
 	}
 
-	w := io.MultiWriter(f, os.Stderr)
-	handler := slog.NewJSONHandler(w, &slog.HandlerOptions{Level: l})
+	handler := slog.NewJSONHandler(f, &slog.HandlerOptions{Level: l})
 	slog.SetDefault(slog.New(handler))
 	return func() { f.Close() }
 }
