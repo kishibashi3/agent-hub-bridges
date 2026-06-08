@@ -6,6 +6,7 @@
 //	stop                         Stop the fleet
 //	status                       Show fleet status (/health endpoint or PID check)
 //	remove @handle               Remove a persona from fleet.yaml
+//	bridge spawn                 Spawn an individual bridge worker
 //
 // Global flag:
 //
@@ -49,7 +50,8 @@ func main() {
 		fmt.Fprintf(os.Stderr, "  start [--health-port PORT]  Start the fleet\n")
 		fmt.Fprintf(os.Stderr, "  stop                        Stop the fleet\n")
 		fmt.Fprintf(os.Stderr, "  status                      Show fleet status\n")
-		fmt.Fprintf(os.Stderr, "  remove @handle              Remove a persona from fleet.yaml\n\n")
+		fmt.Fprintf(os.Stderr, "  remove @handle              Remove a persona from fleet.yaml\n")
+		fmt.Fprintf(os.Stderr, "  bridge spawn                Spawn an individual bridge worker\n\n")
 		fmt.Fprintf(os.Stderr, "Flags:\n")
 		fs.PrintDefaults()
 	}
@@ -80,6 +82,8 @@ func main() {
 			os.Exit(2)
 		}
 		err = runRemove(*fleetFile, rest[0])
+	case "bridge":
+		err = runBridgeCmd(rest)
 	default:
 		fmt.Fprintf(os.Stderr, "error: unknown command %q\n\n", cmd)
 		fs.Usage()
