@@ -10,6 +10,8 @@
 //
 // runHubSession: 1 回ぶんの hub session を最後まで走らせる。
 //   journal replay → startup catchup → polling loop (CommandRouter + handleOne)
+//   SSE SubscribeInbox で is_online=true に更新し、push 受信時は即時 GetMessages を発火する (issue #198)。
+//   push が来なくても PollInterval ごとにフォールバックポーリングを行う。
 //   SIGTERM 受信時は polling loop 内で runGracefulDrain() を呼んでから exit する。
 //
 // startupCatchup: bridge 起動時に未読メッセージを処理する。
@@ -128,6 +130,20 @@ func runHubSession(
 	}
 	defer client.StopSSE()
 
+	// is_online = true に更新し、inbox push を受け取る (issue #198)
+	if err := client.SubscribeInbox(ctx); err != nil {
+		slog.Warn("runHubSession: SubscribeInbox failed — falling back to polling only", "err", err)
+	}
+	// push 受信時にポーリングループへ即時 GetMessages シグナルを送る (issue #198)
+	// バッファ 1: push が連続しても積み上がらない
+	pushCh := make(chan struct{}, 1)
+	client.OnInboxPush(func() {
+		select {
+		case pushCh <- struct{}{}:
+		default:
+		}
+	})
+
 	slog.Info("runHubSession: registered and listening",
 		"handle", "@"+cfg.User,
 		"mode", cfg.Mode,
@@ -204,7 +220,14 @@ func runHubSession(
 			cursor = msg.Timestamp
 		}
 
-		sleepWithContext(ctx, cfg.PollInterval)
+		// push を受信すれば即時ループ、なければ PollInterval 待機 (issue #198)
+		select {
+		case <-ctx.Done():
+			// 次ループ先頭の ctx.Done() check で drain が走る
+		case <-pushCh:
+			slog.Debug("runHubSession: inbox push — immediate GetMessages")
+		case <-time.After(cfg.PollInterval):
+		}
 	}
 }
 
