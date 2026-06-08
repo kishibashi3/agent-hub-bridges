@@ -223,8 +223,10 @@ func (s *Session) Stop(ctx context.Context) error {
 	_ = s.runner.run("send-keys", "-t", s.Name, "C-c", "")
 
 	// gracefulWait 待って、まだ生きていれば force kill
+	gracefulTimer := time.NewTimer(s.gracefulWait())
+	defer gracefulTimer.Stop()
 	select {
-	case <-time.After(s.gracefulWait()):
+	case <-gracefulTimer.C:
 	case <-ctx.Done():
 	}
 
