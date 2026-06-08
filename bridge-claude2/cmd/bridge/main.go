@@ -38,6 +38,8 @@
 //   BRIDGE_COMPACT_ARCHIVE_DIR  optional    compact archive ディレクトリ (SIGTERM compact 時に使用)
 //   BRIDGE_INVENTORY            optional    bridge inventory ファイルパス
 //   AGENT_HUB_BRIDGE_MAX_RETRIES optional   circuit breaker 連続失敗上限 (default: 10, 0=無限)
+//   BRIDGE_LOG_DIR              optional    ログディレクトリ (省略 = ~/.agent-hub/logs/; --log-file が優先)
+//   BRIDGE_LOG_FILE             optional    ログファイルパス (省略 = BRIDGE_LOG_DIR/bridge-<user>.log)
 //
 // Issue: #155 (original), features: #162-#170
 package main
@@ -47,6 +49,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -88,6 +91,7 @@ type config struct {
 	Mode        string   // stateful | stateless | global (default: stateful)
 	AddDirs     []string // --add-dir で指定した追加ディレクトリ (繰り返し可)
 	LogLevel    string
+	LogFile     string // ログファイルパス ("" = stderr のみ)
 	// PollInterval は get_messages のポーリング間隔。
 	PollInterval time.Duration
 	// ReconnectBackoff は MCP セッション再接続待機時間。
@@ -107,6 +111,7 @@ func parseConfig() (*config, error) {
 		model             = flag.String("model", "", "Claude model override (default: AGENT_HUB_MODEL env or claude default)")
 		mode              = flag.String("mode", "stateful", "peer mode: stateful|stateless|global")
 		logLevel          = flag.String("log-level", "info", "log level: debug|info|warn|error")
+		logFile           = flag.String("log-file", "", "log file path (default: ~/.agent-hub/logs/bridge-<user>.log; overrides BRIDGE_LOG_DIR/BRIDGE_LOG_FILE)")
 		pollInterval      = flag.Duration("poll-interval", 5*time.Second, "get_messages polling interval")
 		reconnectBackoff  = flag.Duration("reconnect-backoff", 5*time.Second, "backoff on MCP reconnect")
 		maxRetries        = flag.Int("max-retries", 10, "circuit breaker: max consecutive get_messages failures (0 = unlimited)")
@@ -188,6 +193,23 @@ func parseConfig() (*config, error) {
 		resolvedDisplayName = *user + " — go bridge"
 	}
 
+	// log file: --log-file フラグ > BRIDGE_LOG_FILE env > BRIDGE_LOG_DIR env / ~/.agent-hub/logs/
+	resolvedLogFile := *logFile
+	if resolvedLogFile == "" {
+		resolvedLogFile = os.Getenv("BRIDGE_LOG_FILE")
+	}
+	if resolvedLogFile == "" {
+		logDir := os.Getenv("BRIDGE_LOG_DIR")
+		if logDir == "" {
+			home, err := os.UserHomeDir()
+			if err != nil {
+				return nil, fmt.Errorf("get home dir for log path: %w", err)
+			}
+			logDir = filepath.Join(home, ".agent-hub", "logs")
+		}
+		resolvedLogFile = filepath.Join(logDir, "bridge-"+*user+".log")
+	}
+
 	return &config{
 		User:              *user,
 		DisplayName:       resolvedDisplayName,
@@ -200,6 +222,7 @@ func parseConfig() (*config, error) {
 		Mode:              *mode,
 		AddDirs:           normalizedAddDirs,
 		LogLevel:          *logLevel,
+		LogFile:           resolvedLogFile,
 		PollInterval:      *pollInterval,
 		ReconnectBackoff:  *reconnectBackoff,
 		MaxRetries:        *maxRetries,
@@ -216,7 +239,10 @@ func validateLogLevel(level string) error {
 	}
 }
 
-func setupLogger(level string) {
+// setupLogger はログレベルとログファイルパスに基づいて slog ハンドラを設定する。
+// logFile が空文字列でない場合、ログはファイル (append) と stderr の両方に書き出される。
+// 返り値の close 関数はプロセス終了前に呼ぶこと (ファイルクローズ)。
+func setupLogger(level, logFile string) (close func()) {
 	var l slog.Level
 	switch level {
 	case "debug":
@@ -230,8 +256,28 @@ func setupLogger(level string) {
 	default:
 		panic(fmt.Sprintf("setupLogger: unexpected log level %q", level))
 	}
-	handler := slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: l})
+
+	if logFile == "" {
+		handler := slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: l})
+		slog.SetDefault(slog.New(handler))
+		return func() {}
+	}
+
+	if err := os.MkdirAll(filepath.Dir(logFile), 0o755); err != nil {
+		fmt.Fprintf(os.Stderr, "setupLogger: cannot create log dir %q: %v\n", filepath.Dir(logFile), err)
+	}
+	f, err := os.OpenFile(logFile, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "setupLogger: cannot open log file %q: %v — falling back to stderr\n", logFile, err)
+		handler := slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: l})
+		slog.SetDefault(slog.New(handler))
+		return func() {}
+	}
+
+	w := io.MultiWriter(f, os.Stderr)
+	handler := slog.NewJSONHandler(w, &slog.HandlerOptions{Level: l})
 	slog.SetDefault(slog.New(handler))
+	return func() { f.Close() }
 }
 
 // ──────────────────────────────────────────────────────────────────────── //
@@ -323,7 +369,8 @@ func main() {
 		os.Exit(2)
 	}
 
-	setupLogger(cfg.LogLevel)
+	closeLogger := setupLogger(cfg.LogLevel, cfg.LogFile)
+	defer closeLogger()
 
 	slog.Info("bridge-claude2 starting",
 		"version", version,
@@ -334,6 +381,7 @@ func main() {
 		"poll_interval_s", cfg.PollInterval.Seconds(),
 		"subprocess_timeout_s", cfg.SubprocessTimeout.Seconds(),
 		"add_dirs_count", len(cfg.AddDirs),
+		"log_file", orDefault(cfg.LogFile, "(stderr only)"),
 	)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
