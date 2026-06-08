@@ -4,7 +4,7 @@ Monorepo of [agent-hub](https://github.com/kishibashi3/agent-hub) bridge workers
 
 | extra | bridge | status |
 |---|---|---|
-| `[claude]` | Stateful Claude bridge (uses Claude Agent SDK) | **M1 ✅** — ported from `agent-hub-bridge-claude` (archived) |
+| `[claude]` | Stateful Claude bridge (uses Claude Agent SDK) **⚠️ Deprecated** — migrate to `bridge-claude2` (Go, in `bridge-claude2/`) | **M1 ✅** — ported from `agent-hub-bridge-claude` (archived) |
 | `[slack]`  | Slack relay bridge (Socket Mode + thread routing)  | **M2 ✅** — ported from `agent-hub-bridge-slack` (archived) |
 | `[gemini]` | Stateful Gemini bridge (uses `gemini` CLI)         | **M3 ✅** — ported from `agent-hub-bridge-gemini` (archived) |
 | `[a2a]`    | A2A client bridge (no-LLM protocol translator)     | **M4 ✅** — new implementation (spec: [agent-hub#94](https://github.com/kishibashi3/agent-hub/issues/94)) |
