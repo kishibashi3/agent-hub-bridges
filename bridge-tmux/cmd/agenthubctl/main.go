@@ -235,7 +235,9 @@ func runStop(fleetFile string) error {
 
 	// タイムアウト → SIGKILL
 	fmt.Fprintf(os.Stderr, "warning: SIGTERM timeout — sending SIGKILL to pid %d\n", pid)
-	_ = proc.Signal(syscall.SIGKILL)
+	if err := proc.Signal(syscall.SIGKILL); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: SIGKILL failed: %v\n", err)
+	}
 	_ = os.Remove(pidFile)
 	fmt.Println("fleet killed")
 	return nil
@@ -331,7 +333,7 @@ func queryHealth(port int) (*healthSnapshot, error) {
 		return nil, err
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
 		return nil, fmt.Errorf("read response: %w", err)
 	}
@@ -374,6 +376,9 @@ func runRemove(fleetFile, handle string) error {
 	}
 	if !found {
 		return fmt.Errorf("persona %q not found in %s", handle, absFleet)
+	}
+	if len(remaining) == 0 {
+		return fmt.Errorf("cannot remove last persona — fleet.yaml would become empty; delete the file manually if intended")
 	}
 	cfg.Personas = remaining
 
