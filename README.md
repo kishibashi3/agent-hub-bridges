@@ -4,7 +4,8 @@ Monorepo of [agent-hub](https://github.com/kishibashi3/agent-hub) bridge workers
 
 | extra | bridge | status |
 |---|---|---|
-| `[claude]` | Stateful Claude bridge (uses Claude Agent SDK) | **M1 ✅** — ported from `agent-hub-bridge-claude` (archived) |
+| `bridge-claude2/` *(Go)* | Stateful Claude bridge (Go-native, replaces Python `[claude]`) — see [`bridge-claude2/README.md`](bridge-claude2/README.md) | **stable** — `cd bridge-claude2 && make build` |
+| `[claude]` | Stateful Claude bridge (uses Claude Agent SDK) **⚠️ Deprecated** — migrate to `bridge-claude2` (Go, in `bridge-claude2/`) | ~~M1~~ **⚠️ Deprecated** |
 | `[slack]`  | Slack relay bridge (Socket Mode + thread routing)  | **M2 ✅** — ported from `agent-hub-bridge-slack` (archived) |
 | `[gemini]` | Stateful Gemini bridge (uses `gemini` CLI)         | **M3 ✅** — ported from `agent-hub-bridge-gemini` (archived) |
 | `[a2a]`    | A2A client bridge (no-LLM protocol translator)     | **M4 ✅** — new implementation (spec: [agent-hub#94](https://github.com/kishibashi3/agent-hub/issues/94)) |
@@ -14,11 +15,14 @@ Monorepo of [agent-hub](https://github.com/kishibashi3/agent-hub) bridge workers
 ## Install
 
 ```bash
-# install one bridge
+# bridge-claude2 (Go — recommended replacement for [claude])
+cd bridge-claude2 && make build  # → ./bridge-claude2
+
+# [claude] — Deprecated: use bridge-claude2 instead
 pip install "agent-hub-bridges[claude] @ git+https://github.com/kishibashi3/agent-hub-bridges.git"
 
 # install multiple
-pip install "agent-hub-bridges[claude,slack] @ git+https://github.com/kishibashi3/agent-hub-bridges.git"
+pip install "agent-hub-bridges[claude,slack] @ git+https://github.com/kishibashi3/agent-hub-bridges.git"  # Deprecated: [claude] — use bridge-claude2 instead
 
 # install all bridges
 pip install "agent-hub-bridges[all] @ git+https://github.com/kishibashi3/agent-hub-bridges.git"
@@ -34,6 +38,10 @@ Each bridge ships its own console script. The legacy script names (`agent-hub-br
 backward compatibility — existing systemd / supervisord units do **not** need to change.
 
 ```bash
+# bridge-claude2 (Go — recommended)
+./bridge-claude2/bridge-claude2 --user claude-impl --tenant my-tenant --workdir /path/to/project
+
+# Deprecated — use bridge-claude2 instead
 agent-hub-bridge-claude --user claude-impl --tenant my-tenant --workdir /path/to/project
 agent-hub-bridge-slack
 agent-hub-bridge-gemini --user gemini-impl --tenant my-tenant --workdir /path/to/project
@@ -43,6 +51,10 @@ agent-hub-bridge-a2a --user external-agent
 Use `--add-dir` to include additional directories beyond `workdir` in Claude's project context (can be specified multiple times):
 
 ```bash
+# bridge-claude2 (Go — recommended)
+./bridge-claude2/bridge-claude2 --user writer --workdir /path/to/writer --add-dir /path/to/publications --add-dir /path/to/shared
+
+# Deprecated — use bridge-claude2 instead
 agent-hub-bridge-claude --user writer --workdir /path/to/writer --add-dir /path/to/publications --add-dir /path/to/shared
 ```
 
@@ -61,7 +73,7 @@ See `.env.example` for the full list of env vars (including bridge-specific ones
 src/agent_hub_bridges/
 ├── __init__.py        # __version__ only — does NOT eager-import sub-packages
 ├── _common/           # internal helpers shared by all bridges
-├── claude/            # M1 complete (ported from agent-hub-bridge-claude, archived)
+├── claude/            # Deprecated — use bridge-claude2/ (Go) instead
 ├── slack/             # M2 complete (ported from agent-hub-bridge-slack, archived)
 ├── gemini/            # M3 complete (ported from agent-hub-bridge-gemini, archived; SDK migration done)
 └── a2a/               # M4 complete (new bridge per agent-hub#94)
