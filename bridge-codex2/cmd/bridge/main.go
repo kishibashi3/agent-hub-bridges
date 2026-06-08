@@ -263,7 +263,10 @@ func setupLogger(level, logFile string) (close func()) {
 	}
 
 	if err := os.MkdirAll(filepath.Dir(logFile), 0o755); err != nil {
-		fmt.Fprintf(os.Stderr, "setupLogger: cannot create log dir %q: %v\n", filepath.Dir(logFile), err)
+		fmt.Fprintf(os.Stderr, "setupLogger: cannot create log dir %q: %v — falling back to stderr\n", filepath.Dir(logFile), err)
+		handler := slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: l})
+		slog.SetDefault(slog.New(handler))
+		return func() {}
 	}
 	f, err := os.OpenFile(logFile, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
 	if err != nil {
