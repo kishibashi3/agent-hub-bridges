@@ -47,13 +47,32 @@ type streamAssistantMessage struct {
 	Content []streamAssistantContent `json:"content"`
 }
 
+// streamUsage は stream-json の result イベントに含まれる token usage。
+type streamUsage struct {
+	InputTokens          int `json:"input_tokens"`
+	OutputTokens         int `json:"output_tokens"`
+	CacheReadInputTokens int `json:"cache_read_input_tokens"`
+}
+
 // streamEvent は stream-json の 1 行イベント (extended 版)。
 type streamEvent struct {
-	Type    string                  `json:"type"`
-	Subtype string                  `json:"subtype"`
-	IsError bool                    `json:"is_error"`
-	Result  string                  `json:"result"`
-	Message *streamAssistantMessage `json:"message,omitempty"`
+	Type         string                  `json:"type"`
+	Subtype      string                  `json:"subtype"`
+	IsError      bool                    `json:"is_error"`
+	Result       string                  `json:"result"`
+	Message      *streamAssistantMessage `json:"message,omitempty"`
+	Usage        *streamUsage            `json:"usage,omitempty"`
+	TotalCostUSD *float64                `json:"total_cost_usd,omitempty"`
+}
+
+// queryUsage は runner.query() が返す token usage + コスト情報。
+// telemetry.emitSpan に渡す。
+type queryUsage struct {
+	InputTokens          int
+	OutputTokens         int
+	CacheReadInputTokens int
+	TotalCostUSD         *float64
+	IsError              bool
 }
 
 // claudeRunner は Claude CLI subprocess の設定を保持する。
@@ -85,7 +104,8 @@ func (r *claudeRunner) restart(_ context.Context) error {
 // query は user prompt を Claude に送り、result イベントまで待つ。
 // メッセージ受信ごとに新しい subprocess を spawn し、完了後に終了させる (on-demand)。
 // Python の ClaudeSDKClient.query(prompt, session_id=msg.sender) に相当。
-func (r *claudeRunner) query(ctx context.Context, prompt, sessionID string, tracker *activityTracker) error {
+// 戻り値の queryUsage は telemetry.emitSpan に渡す (issue #267)。
+func (r *claudeRunner) query(ctx context.Context, prompt, sessionID string, tracker *activityTracker) (queryUsage, error) {
 	// SubprocessTimeout の適用
 	queryCtx := ctx
 	if r.cfg.SubprocessTimeout > 0 {
@@ -96,7 +116,7 @@ func (r *claudeRunner) query(ctx context.Context, prompt, sessionID string, trac
 
 	cmd, stdinPipe, scanner, err := r.spawnSubprocess(queryCtx)
 	if err != nil {
-		return err
+		return queryUsage{IsError: true}, err
 	}
 	pid := cmd.Process.Pid
 	slog.Info("runner: Claude subprocess started (on-demand)", "pid", pid, "session_id", sessionID)
@@ -110,7 +130,7 @@ func (r *claudeRunner) query(ctx context.Context, prompt, sessionID string, trac
 	}); err != nil {
 		stdinPipe.Close()
 		_ = cmd.Wait()
-		return fmt.Errorf("runner: write initialize: %w", err)
+		return queryUsage{IsError: true}, fmt.Errorf("runner: write initialize: %w", err)
 	}
 
 	// user message (Python SDK: client.py と同一フォーマット)
@@ -122,11 +142,11 @@ func (r *claudeRunner) query(ctx context.Context, prompt, sessionID string, trac
 	}); err != nil {
 		stdinPipe.Close()
 		_ = cmd.Wait()
-		return fmt.Errorf("runner: write user message: %w", err)
+		return queryUsage{IsError: true}, fmt.Errorf("runner: write user message: %w", err)
 	}
 
 	// stdin は result イベントまで開放する (blocking command deny inject のため)
-	resultErr := readUntilResult(queryCtx, scanner, stdinPipe, tracker, false)
+	usage, resultErr := readUntilResult(queryCtx, scanner, stdinPipe, tracker, false)
 
 	// EOF を送って subprocess を自然終了させる
 	stdinPipe.Close()
@@ -134,7 +154,10 @@ func (r *claudeRunner) query(ctx context.Context, prompt, sessionID string, trac
 		slog.Debug("runner: subprocess exited", "pid", pid, "err", err)
 	}
 	slog.Info("runner: Claude subprocess finished (on-demand)", "pid", pid)
-	return resultErr
+	if resultErr != nil {
+		usage.IsError = true
+	}
+	return usage, resultErr
 }
 
 // compact は /compact を Claude に送り、サマリーテキストを収集して返す。
@@ -219,14 +242,16 @@ func writeJSON(w io.Writer, v any) error {
 // readUntilResult は stdout の stream-json を読んで result イベントまで待つ。
 // stdinWriter: blocking command deny inject に使う (result 受信まで開放しておくこと)。
 // isCompact=true のとき blocking command 検出をスキップする。
-func readUntilResult(ctx context.Context, scanner *bufio.Scanner, stdinWriter io.Writer, tracker *activityTracker, isCompact bool) error {
+// 戻り値の queryUsage は result イベントから取得した token usage / コスト (issue #267)。
+func readUntilResult(ctx context.Context, scanner *bufio.Scanner, stdinWriter io.Writer, tracker *activityTracker, isCompact bool) (queryUsage, error) {
+	var usage queryUsage
 	var resultErr error
 	resultReceived := false
 
 	for scanner.Scan() {
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return usage, ctx.Err()
 		default:
 		}
 
@@ -280,7 +305,15 @@ func readUntilResult(ctx context.Context, scanner *bufio.Scanner, stdinWriter io
 
 		if ev.Type == "result" {
 			resultReceived = true
+			// issue #267: result イベントから token usage / コストを capture する
+			if ev.Usage != nil {
+				usage.InputTokens = ev.Usage.InputTokens
+				usage.OutputTokens = ev.Usage.OutputTokens
+				usage.CacheReadInputTokens = ev.Usage.CacheReadInputTokens
+			}
+			usage.TotalCostUSD = ev.TotalCostUSD
 			if ev.IsError {
+				usage.IsError = true
 				resultErr = fmt.Errorf("claude result error (subtype=%s): %s",
 					ev.Subtype, truncate(ev.Result, 300))
 			}
@@ -290,13 +323,13 @@ func readUntilResult(ctx context.Context, scanner *bufio.Scanner, stdinWriter io
 
 	if scanErr := scanner.Err(); scanErr != nil {
 		slog.Warn("runner: stream-json scan error", "err", scanErr)
-		return scanErr
+		return usage, scanErr
 	}
 	// subprocess がクラッシュ等で result イベントを送出せずに終了した場合をエラーとして扱う
 	if !resultReceived {
-		return fmt.Errorf("claude subprocess exited without sending result event (EOF)")
+		return usage, fmt.Errorf("claude subprocess exited without sending result event (EOF)")
 	}
-	return resultErr
+	return usage, resultErr
 }
 
 // readUntilResultWithSummary は compact 用: assistant の text block からサマリーを収集する。

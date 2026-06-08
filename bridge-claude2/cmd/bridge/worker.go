@@ -74,7 +74,7 @@ func runWorker(ctx context.Context, cfg *config, mcpConfigPath string) {
 		}
 
 		// hub セッション開始
-		newCursor, err := runHubSession(
+		newCursor, established, err := runHubSession(
 			ctx, cfg, mcpConfigPath,
 			runner, cursor, tracker, gapTracker, journal,
 		)
@@ -87,6 +87,12 @@ func runWorker(ctx context.Context, cfg *config, mcpConfigPath string) {
 		}
 
 		if err != nil {
+			// issue #185: 再接続成功後 (established=true) は accumulated failures をリセットしてから
+			// 今回のエラーを 1 としてカウントする。TCP idle timeout などで session が切れても
+			// backoff が累積しないようにする。
+			if established {
+				consecutiveFailures = 0
+			}
 			consecutiveFailures++
 			slog.Warn("runWorker: hub session ended with error",
 				"err", err,
@@ -120,7 +126,8 @@ func runWorker(ctx context.Context, cfg *config, mcpConfigPath string) {
 
 // runHubSession は 1 回ぶんの hub session を最後まで走らせる。
 // Python の _run_hub_session() に相当。
-// エラーが発生した場合は cursor とエラーを返す。
+// established は polling ループに入った（hub に到達できた）ことを示す。
+// エラーが発生した場合は cursor・established・エラーを返す。
 func runHubSession(
 	ctx context.Context,
 	cfg *config,
@@ -130,24 +137,24 @@ func runHubSession(
 	tracker *activityTracker,
 	gapTracker *messageGapTracker,
 	journal *Journal,
-) (string, error) {
+) (string, bool, error) {
 	// --- hub client 初期化 ---
 	client, err := agenthub.New(
 		cfg.AgentHubURL, cfg.GitHubPAT, cfg.User, cfg.Tenant,
 		agenthub.WithClientName("bridge-claude2"),
 	)
 	if err != nil {
-		return cursor, fmt.Errorf("agenthub.New: %w", err)
+		return cursor, false, fmt.Errorf("agenthub.New: %w", err)
 	}
 	if err := client.Initialize(ctx); err != nil {
-		return cursor, fmt.Errorf("initialize: %w", err)
+		return cursor, false, fmt.Errorf("initialize: %w", err)
 	}
 	if _, err := client.Register(ctx, cfg.DisplayName, cfg.Mode); err != nil {
-		return cursor, fmt.Errorf("register: %w", err)
+		return cursor, false, fmt.Errorf("register: %w", err)
 	}
 	// SSE keepalive: claude subprocess 実行中の MCP セッション expire を防ぐ (issue #41)
 	if err := client.StartSSE(ctx); err != nil {
-		return cursor, fmt.Errorf("start SSE: %w", err)
+		return cursor, false, fmt.Errorf("start SSE: %w", err)
 	}
 	defer client.StopSSE()
 
@@ -188,14 +195,14 @@ func runHubSession(
 			// issue #178: graceful drain — compact → 未処理メッセージ確認 → 処理 → exit
 			// client が生きているこのタイミングで drain を実施する。
 			runGracefulDrain(client, runner, cfg, cursor, tracker, journal, selfHandle)
-			return cursor, ctx.Err()
+			return cursor, true, ctx.Err()
 		default:
 		}
 
 		msgs, err := client.GetMessages(ctx)
 		if err != nil {
 			slog.Warn("runHubSession: get_messages error", "err", err)
-			return cursor, fmt.Errorf("get_messages: %w", err)
+			return cursor, true, fmt.Errorf("get_messages: %w", err)
 		}
 
 		for _, msg := range msgs {
@@ -360,7 +367,10 @@ func handleOne(
 		"msg_id", msg.ID, "from", msg.Sender, "body_preview", truncate(msg.Body, 120))
 
 	prompt := formatPrompt("@"+cfg.User, msg)
-	if err := runner.query(ctx, prompt, msg.Sender, tracker); err != nil {
+	usage, err := runner.query(ctx, prompt, msg.Sender, tracker)
+	// issue #267: telemetry span は query 成否に関わらず emit する (usage があれば記録)
+	emitSpan(msg.ID, cfg.Model, usage)
+	if err != nil {
 		slog.Error("handleOne: claude query error", "msg_id", msg.ID, "err", err)
 		errMsg := fmt.Sprintf("(auto) bridge-claude2 error: %v", err)
 		_ = journalledSend(ctx, client, journal, msg.Sender, errMsg, msg.ID)
