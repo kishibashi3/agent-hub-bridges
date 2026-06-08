@@ -2,10 +2,11 @@
 //
 // Commands:
 //
-//	start [--health-port PORT]   Start the fleet (launches bridge-tmux in background)
-//	stop                         Stop the fleet
-//	status                       Show fleet status (/health endpoint or PID check)
-//	remove @handle               Remove a persona from fleet.yaml
+//	start [--health-port PORT]          Start the fleet (launches bridge-tmux in background)
+//	stop                                Stop the fleet
+//	status                              Show fleet status (/health endpoint or PID check)
+//	remove @handle                      Remove a persona from fleet.yaml
+//	bridge spawn @handle [flags]        Spawn a single bridge from bridges.json registry
 //
 // Global flag:
 //
@@ -15,10 +16,12 @@
 //  1. Same directory as agenthubctl
 //  2. PATH
 //
-// Issue: #150
+// Issue: #150, #215
 package main
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -33,6 +36,7 @@ import (
 	"syscall"
 	"time"
 
+	bridges "github.com/kishibashi3/agent-hub-bridges/bridge-tmux/internal/bridges"
 	fleet "github.com/kishibashi3/agent-hub-bridges/bridge-tmux/internal/fleet"
 )
 
@@ -46,10 +50,11 @@ func main() {
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: agenthubctl [--fleet FILE] <command> [flags]\n\n")
 		fmt.Fprintf(os.Stderr, "Commands:\n")
-		fmt.Fprintf(os.Stderr, "  start [--health-port PORT]  Start the fleet\n")
-		fmt.Fprintf(os.Stderr, "  stop                        Stop the fleet\n")
-		fmt.Fprintf(os.Stderr, "  status                      Show fleet status\n")
-		fmt.Fprintf(os.Stderr, "  remove @handle              Remove a persona from fleet.yaml\n\n")
+		fmt.Fprintf(os.Stderr, "  start [--health-port PORT]         Start the fleet\n")
+		fmt.Fprintf(os.Stderr, "  stop                               Stop the fleet\n")
+		fmt.Fprintf(os.Stderr, "  status                             Show fleet status\n")
+		fmt.Fprintf(os.Stderr, "  remove @handle                     Remove a persona from fleet.yaml\n")
+		fmt.Fprintf(os.Stderr, "  bridge spawn @handle [flags]       Spawn a bridge from bridges.json registry\n\n")
 		fmt.Fprintf(os.Stderr, "Flags:\n")
 		fs.PrintDefaults()
 	}
@@ -80,6 +85,8 @@ func main() {
 			os.Exit(2)
 		}
 		err = runRemove(*fleetFile, rest[0])
+	case "bridge":
+		err = runBridgeCmd(rest)
 	default:
 		fmt.Fprintf(os.Stderr, "error: unknown command %q\n\n", cmd)
 		fs.Usage()
@@ -486,4 +493,403 @@ func fleetLogPath() (string, error) {
 		return "", err
 	}
 	return filepath.Join(home, ".agent-hub", "logs", "bridge-fleet.log"), nil
+}
+
+// ──────────────────────────────────────────────────────────────────────── //
+// bridge subcommand                                                         //
+// ──────────────────────────────────────────────────────────────────────── //
+
+func runBridgeCmd(args []string) error {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "Usage: agenthubctl bridge <subcommand> [flags]")
+		fmt.Fprintln(os.Stderr, "")
+		fmt.Fprintln(os.Stderr, "Subcommands:")
+		fmt.Fprintln(os.Stderr, "  spawn @handle [flags]  Spawn a bridge from bridges.json registry")
+		return fmt.Errorf("subcommand required")
+	}
+	switch args[0] {
+	case "spawn":
+		return runSpawn(args[1:])
+	default:
+		return fmt.Errorf("unknown bridge subcommand %q; available: spawn", args[0])
+	}
+}
+
+// ──────────────────────────────────────────────────────────────────────── //
+// bridge spawn                                                              //
+// ──────────────────────────────────────────────────────────────────────── //
+
+func runSpawn(args []string) error {
+	fs := flag.NewFlagSet("bridge spawn", flag.ContinueOnError)
+	workdirFlag := fs.String("workdir", "", "override workdir (default: value from bridges.json or cwd)")
+	tenantFlag := fs.String("tenant", "", "override tenant ID (default: bridges.json → AGENT_HUB_TENANT)")
+	timeoutFlag := fs.String("timeout", "", "override idle timeout (e.g. 10m; default: bridges.json → bridge-tmux default)")
+	modelFlag := fs.String("model", "", "override model (default: bridges.json → bridge-tmux default)")
+	fs.Usage = func() {
+		fmt.Fprintf(os.Stderr, "Usage: agenthubctl bridge spawn @handle [flags]\n\n")
+		fmt.Fprintf(os.Stderr, "Spawn a bridge-tmux process for @handle in background.\n")
+		fmt.Fprintf(os.Stderr, "Config is read from bridges.json (CLI flags override registry values).\n\n")
+		fmt.Fprintf(os.Stderr, "Config file location (first match):\n")
+		fmt.Fprintf(os.Stderr, "  1. $AGENTHUBCTL_CONFIG_DIR/bridges.json\n")
+		fmt.Fprintf(os.Stderr, "  2. ~/.config/agenthubctl/bridges.json\n\n")
+		fmt.Fprintf(os.Stderr, "Flags:\n")
+		fs.PrintDefaults()
+		fmt.Fprintf(os.Stderr, "\nEnvironment:\n")
+		fmt.Fprintf(os.Stderr, "  AGENT_HUB_URL           required\n")
+		fmt.Fprintf(os.Stderr, "  GITHUB_PAT              required\n")
+		fmt.Fprintf(os.Stderr, "  AGENT_HUB_TENANT        optional tenant ID (can be overridden by --tenant)\n")
+		fmt.Fprintf(os.Stderr, "  AGENTHUBCTL_CONFIG_DIR  optional config dir\n\n")
+		fmt.Fprintf(os.Stderr, "Note: --weight is not yet implemented (TODO).\n")
+	}
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	rest := fs.Args()
+	if len(rest) == 0 {
+		fs.Usage()
+		return fmt.Errorf("@handle is required")
+	}
+	handle := strings.TrimPrefix(rest[0], "@")
+	if handle == "" {
+		return fmt.Errorf("handle must not be empty")
+	}
+
+	// Required env vars
+	hubURL := os.Getenv("AGENT_HUB_URL")
+	if hubURL == "" {
+		return fmt.Errorf("AGENT_HUB_URL is not set")
+	}
+	pat := os.Getenv("GITHUB_PAT")
+	if pat == "" {
+		return fmt.Errorf("GITHUB_PAT is not set")
+	}
+
+	// Load bridges.json (optional — missing file is not an error)
+	var entry *bridges.Entry
+	cfgPath, err := bridges.DefaultConfigPath()
+	if err != nil {
+		return fmt.Errorf("resolve config path: %w", err)
+	}
+	if cfg, err := bridges.Load(cfgPath); err == nil {
+		entry = cfg.Lookup(handle)
+	} else if !os.IsNotExist(err) {
+		// File exists but is malformed
+		return err
+	}
+
+	// Resolve spawn params: bridges.json defaults → env → CLI flags
+	spawnWorkdir := ""
+	spawnTenant := os.Getenv("AGENT_HUB_TENANT")
+	spawnTimeout := ""
+	spawnModel := ""
+
+	if entry != nil {
+		spawnWorkdir = entry.Workdir
+		if entry.Tenant != "" {
+			spawnTenant = entry.Tenant
+		}
+		spawnTimeout = entry.Timeout
+		spawnModel = entry.Model
+	}
+
+	if *workdirFlag != "" {
+		spawnWorkdir = *workdirFlag
+	}
+	if *tenantFlag != "" {
+		spawnTenant = *tenantFlag
+	}
+	if *timeoutFlag != "" {
+		spawnTimeout = *timeoutFlag
+	}
+	if *modelFlag != "" {
+		spawnModel = *modelFlag
+	}
+
+	// Fallback workdir to cwd
+	if spawnWorkdir == "" {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return fmt.Errorf("getwd: %w", err)
+		}
+		spawnWorkdir = cwd
+	}
+	spawnWorkdir, _ = filepath.Abs(spawnWorkdir)
+	if _, err := os.Stat(spawnWorkdir); err != nil {
+		return fmt.Errorf("workdir %q: %w", spawnWorkdir, err)
+	}
+
+	// Pre-flight: check if already online
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if online, err := checkIsOnline(ctx, hubURL, pat, spawnTenant, handle); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: pre-flight check failed (skipping): %v\n", err)
+	} else if online {
+		fmt.Fprintf(os.Stderr, "warning: @%s is already online in agent-hub — spawning another instance anyway\n", handle)
+	}
+
+	// Find bridge-tmux binary
+	bridgeBin, err := findBridgeBinary()
+	if err != nil {
+		return err
+	}
+
+	// Log file
+	logPath, err := spawnLogPath(handle)
+	if err != nil {
+		return fmt.Errorf("resolve log path: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(logPath), 0o750); err != nil {
+		return fmt.Errorf("create log dir: %w", err)
+	}
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		return fmt.Errorf("open log file %q: %w", logPath, err)
+	}
+	defer logFile.Close()
+
+	// Build bridge-tmux args
+	bridgeArgs := []string{"--user", handle, "--workdir", spawnWorkdir}
+	if spawnTenant != "" {
+		bridgeArgs = append(bridgeArgs, "--tenant", spawnTenant)
+	}
+	if spawnTimeout != "" {
+		bridgeArgs = append(bridgeArgs, "--idle-timeout", spawnTimeout)
+	}
+	if spawnModel != "" {
+		bridgeArgs = append(bridgeArgs, "--model", spawnModel)
+	}
+
+	cmd := exec.Command(bridgeBin, bridgeArgs...)
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("start bridge-tmux: %w", err)
+	}
+
+	fmt.Printf("bridge spawned (pid=%d)\n", cmd.Process.Pid)
+	fmt.Printf("  handle:  @%s\n", handle)
+	fmt.Printf("  workdir: %s\n", spawnWorkdir)
+	fmt.Printf("  log:     %s\n", logPath)
+	return nil
+}
+
+func spawnLogPath(handle string) (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".agent-hub", "logs", "bridge-"+handle+".log"), nil
+}
+
+// ──────────────────────────────────────────────────────────────────────── //
+// pre-flight: is_online check via MCP get_participants                      //
+// ──────────────────────────────────────────────────────────────────────── //
+
+// checkIsOnline returns true if the given handle is currently online in agent-hub.
+// This is a best-effort check — callers should treat errors as non-fatal.
+func checkIsOnline(ctx context.Context, hubURL, pat, tenantID, handle string) (bool, error) {
+	hc := &http.Client{Timeout: 10 * time.Second}
+
+	sid, err := mcpInitialize(ctx, hc, hubURL, pat, tenantID)
+	if err != nil {
+		return false, err
+	}
+	text, err := mcpCallTool(ctx, hc, hubURL, pat, tenantID, sid, "get_participants", nil)
+	if err != nil {
+		return false, err
+	}
+	return parseHandleIsOnline(text, handle)
+}
+
+func mcpInitialize(ctx context.Context, hc *http.Client, endpoint, pat, tenantID string) (string, error) {
+	initReq := map[string]any{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  "initialize",
+		"params": map[string]any{
+			"protocolVersion": "2024-11-05",
+			"capabilities":    map[string]any{},
+			"clientInfo":      map[string]any{"name": "agenthubctl", "version": "0.1.0"},
+		},
+	}
+	body, _ := json.Marshal(initReq)
+	sid, err := mcpPost(ctx, hc, endpoint, pat, tenantID, "", body)
+	if err != nil {
+		return "", fmt.Errorf("initialize: %w", err)
+	}
+
+	// notifications/initialized (no id = notification, response body ignored)
+	notif := map[string]any{
+		"jsonrpc": "2.0",
+		"method":  "notifications/initialized",
+		"params":  map[string]any{},
+	}
+	notifBody, _ := json.Marshal(notif)
+	if _, err := mcpPost(ctx, hc, endpoint, pat, tenantID, sid, notifBody); err != nil {
+		return "", fmt.Errorf("notifications/initialized: %w", err)
+	}
+	return sid, nil
+}
+
+// mcpPost sends a POST to the MCP endpoint and returns the mcp-session-id from the response header.
+// The response body is read and discarded (body parsing is handled in mcpCallTool).
+func mcpPost(ctx context.Context, hc *http.Client, endpoint, pat, tenantID, sessionID string, body []byte) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	req.Header.Set("Authorization", "Bearer "+pat)
+	req.Header.Set("X-User-Id", "agenthubctl")
+	if tenantID != "" {
+		req.Header.Set("X-Tenant-Id", tenantID)
+	}
+	if sessionID != "" {
+		req.Header.Set("mcp-session-id", sessionID)
+	}
+
+	resp, err := hc.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		b, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
+	}
+	io.Copy(io.Discard, resp.Body) //nolint:errcheck
+
+	sid := resp.Header.Get("mcp-session-id")
+	if sid == "" {
+		sid = sessionID // keep existing sid if header absent (e.g. notifications/initialized)
+	}
+	return sid, nil
+}
+
+func mcpCallTool(ctx context.Context, hc *http.Client, endpoint, pat, tenantID, sessionID, toolName string, toolArgs map[string]any) (string, error) {
+	callReq := map[string]any{
+		"jsonrpc": "2.0",
+		"id":      2,
+		"method":  "tools/call",
+		"params": map[string]any{
+			"name":      toolName,
+			"arguments": toolArgs,
+		},
+	}
+	body, _ := json.Marshal(callReq)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	req.Header.Set("Authorization", "Bearer "+pat)
+	req.Header.Set("X-User-Id", "agenthubctl")
+	if tenantID != "" {
+		req.Header.Set("X-Tenant-Id", tenantID)
+	}
+	if sessionID != "" {
+		req.Header.Set("mcp-session-id", sessionID)
+	}
+
+	resp, err := hc.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("tools/call %s: %w", toolName, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		b, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("tools/call %s HTTP %d: %s", toolName, resp.StatusCode, strings.TrimSpace(string(b)))
+	}
+
+	rawBody, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return "", fmt.Errorf("read response: %w", err)
+	}
+
+	// Handle SSE response (single-event; server closes connection after it)
+	if strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream") {
+		rawBody, err = extractFirstSSEData(rawBody)
+		if err != nil {
+			return "", err
+		}
+	}
+
+	var rpcResp struct {
+		Result json.RawMessage `json:"result"`
+		Error  *struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rawBody, &rpcResp); err != nil {
+		return "", fmt.Errorf("parse rpc response: %w", err)
+	}
+	if rpcResp.Error != nil {
+		return "", fmt.Errorf("rpc error %d: %s", rpcResp.Error.Code, rpcResp.Error.Message)
+	}
+
+	var result struct {
+		Content []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"content"`
+		IsError bool `json:"isError"`
+	}
+	if err := json.Unmarshal(rpcResp.Result, &result); err != nil {
+		return "", fmt.Errorf("parse tool result: %w", err)
+	}
+	if result.IsError {
+		for _, c := range result.Content {
+			if c.Type == "text" {
+				return "", fmt.Errorf("tool error: %s", c.Text)
+			}
+		}
+		return "", fmt.Errorf("tool %s returned isError", toolName)
+	}
+
+	var parts []string
+	for _, c := range result.Content {
+		if c.Type == "text" && c.Text != "" {
+			parts = append(parts, c.Text)
+		}
+	}
+	return strings.Join(parts, "\n"), nil
+}
+
+// extractFirstSSEData returns the first data: payload from an SSE response body.
+func extractFirstSSEData(body []byte) ([]byte, error) {
+	for _, line := range bytes.Split(body, []byte("\n")) {
+		line = bytes.TrimSpace(line)
+		if bytes.HasPrefix(line, []byte("data:")) {
+			return bytes.TrimSpace(bytes.TrimPrefix(line, []byte("data:"))), nil
+		}
+	}
+	return nil, fmt.Errorf("no data found in SSE response")
+}
+
+type participantEntry struct {
+	Name     string `json:"name"`
+	Type     string `json:"type"`
+	IsOnline bool   `json:"is_online"`
+}
+
+// parseHandleIsOnline parses a get_participants JSON response and returns is_online for the handle.
+func parseHandleIsOnline(text, handle string) (bool, error) {
+	h := strings.TrimPrefix(handle, "@")
+	var participants []participantEntry
+	if err := json.Unmarshal([]byte(text), &participants); err != nil {
+		return false, fmt.Errorf("parse participants: %w", err)
+	}
+	for _, p := range participants {
+		if p.Type == "person" && p.Name == h {
+			return p.IsOnline, nil
+		}
+	}
+	return false, nil // handle not found → not online
 }
