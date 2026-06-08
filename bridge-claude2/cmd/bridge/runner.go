@@ -150,11 +150,21 @@ func (r *claudeRunner) query(ctx context.Context, prompt, sessionID string, trac
 
 	// EOF を送って subprocess を自然終了させる
 	stdinPipe.Close()
-	if err := cmd.Wait(); err != nil {
-		slog.Debug("runner: subprocess exited", "pid", pid, "err", err)
+	waitErr := cmd.Wait()
+	if waitErr != nil {
+		slog.Debug("runner: subprocess exited with error", "pid", pid, "err", waitErr)
 	}
 	slog.Info("runner: Claude subprocess finished (on-demand)", "pid", pid)
 	if resultErr != nil {
+		// queryCtx がタイムアウト/キャンセルされて subprocess がキルされた場合、
+		// readUntilResult の ctx.Done() チェックは scanner.Scan() ブロック中には
+		// 効かないため EOF エラーとして返ってくる。実態を明示する。
+		if queryCtx.Err() != nil {
+			resultErr = fmt.Errorf("claude subprocess killed (SubprocessTimeout=%s): %w",
+				r.cfg.SubprocessTimeout, queryCtx.Err())
+		} else if waitErr != nil {
+			resultErr = fmt.Errorf("%w (subprocess exit: %v)", resultErr, waitErr)
+		}
 		usage.IsError = true
 	}
 	return usage, resultErr
@@ -326,8 +336,9 @@ func readUntilResult(ctx context.Context, scanner *bufio.Scanner, stdinWriter io
 		return usage, scanErr
 	}
 	// subprocess がクラッシュ等で result イベントを送出せずに終了した場合をエラーとして扱う
+	// (ctx キャンセルで subprocess がキルされた場合も含む — 呼び出し元で queryCtx.Err() を確認して補強する)
 	if !resultReceived {
-		return usage, fmt.Errorf("claude subprocess exited without sending result event (EOF)")
+		return usage, fmt.Errorf("claude subprocess exited without result event (EOF — crash or premature exit)")
 	}
 	return usage, resultErr
 }

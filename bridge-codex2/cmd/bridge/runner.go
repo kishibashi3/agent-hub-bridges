@@ -27,6 +27,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -210,7 +211,7 @@ func (r *codexRunner) buildEnv() []string {
 	replaced := make(map[string]bool)
 	for _, kv := range env {
 		for k, v := range overrides {
-			if len(kv) > len(k) && kv[:len(k)] == k && kv[len(k)] == '=' {
+			if before, _, found := strings.Cut(kv, "="); found && before == k {
 				kv = k + "=" + v
 				replaced[k] = true
 				break
@@ -229,6 +230,11 @@ func (r *codexRunner) buildEnv() []string {
 
 // readOutput は codex --json JSONL 出力を読み取り、activity tracking を行う。
 // subprocess が exit するまでブロックする。
+//
+// ctx キャンセル時は scanner.Scan() を即抜けするが、stdout の残データを drain しない。
+// subprocess 側はパイプバッファが詰まると write ブロックまたは SIGPIPE で hang する恐れがある。
+// cmd.Wait() はその後も呼ばれるため、subprocess が自己終了しない場合は
+// SubprocessTimeout (WithTimeout) による強制終了に委ねる設計。
 func (r *codexRunner) readOutput(ctx context.Context, stdout io.Reader, tracker *activityTracker) queryUsage {
 	var usage queryUsage
 	scanner := bufio.NewScanner(stdout)

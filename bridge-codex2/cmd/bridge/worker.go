@@ -35,12 +35,6 @@ import (
 	agenthub "github.com/kishibashi3/agent-hub-sdk/go"
 )
 
-const (
-	defaultReconnectBackoffS = 5.0
-	maxRetriesEnv            = "AGENT_HUB_BRIDGE_MAX_RETRIES"
-	defaultMaxRetries        = 10
-)
-
 // runWorker はブリッジの outer loop。
 // cursor / journal / tracker / gap_tracker を outer loop をまたいで共有する。
 // codexRunner は hasSession 状態を持つため reconnect をまたいで単一インスタンスを共有する。
@@ -176,6 +170,7 @@ func runHubSession(
 		for _, msg := range msgs {
 			if msg.Sender == selfHandle {
 				slog.Debug("runHubSession: skip self-sent message", "msg_id", msg.ID)
+				// best-effort: 失敗は致命的でなく、次回 polling で再試行される
 				_ = client.MarkAsRead(ctx, msg.ID)
 				continue
 			}
@@ -189,6 +184,7 @@ func runHubSession(
 			if cursor != "" && msg.Timestamp <= cursor {
 				slog.Info("runHubSession: skipping already-seen message",
 					"msg_id", msg.ID, "ts", msg.Timestamp, "cursor", cursor)
+				// best-effort: 失敗は致命的でなく、次回 polling で再試行される
 				_ = client.MarkAsRead(ctx, msg.ID)
 				continue
 			}
@@ -256,6 +252,7 @@ func startupCatchup(
 
 	for _, msg := range nlMsgs {
 		if msg.Sender == selfHandle {
+			// best-effort: 失敗は致命的でなく、次回 polling で再試行される
 			_ = client.MarkAsRead(ctx, msg.ID)
 			continue
 		}
@@ -263,6 +260,7 @@ func startupCatchup(
 		if cursor != "" && msg.Timestamp <= cursor {
 			slog.Info("[startup-catchup] skipping seen message",
 				"msg_id", msg.ID, "ts", msg.Timestamp, "cursor", cursor)
+			// best-effort: 失敗は致命的でなく、次回 polling で再試行される
 			_ = client.MarkAsRead(ctx, msg.ID)
 			continue
 		}
@@ -404,10 +402,12 @@ func runGracefulDrain(
 	var pending []agenthub.Message
 	for _, m := range msgs {
 		if m.Sender == selfHandle {
+			// best-effort: 失敗は致命的でなく、次回 polling で再試行される
 			_ = client.MarkAsRead(drainCtx, m.ID)
 			continue
 		}
 		if cursor != "" && m.Timestamp <= cursor {
+			// best-effort: 失敗は致命的でなく、次回 polling で再試行される
 			_ = client.MarkAsRead(drainCtx, m.ID)
 			continue
 		}
