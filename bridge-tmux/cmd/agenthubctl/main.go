@@ -619,10 +619,17 @@ func runSpawn(args []string) error {
 		return fmt.Errorf("workdir %q: %w", spawnWorkdir, err)
 	}
 
+	// callerUser is this process's identity for X-User-Id.
+	// Use AGENT_HUB_USER if set (operator's real handle); fall back to spawn target.
+	callerUser := os.Getenv("AGENT_HUB_USER")
+	if callerUser == "" {
+		callerUser = handle
+	}
+
 	// Pre-flight: check if already online
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if online, err := checkIsOnline(ctx, hubURL, pat, spawnTenant, handle); err != nil {
+	if online, err := checkIsOnline(ctx, hubURL, pat, callerUser, spawnTenant, handle); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: pre-flight check failed (skipping): %v\n", err)
 	} else if online {
 		fmt.Fprintf(os.Stderr, "warning: @%s is already online in agent-hub — spawning another instance anyway\n", handle)
@@ -659,6 +666,9 @@ func runSpawn(args []string) error {
 	if spawnModel != "" {
 		bridgeArgs = append(bridgeArgs, "--model", spawnModel)
 	}
+	if entry != nil && entry.DisplayName != "" {
+		bridgeArgs = append(bridgeArgs, "--display-name", entry.DisplayName)
+	}
 
 	cmd := exec.Command(bridgeBin, bridgeArgs...)
 	cmd.Stdout = logFile
@@ -690,21 +700,22 @@ func spawnLogPath(handle string) (string, error) {
 
 // checkIsOnline returns true if the given handle is currently online in agent-hub.
 // This is a best-effort check — callers should treat errors as non-fatal.
-func checkIsOnline(ctx context.Context, hubURL, pat, tenantID, handle string) (bool, error) {
+// userID is the caller's identity for X-User-Id (AGENT_HUB_USER or spawn target handle).
+func checkIsOnline(ctx context.Context, hubURL, pat, userID, tenantID, handle string) (bool, error) {
 	hc := &http.Client{Timeout: 10 * time.Second}
 
-	sid, err := mcpInitialize(ctx, hc, hubURL, pat, tenantID)
+	sid, err := mcpInitialize(ctx, hc, hubURL, pat, userID, tenantID)
 	if err != nil {
 		return false, err
 	}
-	text, err := mcpCallTool(ctx, hc, hubURL, pat, tenantID, sid, "get_participants", nil)
+	text, err := mcpCallTool(ctx, hc, hubURL, pat, userID, tenantID, sid, "get_participants", nil)
 	if err != nil {
 		return false, err
 	}
 	return parseHandleIsOnline(text, handle)
 }
 
-func mcpInitialize(ctx context.Context, hc *http.Client, endpoint, pat, tenantID string) (string, error) {
+func mcpInitialize(ctx context.Context, hc *http.Client, endpoint, pat, userID, tenantID string) (string, error) {
 	initReq := map[string]any{
 		"jsonrpc": "2.0",
 		"id":      1,
@@ -716,7 +727,7 @@ func mcpInitialize(ctx context.Context, hc *http.Client, endpoint, pat, tenantID
 		},
 	}
 	body, _ := json.Marshal(initReq)
-	sid, err := mcpPost(ctx, hc, endpoint, pat, tenantID, "", body)
+	sid, err := mcpPost(ctx, hc, endpoint, pat, userID, tenantID, "", body)
 	if err != nil {
 		return "", fmt.Errorf("initialize: %w", err)
 	}
@@ -728,29 +739,34 @@ func mcpInitialize(ctx context.Context, hc *http.Client, endpoint, pat, tenantID
 		"params":  map[string]any{},
 	}
 	notifBody, _ := json.Marshal(notif)
-	if _, err := mcpPost(ctx, hc, endpoint, pat, tenantID, sid, notifBody); err != nil {
+	if _, err := mcpPost(ctx, hc, endpoint, pat, userID, tenantID, sid, notifBody); err != nil {
 		return "", fmt.Errorf("notifications/initialized: %w", err)
 	}
 	return sid, nil
 }
 
-// mcpPost sends a POST to the MCP endpoint and returns the mcp-session-id from the response header.
-// The response body is read and discarded (body parsing is handled in mcpCallTool).
-func mcpPost(ctx context.Context, hc *http.Client, endpoint, pat, tenantID, sessionID string, body []byte) (string, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json, text/event-stream")
+// setMCPHeaders applies the standard agent-hub MCP auth headers to req.
+func setMCPHeaders(req *http.Request, pat, userID, tenantID, sessionID string) {
 	req.Header.Set("Authorization", "Bearer "+pat)
-	req.Header.Set("X-User-Id", "agenthubctl")
+	req.Header.Set("X-User-Id", userID)
 	if tenantID != "" {
 		req.Header.Set("X-Tenant-Id", tenantID)
 	}
 	if sessionID != "" {
 		req.Header.Set("mcp-session-id", sessionID)
 	}
+}
+
+// mcpPost sends a POST to the MCP endpoint and returns the mcp-session-id from the response header.
+// The response body is read and discarded (body parsing is handled in mcpCallTool).
+func mcpPost(ctx context.Context, hc *http.Client, endpoint, pat, userID, tenantID, sessionID string, body []byte) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	setMCPHeaders(req, pat, userID, tenantID, sessionID)
 
 	resp, err := hc.Do(req)
 	if err != nil {
@@ -770,7 +786,7 @@ func mcpPost(ctx context.Context, hc *http.Client, endpoint, pat, tenantID, sess
 	return sid, nil
 }
 
-func mcpCallTool(ctx context.Context, hc *http.Client, endpoint, pat, tenantID, sessionID, toolName string, toolArgs map[string]any) (string, error) {
+func mcpCallTool(ctx context.Context, hc *http.Client, endpoint, pat, userID, tenantID, sessionID, toolName string, toolArgs map[string]any) (string, error) {
 	callReq := map[string]any{
 		"jsonrpc": "2.0",
 		"id":      2,
@@ -788,14 +804,7 @@ func mcpCallTool(ctx context.Context, hc *http.Client, endpoint, pat, tenantID, 
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json, text/event-stream")
-	req.Header.Set("Authorization", "Bearer "+pat)
-	req.Header.Set("X-User-Id", "agenthubctl")
-	if tenantID != "" {
-		req.Header.Set("X-Tenant-Id", tenantID)
-	}
-	if sessionID != "" {
-		req.Header.Set("mcp-session-id", sessionID)
-	}
+	setMCPHeaders(req, pat, userID, tenantID, sessionID)
 
 	resp, err := hc.Do(req)
 	if err != nil {

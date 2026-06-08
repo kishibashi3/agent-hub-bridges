@@ -1,6 +1,7 @@
 package bridges
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -45,9 +46,8 @@ func TestLoad_NotExist(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for missing file")
 	}
-	if !os.IsNotExist(err) {
-		t.Logf("error: %v", err)
-		// wrapping is OK — just verify the message mentions the path
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("expected os.ErrNotExist in error chain, got: %v", err)
 	}
 }
 
