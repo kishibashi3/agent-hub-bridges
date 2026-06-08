@@ -288,6 +288,98 @@ func TestRunStatus_NoFleet(t *testing.T) {
 }
 
 // ──────────────────────────────────────────────────────────────────────── //
+// parseHandleIsOnline                                                       //
+// ──────────────────────────────────────────────────────────────────────── //
+
+func TestParseHandleIsOnline_Online(t *testing.T) {
+	text := `[{"name":"reviewer","type":"person","is_online":true},{"name":"planner","type":"person","is_online":false}]`
+	online, err := parseHandleIsOnline(text, "@reviewer")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !online {
+		t.Error("expected reviewer to be online")
+	}
+}
+
+func TestParseHandleIsOnline_Offline(t *testing.T) {
+	text := `[{"name":"planner","type":"person","is_online":false}]`
+	online, err := parseHandleIsOnline(text, "planner")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if online {
+		t.Error("expected planner to be offline")
+	}
+}
+
+func TestParseHandleIsOnline_NotFound(t *testing.T) {
+	text := `[{"name":"other","type":"person","is_online":true}]`
+	online, err := parseHandleIsOnline(text, "@reviewer")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if online {
+		t.Error("expected false for unknown handle")
+	}
+}
+
+func TestParseHandleIsOnline_SkipsTeams(t *testing.T) {
+	// team entries don't have is_online; should not be matched
+	text := `[{"name":"reviewer","type":"team"},{"name":"reviewer","type":"person","is_online":true}]`
+	online, err := parseHandleIsOnline(text, "@reviewer")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !online {
+		t.Error("expected person entry to be matched, not team")
+	}
+}
+
+func TestParseHandleIsOnline_InvalidJSON(t *testing.T) {
+	_, err := parseHandleIsOnline("not json", "@reviewer")
+	if err == nil {
+		t.Fatal("expected parse error")
+	}
+}
+
+// ──────────────────────────────────────────────────────────────────────── //
+// extractFirstSSEData                                                       //
+// ──────────────────────────────────────────────────────────────────────── //
+
+func TestExtractFirstSSEData_OK(t *testing.T) {
+	body := []byte("event: message\ndata: {\"hello\":\"world\"}\n\n")
+	got, err := extractFirstSSEData(body)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if string(got) != `{"hello":"world"}` {
+		t.Errorf("got %q, want {\"hello\":\"world\"}", got)
+	}
+}
+
+func TestExtractFirstSSEData_NoData(t *testing.T) {
+	_, err := extractFirstSSEData([]byte("event: ping\n\n"))
+	if err == nil {
+		t.Fatal("expected error for missing data line")
+	}
+}
+
+// ──────────────────────────────────────────────────────────────────────── //
+// spawnLogPath                                                              //
+// ──────────────────────────────────────────────────────────────────────── //
+
+func TestSpawnLogPath(t *testing.T) {
+	path, err := spawnLogPath("reviewer")
+	if err != nil {
+		t.Fatalf("spawnLogPath: %v", err)
+	}
+	if !strings.HasSuffix(path, filepath.Join(".agent-hub", "logs", "bridge-reviewer.log")) {
+		t.Errorf("unexpected log path: %q", path)
+	}
+}
+
+// ──────────────────────────────────────────────────────────────────────── //
 // health snapshot parsing                                                   //
 // ──────────────────────────────────────────────────────────────────────── //
 

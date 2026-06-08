@@ -1,0 +1,26 @@
+{
+  "_comment": "Copy this file to ~/.config/agenthubctl/bridges.json (or $AGENTHUBCTL_CONFIG_DIR/bridges.json)",
+  "bridges": [
+    {
+      "handle": "reviewer",
+      "workdir": "/home/user/app/private/agent-hub-roles-kaz/reviewer",
+      "tenant": "kishibashi3",
+      "model": "claude-sonnet-4-6",
+      "display_name": "Reviewer",
+      "timeout": "10m"
+    },
+    {
+      "handle": "planner",
+      "workdir": "/home/user/app/private/agent-hub-roles-kaz/planner",
+      "tenant": "kishibashi3",
+      "model": "claude-opus-4-8",
+      "display_name": "Planner",
+      "timeout": "15m"
+    },
+    {
+      "handle": "researcher",
+      "workdir": "/home/user/app/private/agent-hub-roles-kaz/researcher",
+      "tenant": "kishibashi3"
+    }
+  ]
+}
