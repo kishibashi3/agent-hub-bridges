@@ -27,10 +27,9 @@ classifiers = [
 #   pip install "agent-hub-bridges[claude]"
 # のように必要な bridge だけ pull する。
 dependencies = [
-    # agent-hub-sdk v0.8.0 (PR #48 — X-Agent-Hub-Client ヘッダーサポート追加)。
+    # agent-hub-sdk v0.8.1 (PR #48 — X-Agent-Hub-Client ヘッダーサポート追加)。
     # client_type param + AGENT_HUB_CLIENT env var。non-breaking (default None)。
-    # PR merge 後に v0.8.1 タグに差し替えること。
-    "agent-hub-sdk @ git+https://github.com/kishibashi3/agent-hub-sdk.git@29e748e#subdirectory=python",
+    "agent-hub-sdk @ git+https://github.com/kishibashi3/agent-hub-sdk.git@v0.8.1#subdirectory=python",
     "anyio>=4.0.0",
     "python-dotenv>=1.0.0",
 ]
