@@ -432,7 +432,10 @@ class GeminiCLIEngine:
             try:
                 env["GH_TOKEN"] = mgr.get_token()
             except Exception:
-                logger.warning("github_iat: IAT fetch failed, falling back to default gh auth", exc_info=True)
+                logger.warning(
+                    "github_iat: IAT fetch failed, falling back to default gh auth",
+                    exc_info=True,
+                )
         # gemini CLI の interactive/telemetry 検出を抑える hint。
         # 両方とも setdefault なので env で明示指定があれば尊重する。
         #
