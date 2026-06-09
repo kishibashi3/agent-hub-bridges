@@ -35,6 +35,8 @@
 //   AGENT_HUB_JOURNAL_DIR       optional    journal ディレクトリ
 //   AGENT_HUB_BUSY_WINDOW_S     optional    /status busy 判定ウィンドウ秒数 (default: 60)
 //   AGENT_HUB_PUSH_SILENT_THRESHOLD_S optional gap 警告閾値秒数 (default: 25)
+//   AGENT_HUB_SUBPROCESS_TIMEOUT optional   claude subprocess 最大実行時間 (Go duration: "30m", "1h", "0" = 無制限; --subprocess-timeout フラグが優先)
+//   AGENT_HUB_MAX_QUERY_RETRIES optional    subprocess timeout 時のリトライ上限 (default: 2; --max-query-retries フラグが優先)
 //   BRIDGE_COMPACT_ARCHIVE_DIR  optional    compact archive ディレクトリ (SIGTERM compact 時に使用)
 //   BRIDGE_INVENTORY            optional    bridge inventory ファイルパス
 //   AGENT_HUB_BRIDGE_MAX_RETRIES optional   circuit breaker 連続失敗上限 (default: 10, 0=無限)
@@ -98,6 +100,8 @@ type config struct {
 	MaxRetries int
 	// SubprocessTimeout は runner.query の最大実行時間 (0 = タイムアウトなし)。
 	SubprocessTimeout time.Duration
+	// MaxQueryRetries は subprocess timeout 時のリトライ上限 (0 = リトライなし)。
+	MaxQueryRetries int
 }
 
 func parseConfig() (*config, error) {
@@ -112,7 +116,8 @@ func parseConfig() (*config, error) {
 		logFile           = flag.String("log-file", "", "log file path (default: ~/.agent-hub/logs/bridge-<user>.log; overrides BRIDGE_LOG_DIR/BRIDGE_LOG_FILE)")
 		reconnectBackoff  = flag.Duration("reconnect-backoff", 5*time.Second, "backoff on MCP reconnect")
 		maxRetries        = flag.Int("max-retries", 10, "circuit breaker: max consecutive get_messages failures (0 = unlimited)")
-		subprocessTimeout = flag.Duration("subprocess-timeout", 10*time.Minute, "claude subprocess max runtime per query (0 = no timeout)")
+		subprocessTimeout = flag.Duration("subprocess-timeout", 0, "claude subprocess max runtime per query (0 = use AGENT_HUB_SUBPROCESS_TIMEOUT env or default 30m)")
+		maxQueryRetries   = flag.Int("max-query-retries", -1, "max retries on subprocess timeout per message (-1 = use AGENT_HUB_MAX_QUERY_RETRIES env or default 2; 0 = no retry)")
 		showVersion       = flag.Bool("version", false, "print version and exit")
 		addDirs           stringSlice
 	)
@@ -184,6 +189,18 @@ func parseConfig() (*config, error) {
 		resolvedModel = os.Getenv("AGENT_HUB_MODEL")
 	}
 
+	// subprocess-timeout: --subprocess-timeout フラグ (0 = 未指定) > AGENT_HUB_SUBPROCESS_TIMEOUT env > 30m
+	resolvedSubprocessTimeout, err := resolveSubprocessTimeout(*subprocessTimeout)
+	if err != nil {
+		return nil, err
+	}
+
+	// max-query-retries: --max-query-retries フラグ (-1 = 未指定) > AGENT_HUB_MAX_QUERY_RETRIES env > 2
+	resolvedMaxQueryRetries, err := resolveMaxQueryRetries(*maxQueryRetries)
+	if err != nil {
+		return nil, err
+	}
+
 	// display_name: --display-name フラグ > "{user} — go bridge"
 	resolvedDisplayName := *displayName
 	if resolvedDisplayName == "" {
@@ -222,7 +239,8 @@ func parseConfig() (*config, error) {
 		LogFile:           resolvedLogFile,
 		ReconnectBackoff:  *reconnectBackoff,
 		MaxRetries:        *maxRetries,
-		SubprocessTimeout: *subprocessTimeout,
+		SubprocessTimeout: resolvedSubprocessTimeout,
+		MaxQueryRetries:   resolvedMaxQueryRetries,
 	}, nil
 }
 
@@ -378,6 +396,7 @@ func main() {
 		"mode", cfg.Mode,
 		"model", orDefault(cfg.Model, "(claude default)"),
 		"subprocess_timeout_s", cfg.SubprocessTimeout.Seconds(),
+		"max_query_retries", cfg.MaxQueryRetries,
 		"add_dirs_count", len(cfg.AddDirs),
 		"log_file", orDefault(cfg.LogFile, "(stderr only)"),
 	)
@@ -435,4 +454,36 @@ func orDefault(s, fallback string) string {
 		return s
 	}
 	return fallback
+}
+
+// resolveSubprocessTimeout は --subprocess-timeout フラグ値 (0 = 未指定) を解決する。
+// 優先順位: flagVal (>0) > AGENT_HUB_SUBPROCESS_TIMEOUT env > 30m (default)
+func resolveSubprocessTimeout(flagVal time.Duration) (time.Duration, error) {
+	if flagVal > 0 {
+		return flagVal, nil
+	}
+	if envVal := os.Getenv("AGENT_HUB_SUBPROCESS_TIMEOUT"); envVal != "" {
+		d, err := time.ParseDuration(envVal)
+		if err != nil {
+			return 0, fmt.Errorf("AGENT_HUB_SUBPROCESS_TIMEOUT %q: %w", envVal, err)
+		}
+		return d, nil
+	}
+	return 30 * time.Minute, nil
+}
+
+// resolveMaxQueryRetries は --max-query-retries フラグ値 (-1 = 未指定) を解決する。
+// 優先順位: flagVal (>=0) > AGENT_HUB_MAX_QUERY_RETRIES env > 2 (default)
+func resolveMaxQueryRetries(flagVal int) (int, error) {
+	if flagVal >= 0 {
+		return flagVal, nil
+	}
+	if envVal := os.Getenv("AGENT_HUB_MAX_QUERY_RETRIES"); envVal != "" {
+		var n int
+		if _, err := fmt.Sscan(envVal, &n); err != nil || n < 0 {
+			return 0, fmt.Errorf("AGENT_HUB_MAX_QUERY_RETRIES %q: must be a non-negative integer", envVal)
+		}
+		return n, nil
+	}
+	return 2, nil
 }
