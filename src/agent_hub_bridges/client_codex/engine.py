@@ -305,7 +305,10 @@ class CodexCLIEngine:
             try:
                 env["GH_TOKEN"] = mgr.get_token()
             except Exception:
-                logger.warning("github_iat: IAT fetch failed, falling back to default gh auth", exc_info=True)
+                logger.warning(
+                    "github_iat: IAT fetch failed, falling back to default gh auth",
+                    exc_info=True,
+                )
 
         return env
 

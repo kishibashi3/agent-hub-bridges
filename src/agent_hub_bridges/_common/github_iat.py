@@ -34,7 +34,7 @@ import os
 import threading
 import time
 import urllib.request
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -50,8 +50,8 @@ _CLOCK_SKEW_S = 30
 
 def _require_pyjwt() -> None:
     try:
-        import jwt  # noqa: F401 — presence check only
         import cryptography  # noqa: F401
+        import jwt  # noqa: F401 — presence check only
     except ImportError as exc:
         raise ImportError(
             "GitHub App IAT mode requires PyJWT[crypto]. "
@@ -81,7 +81,9 @@ def _generate_jwt(app_id: str, private_key_pem: str) -> str:
     return pyjwt.encode(payload, private_key_pem, algorithm="RS256")
 
 
-def _fetch_iat(app_id: str, private_key_pem: str, installation_id: str, api_url: str) -> tuple[str, float]:
+def _fetch_iat(
+    app_id: str, private_key_pem: str, installation_id: str, api_url: str
+) -> tuple[str, float]:
     """Exchange a JWT for an IAT.
 
     Returns (token, expires_at_unix) where expires_at_unix is a POSIX
@@ -123,7 +125,13 @@ class IATManager:
     within ``_IAT_REFRESH_MARGIN_S`` seconds (default 5 minutes).
     """
 
-    def __init__(self, app_id: str, private_key_pem: str, installation_id: str, api_url: str = _API_URL_DEFAULT) -> None:
+    def __init__(
+        self,
+        app_id: str,
+        private_key_pem: str,
+        installation_id: str,
+        api_url: str = _API_URL_DEFAULT,
+    ) -> None:
         self._app_id = app_id
         self._private_key_pem = private_key_pem
         self._installation_id = installation_id
@@ -134,7 +142,7 @@ class IATManager:
         self._expires_at: float = 0.0
 
     @classmethod
-    def from_env(cls) -> "IATManager | None":
+    def from_env(cls) -> IATManager | None:
         """Create an IATManager from GITHUB_APP_* env vars.
 
         Returns ``None`` when any of the three required vars is absent —
@@ -161,12 +169,16 @@ class IATManager:
             if self._token and time.time() < self._expires_at - _IAT_REFRESH_MARGIN_S:
                 return self._token
 
-            logger.debug("github_iat: fetching new IAT (app_id=%s, installation=%s)", self._app_id, self._installation_id)
+            logger.debug(
+                "github_iat: fetching new IAT (app_id=%s, installation=%s)",
+                self._app_id,
+                self._installation_id,
+            )
             token, expires_at = _fetch_iat(
                 self._app_id, self._private_key_pem, self._installation_id, self._api_url
             )
             self._token = token
             self._expires_at = expires_at
-            exp_dt = datetime.fromtimestamp(expires_at, tz=timezone.utc).isoformat()
+            exp_dt = datetime.fromtimestamp(expires_at, tz=UTC).isoformat()
             logger.info("github_iat: IAT refreshed, expires=%s", exp_dt)
             return self._token
