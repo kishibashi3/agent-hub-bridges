@@ -848,6 +848,7 @@ async def _run_hub_session(
         display_name=config.display_name,
         url=config.agent_hub_url,
         pat=config.github_pat,
+        client_type="agent-hub-bridge/claude",  # issue #280: mode auto-detection
     ) as hub:
         # issue #83: SDK M5 auto-registers in connect(), but we call register()
         # again explicitly to surface the confirmed display_name/mode in the log

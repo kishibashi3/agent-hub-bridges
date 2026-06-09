@@ -138,6 +138,7 @@ async def run_worker(config: Config) -> None:
         display_name=config.display_name,
         url=config.agent_hub_url,
         pat=config.github_pat,
+        client_type="agent-hub-bridge/slack",  # issue #280: mode auto-detection
     ) as hub:
         # SDK M5 (agent-hub-sdk#27, merge fc4a4cd, included in v0.6.0)
         # auto-registers as part of ``AgentHub.connect``. The explicit
