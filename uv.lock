@@ -28,7 +28,7 @@ wheels = [
 
 [[package]]
 name = "agent-hub-bridges"
-version = "0.1.2"
+version = "0.3.0"
 source = { editable = "." }
 dependencies = [
     { name = "agent-hub-sdk" },
@@ -48,6 +48,7 @@ all = [
     { name = "httpx" },
     { name = "opentelemetry-exporter-otlp-proto-http" },
     { name = "opentelemetry-sdk" },
+    { name = "pyjwt", extra = ["crypto"] },
     { name = "slack-bolt" },
     { name = "slack-sdk" },
 ]
@@ -61,6 +62,9 @@ dev = [
     { name = "pytest-asyncio" },
     { name = "ruff" },
 ]
+github-app = [
+    { name = "pyjwt", extra = ["crypto"] },
+]
 slack = [
     { name = "aiohttp" },
     { name = "slack-bolt" },
@@ -70,7 +74,7 @@ slack = [
 [package.metadata]
 requires-dist = [
     { name = "a2a-sdk", marker = "extra == 'a2a'", specifier = ">=1.0.3,<2" },
-    { name = "agent-hub-bridges", extras = ["claude", "slack", "gemini", "a2a", "client-codex", "codex", "claude-p"], marker = "extra == 'all'" },
+    { name = "agent-hub-bridges", extras = ["claude", "slack", "gemini", "a2a", "client-codex", "codex", "claude-p", "github-app"], marker = "extra == 'all'" },
     { name = "agent-hub-sdk", git = "https://github.com/kishibashi3/agent-hub-sdk.git?subdirectory=python&rev=v0.9.0" },
     { name = "aiohttp", marker = "extra == 'slack'", specifier = ">=3.9.0" },
     { name = "anyio", specifier = ">=4.0.0" },
@@ -78,6 +82,7 @@ requires-dist = [
     { name = "httpx", marker = "extra == 'a2a'", specifier = ">=0.27" },
     { name = "opentelemetry-exporter-otlp-proto-http", marker = "extra == 'claude'", specifier = ">=1.25.0" },
     { name = "opentelemetry-sdk", marker = "extra == 'claude'", specifier = ">=1.25.0" },
+    { name = "pyjwt", extras = ["crypto"], marker = "extra == 'github-app'", specifier = ">=2.0.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0.0" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23.0" },
     { name = "python-dotenv", specifier = ">=1.0.0" },
@@ -85,7 +90,7 @@ requires-dist = [
     { name = "slack-bolt", marker = "extra == 'slack'", specifier = ">=1.18.0" },
     { name = "slack-sdk", marker = "extra == 'slack'", specifier = ">=3.27.0" },
 ]
-provides-extras = ["claude", "slack", "gemini", "a2a", "client-codex", "codex", "claude-p", "all", "dev"]
+provides-extras = ["claude", "slack", "gemini", "a2a", "github-app", "client-codex", "codex", "claude-p", "all", "dev"]
 
 [[package]]
 name = "agent-hub-sdk"

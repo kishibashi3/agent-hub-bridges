@@ -29,6 +29,8 @@ import (
 	"os/exec"
 	"strings"
 	"time"
+
+	githubclient "github.com/kishibashi3/agent-hub-bridges/packages/github-client"
 )
 
 // streamAssistantContent は stream-json の assistant メッセージ内の content block。
@@ -82,13 +84,26 @@ type queryUsage struct {
 type claudeRunner struct {
 	cfg           *config
 	mcpConfigPath string
+	// iatMgr は GitHub App IAT manager。GITHUB_APP_* が未設定の場合は nil (PAT fallback)。
+	iatMgr *githubclient.IATManager
 }
 
 // newClaudeRunner は claudeRunner を生成する。
+// GITHUB_APP_ID / GITHUB_APP_PRIVATE_KEY / GITHUB_APP_INSTALLATION_ID が
+// 全て設定されていれば IAT manager を初期化する (issue #73)。
 func newClaudeRunner(cfg *config, mcpConfigPath string) *claudeRunner {
+	mgr, err := githubclient.NewIATManagerFromEnv()
+	if err != nil {
+		slog.Warn("runner: GitHub App IAT init failed, falling back to default gh auth", "err", err)
+		mgr = nil
+	}
+	if mgr != nil {
+		slog.Info("runner: GitHub App IAT mode enabled")
+	}
 	return &claudeRunner{
 		cfg:           cfg,
 		mcpConfigPath: mcpConfigPath,
+		iatMgr:        mgr,
 	}
 }
 
@@ -219,6 +234,17 @@ func (r *claudeRunner) spawnSubprocess(ctx context.Context) (*exec.Cmd, io.Write
 	cmd := exec.CommandContext(ctx, r.cfg.ClaudeCLI, args...)
 	cmd.Dir = r.cfg.Workdir
 	cmd.Stderr = os.Stderr
+
+	// GitHub App IAT モード (issue #73): IAT manager が設定されていれば GH_TOKEN を注入する。
+	// gh CLI は GH_TOKEN を GITHUB_TOKEN より優先して使うため、これで bot identity になる。
+	if r.iatMgr != nil {
+		tok, err := r.iatMgr.GetToken(ctx)
+		if err != nil {
+			slog.Warn("runner: IAT fetch failed, falling back to default gh auth", "err", err)
+		} else {
+			cmd.Env = append(os.Environ(), "GH_TOKEN="+tok)
+		}
+	}
 
 	stdinPipe, err := cmd.StdinPipe()
 	if err != nil {
