@@ -20,7 +20,7 @@ class BaseConfig:
     """全 bridge が共通で必要とする runtime config.
 
     Attributes:
-        user: agent-hub での自分の `@handle` (= `--user` / env AGENT_HUB_USER)。
+        user: agent-hub での自分の `@handle` (= `--participant` / env AGENT_HUB_PARTICIPANT)。
         display_name: 表示名 (任意)。 None なら server 側 default。
         tenant: tenant 名 (任意)。 None なら default tenant (雑談室)。
         agent_hub_url: agent-hub MCP endpoint (必須)。

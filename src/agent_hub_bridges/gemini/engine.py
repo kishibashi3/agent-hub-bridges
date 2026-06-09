@@ -417,11 +417,29 @@ class GeminiCLIEngine:
           を読む
         - GITHUB_PAT は settings.json の `${GITHUB_PAT}` interpolation で
           参照されるので、確実に export しておく
+        - GH_TOKEN: GITHUB_APP_* が設定されている場合は IAT を注入 (issue #73)。
         """
+        from agent_hub_bridges._common.github_iat import IATManager
+
         env = os.environ.copy()
         env["HOME"] = str(self._home_dir)
         env["GITHUB_PAT"] = self._config.github_pat
         env["GEMINI_API_KEY"] = self._config.gemini_api_key
+
+        # GITHUB_APP_* (private key / app ID) はサブプロセスに渡さない — security。
+        for k in [k for k in env if k.startswith("GITHUB_APP_")]:
+            del env[k]
+
+        # GitHub App IAT モード (issue #73)
+        mgr = IATManager.from_env()
+        if mgr is not None:
+            try:
+                env["GH_TOKEN"] = mgr.get_token()
+            except Exception:
+                logger.warning(
+                    "github_iat: IAT fetch failed, falling back to default gh auth",
+                    exc_info=True,
+                )
         # gemini CLI の interactive/telemetry 検出を抑える hint。
         # 両方とも setdefault なので env で明示指定があれば尊重する。
         #

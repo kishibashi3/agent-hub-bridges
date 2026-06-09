@@ -1,7 +1,7 @@
 """CLI surface tests for `agent_hub_bridges.gemini.cli` (= parity with claude / slack).
 
 `run_worker` は monkeypatch で stub 化し、 `main()` の argparse 挙動と
-exit code、 `--user` (required) + `--model` (gemini 固有) の resolution
+exit code、 `--participant` (required) + `--model` (gemini 固有) の resolution
 を 確認する。
 """
 
@@ -42,7 +42,7 @@ def test_cli_requires_user(capsys: pytest.CaptureFixture[str]) -> None:
         gemini_cli.main([])
     assert exc_info.value.code == 2
     err = capsys.readouterr().err
-    assert "--user" in err
+    assert "--participant" in err
 
 
 def test_cli_missing_env_returns_2(
@@ -51,7 +51,7 @@ def test_cli_missing_env_returns_2(
     monkeypatch.delenv("AGENT_HUB_URL", raising=False)
     monkeypatch.delenv("GITHUB_PAT", raising=False)
     monkeypatch.setenv("GEMINI_API_KEY", "k")
-    rc = gemini_cli.main(["--user", "g", "--workdir", str(tmp_path)])
+    rc = gemini_cli.main(["--participant", "g", "--workdir", str(tmp_path)])
     assert rc == 2
     err = capsys.readouterr().err
     assert "error:" in err
@@ -63,7 +63,7 @@ def test_cli_missing_gemini_key_returns_2(
     monkeypatch.setenv("AGENT_HUB_URL", "http://h")
     monkeypatch.setenv("GITHUB_PAT", "g")
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
-    rc = gemini_cli.main(["--user", "g", "--workdir", str(tmp_path)])
+    rc = gemini_cli.main(["--participant", "g", "--workdir", str(tmp_path)])
     assert rc == 2
     err = capsys.readouterr().err
     assert "GEMINI_API_KEY" in err
@@ -80,7 +80,7 @@ def test_cli_calls_run_worker(
     monkeypatch.setattr(gemini_cli, "run_worker", fake_run_worker)
     rc = gemini_cli.main(
         [
-            "--user",
+            "--participant",
             "gemini-impl",
             "--display-name",
             "Gemini Impl",
@@ -111,7 +111,7 @@ def test_cli_model_defaults_to_env_or_default(
         captured["config"] = config
 
     monkeypatch.setattr(gemini_cli, "run_worker", fake_run_worker)
-    rc = gemini_cli.main(["--user", "g", "--workdir", str(tmp_path)])
+    rc = gemini_cli.main(["--participant", "g", "--workdir", str(tmp_path)])
     assert rc == 0
     assert captured["config"].gemini_model == "from-env-model"
 
@@ -123,5 +123,5 @@ def test_cli_keyboard_interrupt_returns_130(
         raise KeyboardInterrupt
 
     monkeypatch.setattr(gemini_cli, "run_worker", fake_run_worker)
-    rc = gemini_cli.main(["--user", "g", "--workdir", str(tmp_path)])
+    rc = gemini_cli.main(["--participant", "g", "--workdir", str(tmp_path)])
     assert rc == 130

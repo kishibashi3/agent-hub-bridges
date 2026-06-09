@@ -16,7 +16,7 @@ def _full_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("GITHUB_PAT", "ghp_test")
     monkeypatch.setenv("A2A_AGENT_URL", "https://a2a.example.com")
     monkeypatch.delenv("A2A_AGENT_CARD_PATH", raising=False)
-    monkeypatch.delenv("AGENT_HUB_USER", raising=False)
+    monkeypatch.delenv("AGENT_HUB_PARTICIPANT", raising=False)
     monkeypatch.delenv("AGENT_HUB_DISPLAY_NAME", raising=False)
     monkeypatch.delenv("AGENT_HUB_TENANT", raising=False)
 
@@ -45,7 +45,7 @@ def test_cli_user_defaults_to_a2a_agent(
 
 
 def test_cli_user_from_env(monkeypatch: pytest.MonkeyPatch, _full_env: None) -> None:
-    monkeypatch.setenv("AGENT_HUB_USER", "external-agent")
+    monkeypatch.setenv("AGENT_HUB_PARTICIPANT", "external-agent")
     captured: dict[str, Any] = {}
 
     async def fake_run_worker(config: Any) -> None:
@@ -60,14 +60,14 @@ def test_cli_user_from_env(monkeypatch: pytest.MonkeyPatch, _full_env: None) -> 
 def test_cli_user_cli_overrides_env(
     monkeypatch: pytest.MonkeyPatch, _full_env: None
 ) -> None:
-    monkeypatch.setenv("AGENT_HUB_USER", "from-env")
+    monkeypatch.setenv("AGENT_HUB_PARTICIPANT", "from-env")
     captured: dict[str, Any] = {}
 
     async def fake_run_worker(config: Any) -> None:
         captured["config"] = config
 
     monkeypatch.setattr(a2a_cli, "run_worker", fake_run_worker)
-    rc = a2a_cli.main(["--user", "from-cli"])
+    rc = a2a_cli.main(["--participant", "from-cli"])
     assert rc == 0
     assert captured["config"].user == "from-cli"
 

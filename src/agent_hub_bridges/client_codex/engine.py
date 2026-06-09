@@ -286,7 +286,10 @@ class CodexCLIEngine:
         - CODEX_HOME を一時 dir で上書き
         - GITHUB_PAT を確実に export(config.toml の bearer_token_env_var が参照)
         - identity env 変数(_ENV_USER_ID / _ENV_TENANT_ID)をセット
+        - GH_TOKEN: GITHUB_APP_* が設定されている場合は IAT を注入 (issue #73)。
         """
+        from agent_hub_bridges._common.github_iat import IATManager
+
         env = os.environ.copy()
         env["CODEX_HOME"] = str(self._temp_codex_home)
         env["GITHUB_PAT"] = self._config.github_pat
@@ -295,6 +298,22 @@ class CodexCLIEngine:
             env[_ENV_TENANT_ID] = self._config.tenant
         else:
             env.pop(_ENV_TENANT_ID, None)
+
+        # GITHUB_APP_* (private key / app ID) はサブプロセスに渡さない — security。
+        for k in [k for k in env if k.startswith("GITHUB_APP_")]:
+            del env[k]
+
+        # GitHub App IAT モード (issue #73)
+        mgr = IATManager.from_env()
+        if mgr is not None:
+            try:
+                env["GH_TOKEN"] = mgr.get_token()
+            except Exception:
+                logger.warning(
+                    "github_iat: IAT fetch failed, falling back to default gh auth",
+                    exc_info=True,
+                )
+
         return env
 
 

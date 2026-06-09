@@ -1,7 +1,7 @@
-"""CLI entry point: `agent-hub-bridge-claude --user <name>` で bridge を起動.
+"""CLI entry point: `agent-hub-bridge-claude --participant <name>` で bridge を起動.
 
 旧 repo の CLI と完全に同じ semantics:
-  - `--user` required
+  - `--participant` required
   - `--display-name` / `--tenant` / `--workdir` optional (env で 上書き可)
   - 必須 env (`GITHUB_PAT` / `AGENT_HUB_URL`) は Config 側で fail-fast 検証
 """
@@ -30,7 +30,7 @@ def main(argv: list[str] | None = None) -> int:
         version=__version__,
     )
     parser.add_argument(
-        "--user",
+        "--participant",
         required=True,
         help="agent-hub での handle (例: implementer, reviewer)。 @ 抜きで指定する。",
     )
@@ -59,7 +59,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         config = Config.from_env_and_args(
-            user=args.user,
+            user=args.participant,
             display_name=args.display_name,
             tenant=args.tenant,
             workdir=args.workdir,

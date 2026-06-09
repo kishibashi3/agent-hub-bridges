@@ -20,7 +20,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         prog="agent-hub-bridge-codex",
         description="agent-hub bridge backed by OpenAI Codex CLI (resident-process, MCP history)",
     )
-    parser.add_argument("--user", required=True, help="agent-hub handle (without @)")
+    parser.add_argument("--participant", required=True, help="agent-hub handle (without @)")
     parser.add_argument("--display-name", default=None, help="Display name for register()")
     parser.add_argument("--tenant", default=None, help="Tenant ID (optional)")
     parser.add_argument("--workdir", default=None, help="Working directory for codex exec")
@@ -45,7 +45,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> None:
     args = _parse_args(argv)
     config = Config.from_env_and_args(
-        user=args.user,
+        user=args.participant,
         display_name=args.display_name,
         tenant=args.tenant,
         workdir=args.workdir,

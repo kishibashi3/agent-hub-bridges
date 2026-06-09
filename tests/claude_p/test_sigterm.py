@@ -200,7 +200,7 @@ class TestCliCancelledError:
         ):
             rc = main(
                 [
-                    "--user", "test-user",
+                    "--participant", "test-user",
                 ]
             )
 
@@ -227,7 +227,7 @@ class TestCliCancelledError:
         ):
             rc = main(
                 [
-                    "--user", "test-user",
+                    "--participant", "test-user",
                 ]
             )
 

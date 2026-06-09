@@ -26,6 +26,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -361,6 +362,10 @@ func startupCatchup(
 // Python の _handle_one() に相当。
 // hub.MarkAsRead は caller が handleOne 呼び出し前に担当する (issue #176)。
 // claude subprocess は on-demand で spawn/exit される (runner.query 内部で処理)。
+//
+// SubprocessTimeout による中断は errSubprocessTimeout で sentinel され、
+// cfg.MaxQueryRetries 回までリトライする (issue #226)。
+// SIGTERM による ctx.Canceled は retry しない。
 func handleOne(
 	ctx context.Context,
 	client *agenthub.Client,
@@ -383,18 +388,47 @@ func handleOne(
 		"msg_id", msg.ID, "from", msg.Sender, "body_preview", truncate(msg.Body, 120))
 
 	prompt := formatPrompt("@"+cfg.User, msg)
-	usage, err := runner.query(ctx, prompt, msg.Sender, tracker)
-	// issue #267: telemetry span は query 成否に関わらず emit する (usage があれば記録)
-	emitSpan(msg.ID, cfg.Model, usage)
-	if err != nil {
-		slog.Error("handleOne: claude query error", "msg_id", msg.ID, "err", err)
-		errMsg := fmt.Sprintf("(auto) bridge-claude2 error: %v", err)
-		_ = journalledSend(ctx, client, journal, msg.Sender, errMsg, msg.ID)
-		return err
+
+	const retryBackoff = 5 * time.Second
+	var lastUsage queryUsage
+	var lastErr error
+
+	for attempt := 0; attempt <= cfg.MaxQueryRetries; attempt++ {
+		if attempt > 0 {
+			slog.Warn("handleOne: retrying after subprocess timeout",
+				"msg_id", msg.ID, "attempt", attempt, "max_retries", cfg.MaxQueryRetries,
+				"backoff_s", retryBackoff.Seconds(),
+			)
+			sleepWithContext(ctx, retryBackoff)
+			if ctx.Err() != nil {
+				// SIGTERM が来ていたらリトライを中断
+				lastErr = ctx.Err()
+				break
+			}
+		}
+
+		usage, err := runner.query(ctx, prompt, msg.Sender, tracker)
+		// issue #267: telemetry span は query 成否に関わらず emit する (usage があれば記録)
+		emitSpan(msg.ID, cfg.Model, usage)
+		lastUsage = usage
+		lastErr = err
+
+		if err == nil {
+			slog.Info("→ message processed", "msg_id", msg.ID, "from", msg.Sender)
+			return nil
+		}
+
+		// SubprocessTimeout による中断のみリトライ対象。それ以外はすぐ break。
+		if !errors.Is(err, errSubprocessTimeout) {
+			break
+		}
 	}
 
-	slog.Info("→ message processed", "msg_id", msg.ID, "from", msg.Sender)
-	return nil
+	_ = lastUsage // usage は既に emitSpan 済み
+	slog.Error("handleOne: claude query error", "msg_id", msg.ID, "err", lastErr)
+	errMsg := fmt.Sprintf("(auto) bridge-claude2 error: %v", lastErr)
+	_ = journalledSend(ctx, client, journal, msg.Sender, errMsg, msg.ID)
+	return lastErr
 }
 
 // journalledSend は journal write → hub.SendMessage → journal delete の順で送信を永続化する。

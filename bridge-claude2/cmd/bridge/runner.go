@@ -22,6 +22,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -29,7 +30,13 @@ import (
 	"os/exec"
 	"strings"
 	"time"
+
+	githubclient "github.com/kishibashi3/agent-hub-bridges/packages/github-client"
 )
+
+// errSubprocessTimeout は SubprocessTimeout によって subprocess がキルされたことを示す sentinel。
+// worker.go の handleOne がリトライ判定に使う。context.Canceled (SIGTERM) とは区別される。
+var errSubprocessTimeout = errors.New("subprocess timeout")
 
 // streamAssistantContent は stream-json の assistant メッセージ内の content block。
 // tool_use の blocking 検出に使う。
@@ -82,13 +89,26 @@ type queryUsage struct {
 type claudeRunner struct {
 	cfg           *config
 	mcpConfigPath string
+	// iatMgr は GitHub App IAT manager。GITHUB_APP_* が未設定の場合は nil (PAT fallback)。
+	iatMgr *githubclient.IATManager
 }
 
 // newClaudeRunner は claudeRunner を生成する。
+// GITHUB_APP_ID / GITHUB_APP_PRIVATE_KEY / GITHUB_APP_INSTALLATION_ID が
+// 全て設定されていれば IAT manager を初期化する (issue #73)。
 func newClaudeRunner(cfg *config, mcpConfigPath string) *claudeRunner {
+	mgr, err := githubclient.NewIATManagerFromEnv()
+	if err != nil {
+		slog.Warn("runner: GitHub App IAT init failed, falling back to default gh auth", "err", err)
+		mgr = nil
+	}
+	if mgr != nil {
+		slog.Info("runner: GitHub App IAT mode enabled")
+	}
 	return &claudeRunner{
 		cfg:           cfg,
 		mcpConfigPath: mcpConfigPath,
+		iatMgr:        mgr,
 	}
 }
 
@@ -159,9 +179,13 @@ func (r *claudeRunner) query(ctx context.Context, prompt, sessionID string, trac
 		// queryCtx がタイムアウト/キャンセルされて subprocess がキルされた場合、
 		// readUntilResult の ctx.Done() チェックは scanner.Scan() ブロック中には
 		// 効かないため EOF エラーとして返ってくる。実態を明示する。
-		if queryCtx.Err() != nil {
-			resultErr = fmt.Errorf("claude subprocess killed (SubprocessTimeout=%s): %w",
-				r.cfg.SubprocessTimeout, queryCtx.Err())
+		if queryCtx.Err() == context.DeadlineExceeded {
+			// SubprocessTimeout が発火してキルされた。errSubprocessTimeout で wrap して
+			// handleOne の retry 判定が context.Canceled (SIGTERM) と区別できるようにする。
+			resultErr = fmt.Errorf("%w (SubprocessTimeout=%s): %v",
+				errSubprocessTimeout, r.cfg.SubprocessTimeout, queryCtx.Err())
+		} else if queryCtx.Err() != nil {
+			resultErr = fmt.Errorf("claude subprocess killed (ctx cancelled): %w", queryCtx.Err())
 		} else if waitErr != nil {
 			resultErr = fmt.Errorf("%w (subprocess exit: %v)", resultErr, waitErr)
 		}
@@ -219,6 +243,25 @@ func (r *claudeRunner) spawnSubprocess(ctx context.Context) (*exec.Cmd, io.Write
 	cmd := exec.CommandContext(ctx, r.cfg.ClaudeCLI, args...)
 	cmd.Dir = r.cfg.Workdir
 	cmd.Stderr = os.Stderr
+
+	// GitHub App IAT モード (issue #73): IAT manager が設定されていれば GH_TOKEN を注入する。
+	// gh CLI は GH_TOKEN を GITHUB_TOKEN より優先して使うため、これで bot identity になる。
+	// GITHUB_APP_* (private key / app ID / installation ID) はサブプロセスに渡さない — security。
+	if r.iatMgr != nil {
+		tok, err := r.iatMgr.GetToken(ctx)
+		if err != nil {
+			slog.Warn("runner: IAT fetch failed, falling back to default gh auth", "err", err)
+		} else {
+			base := os.Environ()
+			filtered := make([]string, 0, len(base)+1)
+			for _, e := range base {
+				if !strings.HasPrefix(e, "GITHUB_APP_") {
+					filtered = append(filtered, e)
+				}
+			}
+			cmd.Env = append(filtered, "GH_TOKEN="+tok)
+		}
+	}
 
 	stdinPipe, err := cmd.StdinPipe()
 	if err != nil {

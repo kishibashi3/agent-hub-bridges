@@ -209,12 +209,33 @@ class ClaudePCLIEngine:
         親プロセスに設定されていても subprocess には渡さない。
         GITHUB_PAT は MCP config の `headers.Authorization` で参照される可能性を
         考慮して export する。
+        GH_TOKEN: GITHUB_APP_* が設定されている場合は IAT を注入し、gh CLI が
+        AgentHub [bot] 名義でコメントを投稿できるようにする (issue #73)。
+        未設定の場合は GH_TOKEN を変更しない (PAT fallback = 従来動作)。
         """
+        from agent_hub_bridges._common.github_iat import IATManager
+
         env = os.environ.copy()
         env["GITHUB_PAT"] = self._config.github_pat
         # ANTHROPIC_API_KEY を除外: subscription auth 優先、API billing 回避。
         # 親 env にあっても subprocess には渡さない (設計: design-bridge-claude-p.md §4)。
         env.pop("ANTHROPIC_API_KEY", None)
+
+        # GITHUB_APP_* (private key / app ID) はサブプロセスに渡さない — security。
+        for k in [k for k in env if k.startswith("GITHUB_APP_")]:
+            del env[k]
+
+        # GitHub App IAT モード (issue #73): GITHUB_APP_* が揃っていれば IAT を注入。
+        mgr = IATManager.from_env()
+        if mgr is not None:
+            try:
+                env["GH_TOKEN"] = mgr.get_token()
+            except Exception:
+                logger.warning(
+                    "github_iat: IAT fetch failed, falling back to default gh auth",
+                    exc_info=True,
+                )
+
         return env
 
 
