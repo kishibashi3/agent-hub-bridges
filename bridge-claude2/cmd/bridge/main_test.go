@@ -7,33 +7,39 @@ import (
 )
 
 // TestParseConfig_SubprocessTimeoutDefaults は subprocess-timeout の解決優先順位を検証する。
-// --subprocess-timeout フラグ (0=未指定) → AGENT_HUB_SUBPROCESS_TIMEOUT env → 30m デフォルト (issue #226)
+// --subprocess-timeout フラグ (-1=未指定) → AGENT_HUB_SUBPROCESS_TIMEOUT env → 30m デフォルト (issue #226)
 func TestParseConfig_SubprocessTimeoutDefaults(t *testing.T) {
 	// parseConfig は flag.Parse() に依存するため直接呼べないが、
 	// 解決ロジックだけを抽出して検証するヘルパーを使う。
 	tests := []struct {
-		name     string
-		flagVal  time.Duration // 0 = フラグ未指定 (デフォルト動作)
-		envVal   string
-		wantD    time.Duration
-		wantErr  bool
+		name    string
+		flagVal time.Duration // -1 = フラグ未指定 (デフォルト動作)
+		envVal  string
+		wantD   time.Duration
+		wantErr bool
 	}{
 		{
-			name:    "flag=0 env=unset → default 30m",
-			flagVal: 0,
+			name:    "flag=-1 env=unset → default 30m",
+			flagVal: -1,
 			envVal:  "",
 			wantD:   30 * time.Minute,
 		},
 		{
-			name:    "flag=0 env=1h → 1h",
-			flagVal: 0,
+			name:    "flag=-1 env=1h → 1h",
+			flagVal: -1,
 			envVal:  "1h",
 			wantD:   time.Hour,
 		},
 		{
-			name:    "flag=0 env=0 → 0 (no timeout)",
-			flagVal: 0,
+			name:    "flag=-1 env=0 → 0 (no timeout)",
+			flagVal: -1,
 			envVal:  "0",
+			wantD:   0,
+		},
+		{
+			name:    "flag=0 env=1h → flag wins (0 = no timeout)",
+			flagVal: 0,
+			envVal:  "1h",
 			wantD:   0,
 		},
 		{
@@ -43,8 +49,8 @@ func TestParseConfig_SubprocessTimeoutDefaults(t *testing.T) {
 			wantD:   5 * time.Minute,
 		},
 		{
-			name:    "flag=0 env=invalid → error",
-			flagVal: 0,
+			name:    "flag=-1 env=invalid → error",
+			flagVal: -1,
 			envVal:  "notaduration",
 			wantErr: true,
 		},

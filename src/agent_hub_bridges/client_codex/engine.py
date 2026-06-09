@@ -299,6 +299,10 @@ class CodexCLIEngine:
         else:
             env.pop(_ENV_TENANT_ID, None)
 
+        # GITHUB_APP_* (private key / app ID) はサブプロセスに渡さない — security。
+        for k in [k for k in env if k.startswith("GITHUB_APP_")]:
+            del env[k]
+
         # GitHub App IAT モード (issue #73)
         mgr = IATManager.from_env()
         if mgr is not None:

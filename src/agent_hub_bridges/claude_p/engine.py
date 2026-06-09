@@ -221,6 +221,10 @@ class ClaudePCLIEngine:
         # 親 env にあっても subprocess には渡さない (設計: design-bridge-claude-p.md §4)。
         env.pop("ANTHROPIC_API_KEY", None)
 
+        # GITHUB_APP_* (private key / app ID) はサブプロセスに渡さない — security。
+        for k in [k for k in env if k.startswith("GITHUB_APP_")]:
+            del env[k]
+
         # GitHub App IAT モード (issue #73): GITHUB_APP_* が揃っていれば IAT を注入。
         mgr = IATManager.from_env()
         if mgr is not None:

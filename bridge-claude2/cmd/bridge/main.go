@@ -116,7 +116,7 @@ func parseConfig() (*config, error) {
 		logFile           = flag.String("log-file", "", "log file path (default: ~/.agent-hub/logs/bridge-<user>.log; overrides BRIDGE_LOG_DIR/BRIDGE_LOG_FILE)")
 		reconnectBackoff  = flag.Duration("reconnect-backoff", 5*time.Second, "backoff on MCP reconnect")
 		maxRetries        = flag.Int("max-retries", 10, "circuit breaker: max consecutive get_messages failures (0 = unlimited)")
-		subprocessTimeout = flag.Duration("subprocess-timeout", 0, "claude subprocess max runtime per query (0 = use AGENT_HUB_SUBPROCESS_TIMEOUT env or default 30m)")
+		subprocessTimeout = flag.Duration("subprocess-timeout", -1, "claude subprocess max runtime per query (0 = no timeout; -1 = use AGENT_HUB_SUBPROCESS_TIMEOUT env or default 30m)")
 		maxQueryRetries   = flag.Int("max-query-retries", -1, "max retries on subprocess timeout per message (-1 = use AGENT_HUB_MAX_QUERY_RETRIES env or default 2; 0 = no retry)")
 		showVersion       = flag.Bool("version", false, "print version and exit")
 		addDirs           stringSlice
@@ -456,10 +456,11 @@ func orDefault(s, fallback string) string {
 	return fallback
 }
 
-// resolveSubprocessTimeout は --subprocess-timeout フラグ値 (0 = 未指定) を解決する。
-// 優先順位: flagVal (>0) > AGENT_HUB_SUBPROCESS_TIMEOUT env > 30m (default)
+// resolveSubprocessTimeout は --subprocess-timeout フラグ値 (-1 = 未指定) を解決する。
+// 優先順位: flagVal (>=0) > AGENT_HUB_SUBPROCESS_TIMEOUT env > 30m (default)
+// 0 はタイムアウト無効を意味するため、未指定 sentinel は -1 を使う。
 func resolveSubprocessTimeout(flagVal time.Duration) (time.Duration, error) {
-	if flagVal > 0 {
+	if flagVal >= 0 {
 		return flagVal, nil
 	}
 	if envVal := os.Getenv("AGENT_HUB_SUBPROCESS_TIMEOUT"); envVal != "" {

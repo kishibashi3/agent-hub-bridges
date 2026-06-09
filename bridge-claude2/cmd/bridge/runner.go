@@ -246,12 +246,20 @@ func (r *claudeRunner) spawnSubprocess(ctx context.Context) (*exec.Cmd, io.Write
 
 	// GitHub App IAT モード (issue #73): IAT manager が設定されていれば GH_TOKEN を注入する。
 	// gh CLI は GH_TOKEN を GITHUB_TOKEN より優先して使うため、これで bot identity になる。
+	// GITHUB_APP_* (private key / app ID / installation ID) はサブプロセスに渡さない — security。
 	if r.iatMgr != nil {
 		tok, err := r.iatMgr.GetToken(ctx)
 		if err != nil {
 			slog.Warn("runner: IAT fetch failed, falling back to default gh auth", "err", err)
 		} else {
-			cmd.Env = append(os.Environ(), "GH_TOKEN="+tok)
+			base := os.Environ()
+			filtered := make([]string, 0, len(base)+1)
+			for _, e := range base {
+				if !strings.HasPrefix(e, "GITHUB_APP_") {
+					filtered = append(filtered, e)
+				}
+			}
+			cmd.Env = append(filtered, "GH_TOKEN="+tok)
 		}
 	}
 

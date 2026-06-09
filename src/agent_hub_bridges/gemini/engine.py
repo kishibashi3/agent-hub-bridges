@@ -426,6 +426,10 @@ class GeminiCLIEngine:
         env["GITHUB_PAT"] = self._config.github_pat
         env["GEMINI_API_KEY"] = self._config.gemini_api_key
 
+        # GITHUB_APP_* (private key / app ID) はサブプロセスに渡さない — security。
+        for k in [k for k in env if k.startswith("GITHUB_APP_")]:
+            del env[k]
+
         # GitHub App IAT モード (issue #73)
         mgr = IATManager.from_env()
         if mgr is not None:
