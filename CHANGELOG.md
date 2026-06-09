@@ -6,6 +6,17 @@ All notable changes to `agent-hub-bridges` are recorded here. Format follows
 adheres loosely to [Semantic Versioning](https://semver.org/); breaking
 changes between minor versions are possible until `v1.0.0`.
 
+## [0.1.2] — 2026-06-09
+
+### Changed — X-Agent-Hub-Client ヘッダーを全 MCP リクエストに付与 (issue #280)
+
+- **bridge-claude / bridge-gemini / bridge-slack / bridge-a2a**: `AgentHub.connect` に
+  `client_type="agent-hub-bridge/<name>"` を追加。これにより全 MCP HTTP リクエストに
+  `X-Agent-Hub-Client: agent-hub-bridge/<name>` ヘッダーが付与され、サーバーが
+  worker mode を自動決定できる (agent-hub issue #276 / PR #279 対応)。
+- `pyproject.toml`: SDK pin を `v0.7.0` → `v0.8.0` (agent-hub-sdk PR #48) に更新。
+  SDK に `client_type` パラメータと `AGENT_HUB_CLIENT` env var サポートを追加。
+
 ## [0.1.1] — 2026-06-07
 
 ### Fixed

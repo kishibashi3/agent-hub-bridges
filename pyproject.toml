@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agent-hub-bridges"
-version = "0.1.1"
+version = "0.1.2"
 description = "Monorepo of agent-hub bridge workers (Claude / Gemini / Slack / A2A)"
 readme = "README.md"
 license = { text = "Apache-2.0" }
@@ -27,12 +27,10 @@ classifiers = [
 #   pip install "agent-hub-bridges[claude]"
 # のように必要な bridge だけ pull する。
 dependencies = [
-    # agent-hub-sdk v0.7.0 (= M2.1 command routing + M3 stateless + M4 TS port
-    # + M5 auto-register + M6 /restart built-in + inbox dedup fix)。
-    # v0.6.0 → v0.7.0: inbox message dedup by ID (agent-hub-sdk issue #31) —
-    # SSE replay double-dispatch 防止。 server PR #118 の replay filter と組み合わせ
-    # inbox storm を解消。 全 minor は backward compatible。
-    "agent-hub-sdk @ git+https://github.com/kishibashi3/agent-hub-sdk.git@v0.7.0#subdirectory=python",
+    # agent-hub-sdk v0.8.0 (PR #48 — X-Agent-Hub-Client ヘッダーサポート追加)。
+    # client_type param + AGENT_HUB_CLIENT env var。non-breaking (default None)。
+    # PR merge 後に v0.8.1 タグに差し替えること。
+    "agent-hub-sdk @ git+https://github.com/kishibashi3/agent-hub-sdk.git@29e748e#subdirectory=python",
     "anyio>=4.0.0",
     "python-dotenv>=1.0.0",
 ]

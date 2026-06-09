@@ -100,6 +100,7 @@ async def _run_hub_session(config: Config, engine: GeminiCLIEngine) -> None:
         display_name=config.display_name,
         url=config.agent_hub_url,
         pat=config.github_pat,
+        client_type="agent-hub-bridge/gemini",  # issue #280: mode auto-detection
     ) as hub:
         registered = await hub.register()
         logger.info(

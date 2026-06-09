@@ -230,6 +230,7 @@ async def _run_hub_session(
         display_name=display_name,
         url=config.agent_hub_url,
         pat=config.github_pat,
+        client_type="agent-hub-bridge/a2a",  # issue #280: mode auto-detection
     ) as hub:
         registered = await hub.register()
         logger.info(
