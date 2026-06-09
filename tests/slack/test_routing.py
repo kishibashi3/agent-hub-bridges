@@ -313,13 +313,13 @@ class TestThreadContext:
 
 
 class TestClassifyHubError:
-    """M4: agent-hub の error 文字列を participant_not_found / transient / unknown に分ける."""
+    """M4: agent-hub の error 文字列を peer_not_found / transient / unknown に分ける."""
 
     def test_empty_returns_unknown(self) -> None:
         assert classify_hub_error("") == "unknown"
         assert classify_hub_error(None) == "unknown"
 
-    def test_participant_not_found_phrases(self) -> None:
+    def test_peer_not_found_phrases(self) -> None:
         for text in [
             "peer @gemma not found",
             "Peer not online",
@@ -329,7 +329,7 @@ class TestClassifyHubError:
             "peer not registered yet",
             "Recipient is offline",
         ]:
-            assert classify_hub_error(text) == "participant_not_found", text
+            assert classify_hub_error(text) == "peer_not_found", text
 
     def test_transient_phrases(self) -> None:
         for text in [
@@ -354,12 +354,12 @@ class TestClassifyHubError:
             assert classify_hub_error(text) == "unknown", text
 
     def test_case_insensitive(self) -> None:
-        assert classify_hub_error("PEER NOT FOUND") == "participant_not_found"
+        assert classify_hub_error("PEER NOT FOUND") == "peer_not_found"
         assert classify_hub_error("ServICE Unavailable") == "transient"
 
-    def test_japanese_participant_not_found_phrases(self) -> None:
+    def test_japanese_peer_not_found_phrases(self) -> None:
         # issue #6: agent-hub server は Japanese で error を返す。
-        # 実観測 phrase + 想定類義語の全てが participant_not_found に分類されること。
+        # 実観測 phrase + 想定類義語の全てが peer_not_found に分類されること。
         for text in [
             "宛先 @list は存在しません",  # 実観測 (agent-hub server の生 phrase)
             "@gemma は存在しません",
@@ -367,7 +367,7 @@ class TestClassifyHubError:
             "@xyz は登録されていません",
             "宛先がオフラインです",
         ]:
-            assert classify_hub_error(text) == "participant_not_found", text
+            assert classify_hub_error(text) == "peer_not_found", text
 
     def test_japanese_transient_phrases(self) -> None:
         # 同様に 5xx / network / timeout 系の Japanese 表現も拾う

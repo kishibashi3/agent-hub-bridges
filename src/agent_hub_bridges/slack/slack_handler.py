@@ -18,7 +18,7 @@ import re
 from typing import TYPE_CHECKING
 
 import anyio
-from agent_hub_sdk import HubTransientError, ParticipantNotFoundError
+from agent_hub_sdk import HubTransientError, PeerNotFoundError
 from slack_bolt.async_app import AsyncApp
 
 from agent_hub_bridges.slack.routing import (
@@ -66,7 +66,7 @@ def format_send_failure_message(peer: str, error: BaseException) -> str:
     呼出元 (`handle_app_mention` / `_relay_thread_follow_up`) が `say(...)` に
     渡す前提の pure 関数として 切り出してある (= unit test 可能)。
     """
-    if isinstance(error, ParticipantNotFoundError):
+    if isinstance(error, PeerNotFoundError):
         peer_name = peer.lstrip("@")
         return (
             f":bust_in_silhouette: `{peer}` は agent-hub に居ません "

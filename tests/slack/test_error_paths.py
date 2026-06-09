@@ -9,7 +9,7 @@
 from __future__ import annotations
 
 import pytest
-from agent_hub_sdk import HubTransientError, IncomingMessage, ParticipantNotFoundError
+from agent_hub_sdk import HubTransientError, IncomingMessage, PeerNotFoundError
 
 from agent_hub_bridges.slack.config import Config
 from agent_hub_bridges.slack.slack_handler import (
@@ -22,7 +22,7 @@ from agent_hub_bridges.slack.slack_handler import (
 
 class TestFormatSendFailureMessage:
     def test_participant_not_found_mentions_offline_and_get_participants(self) -> None:
-        e = ParticipantNotFoundError(peer="@gemma", detail="peer @gemma not found")
+        e = PeerNotFoundError(peer="@gemma", detail="peer @gemma not found")
         out = format_send_failure_message("@gemma", e)
         # 人間が次のアクションを取れる文面
         assert ":bust_in_silhouette:" in out
