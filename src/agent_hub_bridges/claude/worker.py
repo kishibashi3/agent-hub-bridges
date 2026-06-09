@@ -843,23 +843,20 @@ async def _run_hub_session(
 
     async with AgentHub.connect(
         user=config.user,
-        mode=config.mode,  # issue #83: --mode flag (stateful/stateless/global)
         tenant=config.tenant,
         display_name=config.display_name,
         url=config.agent_hub_url,
         pat=config.github_pat,
-        client_type="agent-hub-bridge/claude",  # issue #280: mode auto-detection
+        client_type="agent-hub-bridge/claude",
     ) as hub:
-        # issue #83: SDK M5 auto-registers in connect(), but we call register()
-        # again explicitly to surface the confirmed display_name/mode in the log
-        # so operators can verify the registration at a glance.
+        # SDK auto-registers in connect(). We call register() again explicitly
+        # to surface the confirmed display_name in the log for operator visibility.
         # server-side register is idempotent.
         try:
             confirmed = await hub.register()
             logger.info(
-                "Registered @%s (mode=%s, display_name=%r): %s",
+                "Registered @%s (display_name=%r): %s",
                 config.user,
-                config.mode,
                 config.display_name,
                 confirmed,
             )

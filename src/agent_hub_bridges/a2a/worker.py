@@ -225,7 +225,6 @@ async def _run_hub_session(
 
     async with AgentHub.connect(
         user=config.user,
-        mode="stateful",
         tenant=config.tenant,
         display_name=display_name,
         url=config.agent_hub_url,

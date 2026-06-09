@@ -43,15 +43,6 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
-        "--mode",
-        default=None,
-        choices=["stateful", "stateless", "global"],
-        help=(
-            "worker mode 宣言 (stateful / stateless / global)。 "
-            "未指定なら env AGENT_HUB_MODE → 'stateful' の順で fallback (issue #83)。"
-        ),
-    )
-    parser.add_argument(
         "--add-dir",
         dest="add_dirs",
         action="append",
@@ -73,7 +64,6 @@ def main(argv: list[str] | None = None) -> int:
             tenant=args.tenant,
             workdir=args.workdir,
             model=args.model,
-            mode=args.mode,
             add_dirs=args.add_dirs,
         )
     except ValueError as e:

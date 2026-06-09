@@ -75,7 +75,6 @@ async def _run_hub_session(config: Config, engine: CodexCLIEngine) -> None:
     """1 回分の hub session を最後まで走らせる."""
     async with AgentHub.connect(
         user=config.user,
-        mode="stateful",
         tenant=config.tenant,
         display_name=config.display_name,
         url=config.agent_hub_url,

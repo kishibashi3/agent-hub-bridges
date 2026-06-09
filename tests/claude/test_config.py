@@ -188,44 +188,7 @@ def test_model_empty_string_treated_as_unset(
 _ = os
 
 
-# --- issue #83: mode + display_name auto-generation ---
-
-
-def test_mode_default_stateful(
-    monkeypatch: pytest.MonkeyPatch, _hub_env: None, tmp_path: Path
-) -> None:
-    """CLI ``--mode`` 未指定 + env ``AGENT_HUB_MODE`` 未設定 → ``"stateful"``."""
-    monkeypatch.delenv("AGENT_HUB_MODE", raising=False)
-    cfg = Config.from_env_and_args(
-        user="claude-impl", display_name=None, tenant=None, workdir=str(tmp_path)
-    )
-    assert cfg.mode == "stateful"
-
-
-def test_mode_env_overrides_default(
-    monkeypatch: pytest.MonkeyPatch, _hub_env: None, tmp_path: Path
-) -> None:
-    """env ``AGENT_HUB_MODE`` が default を上書きする (CLI 未指定時)."""
-    monkeypatch.setenv("AGENT_HUB_MODE", "stateless")
-    cfg = Config.from_env_and_args(
-        user="claude-impl", display_name=None, tenant=None, workdir=str(tmp_path)
-    )
-    assert cfg.mode == "stateless"
-
-
-def test_mode_cli_overrides_env(
-    monkeypatch: pytest.MonkeyPatch, _hub_env: None, tmp_path: Path
-) -> None:
-    """CLI ``--mode`` が env を上書きする (優先順位 CLI > env > default)."""
-    monkeypatch.setenv("AGENT_HUB_MODE", "stateless")
-    cfg = Config.from_env_and_args(
-        user="claude-impl",
-        display_name=None,
-        tenant=None,
-        workdir=str(tmp_path),
-        mode="global",
-    )
-    assert cfg.mode == "global"
+# --- issue #83: display_name auto-generation ---
 
 
 def test_display_name_auto_generated_when_unset(
@@ -263,29 +226,6 @@ def test_display_name_env_overrides_auto(
         user="bridges-impl", display_name=None, tenant=None, workdir=str(tmp_path)
     )
     assert cfg.display_name == "bridges-impl — env override"
-
-
-def test_mode_invalid_env_raises(
-    monkeypatch: pytest.MonkeyPatch, _hub_env: None, tmp_path: Path
-) -> None:
-    """env ``AGENT_HUB_MODE`` に無効な値をセットすると `ValueError` (fail-fast)。
-    (reviewer Critical: argparse choices= は CLI のみを保護するため env は別途検証)"""
-    monkeypatch.setenv("AGENT_HUB_MODE", "invalid_value")
-    with pytest.raises(ValueError, match="invalid mode="):
-        Config.from_env_and_args(
-            user="claude-impl", display_name=None, tenant=None, workdir=str(tmp_path)
-        )
-
-
-def test_mode_invalid_env_error_message(
-    monkeypatch: pytest.MonkeyPatch, _hub_env: None, tmp_path: Path
-) -> None:
-    """エラーメッセージに無効な値と有効な値一覧が含まれる。"""
-    monkeypatch.setenv("AGENT_HUB_MODE", "bad_mode")
-    with pytest.raises(ValueError, match=r"global.*stateful.*stateless"):
-        Config.from_env_and_args(
-            user="claude-impl", display_name=None, tenant=None, workdir=str(tmp_path)
-        )
 
 
 def test_display_name_empty_string_falls_to_auto(
