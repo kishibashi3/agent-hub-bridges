@@ -6,7 +6,7 @@
 - M2: agent-hub inbox push → Slack default channel に post
 - M3: thread context map (routing.ThreadContext) — thread 内 follow-up を 同じ
       peer に維持しつつ、hub→Slack の reply を元 thread に戻す
-- M4: 異常ケースを Slack thread に可視化 (PeerNotFoundError / HubTransientError
+- M4: 異常ケースを Slack thread に可視化 (ParticipantNotFoundError / HubTransientError
       → 人間が読める warning、Slack rate limit → Retry-After 尊重で 1 回 retry)
       ← 現状
 """
@@ -18,7 +18,7 @@ import re
 from typing import TYPE_CHECKING
 
 import anyio
-from agent_hub_sdk import HubTransientError, PeerNotFoundError
+from agent_hub_sdk import HubTransientError, ParticipantNotFoundError
 from slack_bolt.async_app import AsyncApp
 
 from agent_hub_bridges.slack.routing import (
@@ -59,14 +59,14 @@ def format_send_failure_message(peer: str, error: BaseException) -> str:
     DESIGN.md M4 acceptance「異常ケースが Slack 内で観測可能」の主要 path。
     例外の型ごとに 人間が次のアクションを取れる文面に差別化する:
 
-      - `PeerNotFoundError` → peer の handle 違い / オフライン を示唆。
+      - `ParticipantNotFoundError` → participant の handle 違い / オフライン を示唆。
       - `HubTransientError` → 一時的、後ほど再試行を促す。
       - その他 → generic な warning (= 想定外、debug 用に str(e) を そのまま付ける)。
 
     呼出元 (`handle_app_mention` / `_relay_thread_follow_up`) が `say(...)` に
     渡す前提の pure 関数として 切り出してある (= unit test 可能)。
     """
-    if isinstance(error, PeerNotFoundError):
+    if isinstance(error, ParticipantNotFoundError):
         peer_name = peer.lstrip("@")
         return (
             f":bust_in_silhouette: `{peer}` は agent-hub に居ません "
@@ -189,7 +189,7 @@ def build_slack_app(
         try:
             await hub.send_with_retry(to=parsed.peer, message=relay_body)
         except Exception as e:
-            # PeerNotFoundError / HubTransientError / その他想定外を 1 本で受け、
+            # ParticipantNotFoundError / HubTransientError / その他想定外を 1 本で受け、
             # format_send_failure_message が isinstance で分岐する責務分担。
             logger.warning("send_message to %s failed: %s", parsed.peer, e)
             await say(

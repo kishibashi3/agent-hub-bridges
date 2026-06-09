@@ -1,7 +1,7 @@
 """M4 unit test: error 可視化系の helper / _post_one rate-limit retry.
 
 責務:
-  - `format_send_failure_message` (PeerNotFoundError / HubTransientError /
+  - `format_send_failure_message` (ParticipantNotFoundError / HubTransientError /
     generic Exception を Slack thread に出す text に変換)
   - `_post_one` の Slack rate limit (429) inline retry path
 """
@@ -9,7 +9,7 @@
 from __future__ import annotations
 
 import pytest
-from agent_hub_sdk import HubTransientError, IncomingMessage, PeerNotFoundError
+from agent_hub_sdk import HubTransientError, IncomingMessage, ParticipantNotFoundError
 
 from agent_hub_bridges.slack.config import Config
 from agent_hub_bridges.slack.slack_handler import (
@@ -21,8 +21,8 @@ from agent_hub_bridges.slack.slack_handler import (
 
 
 class TestFormatSendFailureMessage:
-    def test_peer_not_found_mentions_offline_and_get_participants(self) -> None:
-        e = PeerNotFoundError(peer="@gemma", detail="peer @gemma not found")
+    def test_participant_not_found_mentions_offline_and_get_participants(self) -> None:
+        e = ParticipantNotFoundError(peer="@gemma", detail="peer @gemma not found")
         out = format_send_failure_message("@gemma", e)
         # 人間が次のアクションを取れる文面
         assert ":bust_in_silhouette:" in out
