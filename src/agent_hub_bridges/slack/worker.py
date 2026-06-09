@@ -133,7 +133,6 @@ async def run_worker(config: Config) -> None:
 
     async with AgentHub.connect(
         user=config.user,
-        mode="stateful",
         tenant=config.tenant,
         display_name=config.display_name,
         url=config.agent_hub_url,

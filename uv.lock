@@ -71,7 +71,7 @@ slack = [
 requires-dist = [
     { name = "a2a-sdk", marker = "extra == 'a2a'", specifier = ">=1.0.3,<2" },
     { name = "agent-hub-bridges", extras = ["claude", "slack", "gemini", "a2a", "client-codex", "codex", "claude-p"], marker = "extra == 'all'" },
-    { name = "agent-hub-sdk", git = "https://github.com/kishibashi3/agent-hub-sdk.git?subdirectory=python&rev=v0.8.1" },
+    { name = "agent-hub-sdk", git = "https://github.com/kishibashi3/agent-hub-sdk.git?subdirectory=python&rev=v0.9.0" },
     { name = "aiohttp", marker = "extra == 'slack'", specifier = ">=3.9.0" },
     { name = "anyio", specifier = ">=4.0.0" },
     { name = "claude-agent-sdk", marker = "extra == 'claude'", specifier = ">=0.1.0" },
@@ -89,8 +89,8 @@ provides-extras = ["claude", "slack", "gemini", "a2a", "client-codex", "codex", 
 
 [[package]]
 name = "agent-hub-sdk"
-version = "0.8.0"
-source = { git = "https://github.com/kishibashi3/agent-hub-sdk.git?subdirectory=python&rev=v0.8.1#7b3707e6c3e36e12de23eb36d7925faf01c9f246" }
+version = "0.9.0"
+source = { git = "https://github.com/kishibashi3/agent-hub-sdk.git?subdirectory=python&rev=v0.9.0#d10b9951f6333ec95534b92328dcbe676d7eb0fe" }
 dependencies = [
     { name = "anyio" },
     { name = "mcp" },
