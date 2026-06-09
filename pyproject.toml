@@ -27,9 +27,10 @@ classifiers = [
 #   pip install "agent-hub-bridges[claude]"
 # のように必要な bridge だけ pull する。
 dependencies = [
-    # agent-hub-sdk v0.9.0 (PR #50 — register() / connect() から mode 引数を削除)。
-    # server-side が X-Agent-Hub-Client ヘッダーから worker mode を自動決定 (breaking)。
-    "agent-hub-sdk @ git+https://github.com/kishibashi3/agent-hub-sdk.git@v0.9.0#subdirectory=python",
+    # agent-hub-sdk feat/participant-rename-52 (PR #54 — user→participant 用語統一)。
+    # ParticipantNotFoundError 公開 + PeerNotFoundError alias 追加。
+    # LGTM 取得済み。タグ付け後に v0.10.0 に固定する。
+    "agent-hub-sdk @ git+https://github.com/kishibashi3/agent-hub-sdk.git@feat/participant-rename-52#subdirectory=python",
     "anyio>=4.0.0",
     "python-dotenv>=1.0.0",
 ]
