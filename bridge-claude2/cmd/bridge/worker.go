@@ -5,10 +5,9 @@
 //   claudeRunner は状態を持たない (on-demand) ため reconnect をまたいで単一インスタンスを共有する。
 //
 // runHubSession: 1 回ぶんの hub session を最後まで走らせる。
-//   journal replay → startup catchup → polling loop (CommandRouter + handleOne)
-//   SSE SubscribeInbox で is_online=true に更新し、push 受信時は即時 GetMessages を発火する (issue #198)。
-//   push が来なくても PollInterval ごとにフォールバックポーリングを行う。
-//   SIGTERM 受信時は polling loop 内で runGracefulDrain() を呼んでから exit する (issue #178)。
+//   journal replay → startup catchup → SSE push 駆動ループ (CommandRouter + handleOne)
+//   SSE SubscribeInbox で is_online=true を維持し、push 受信時のみ GetMessages を発火する (issue #218)。
+//   SIGTERM 受信時は SSE ループ内で runGracefulDrain() を呼んでから exit する (issue #178)。
 //
 // startupCatchup: bridge 起動時に未読メッセージを処理する (issue #98)。
 //
@@ -128,7 +127,7 @@ func runWorker(ctx context.Context, cfg *config, mcpConfigPath string) {
 
 // runHubSession は 1 回ぶんの hub session を最後まで走らせる。
 // Python の _run_hub_session() に相当。
-// established は polling ループに入った（hub に到達できた）ことを示す。
+// established は SSE ループに入った（hub に到達できた）ことを示す。
 // エラーが発生した場合は cursor・established・エラーを返す。
 func runHubSession(
 	ctx context.Context,
@@ -204,15 +203,19 @@ func runHubSession(
 
 	selfHandle := "@" + cfg.User
 
-	// --- メインポーリングループ ---
+	// --- SSE push 駆動ループ (issue #218) ---
+	// ポーリングを廃止し、inbox push 通知を受信したときのみ GetMessages を呼ぶ。
+	// is_online=true は SSE 接続 (StartSSE + SubscribeInbox) が維持する。
 	for {
+		// push or SIGTERM を待つ
 		select {
 		case <-ctx.Done():
 			// issue #178: graceful drain — compact → 未処理メッセージ確認 → 処理 → exit
 			// client が生きているこのタイミングで drain を実施する。
 			runGracefulDrain(client, runner, cfg, cursor, tracker, journal, selfHandle)
 			return cursor, true, ctx.Err()
-		default:
+		case <-pushCh:
+			slog.Debug("runHubSession: inbox push — calling GetMessages")
 		}
 
 		msgs, err := client.GetMessages(ctx)
@@ -246,7 +249,7 @@ func runHubSession(
 			}
 
 			// issue #176: MarkAsRead を handleOne 前に呼ぶ。
-			// polling bridge では処理前に MarkAsRead しないと次回 GetMessages で
+			// SSE 駆動でも処理前に MarkAsRead しないと次回 GetMessages で
 			// 同一メッセージが返ってきて二重 dispatch が発生する。
 			// cursor check が secondary guard として機能するが、in-memory cursor は
 			// reconnect でリセットされるため、server-side の既読状態を先に確定させる。
@@ -265,26 +268,12 @@ func runHubSession(
 			saveCursor(cfg.User, msg.Timestamp)
 			cursor = msg.Timestamp
 		}
-
-		// push を受信すれば即時ループ、なければ PollInterval 待機 (issue #198)
-		pollTimer := time.NewTimer(cfg.PollInterval)
-		select {
-		case <-ctx.Done():
-			pollTimer.Stop()
-			// 次ループ先頭の ctx.Done() check で drain が走る
-		case <-pushCh:
-			pollTimer.Stop()
-			slog.Debug("runHubSession: inbox push — immediate GetMessages")
-		case <-pollTimer.C:
-			// timer fired; already drained — Stop() unnecessary
-		}
 	}
 }
 
 // startupCatchup は bridge 起動時に未読メッセージを処理する (issue #98)。
-// hub 接続確立後・polling ループ開始前に GetMessages を呼んで
-// オフライン中に届いたメッセージを処理する。
-// コマンドメッセージ (body が "/" で始まる) は polling ループの CommandRouter に委ねるためスキップ。
+// hub 接続確立後・SSE ループ開始前に GetMessages を呼んでオフライン中に届いたメッセージを処理する。
+// コマンドメッセージ (body が "/" で始まる) は SSE ループの CommandRouter に委ねるためスキップ。
 func startupCatchup(
 	ctx context.Context,
 	cfg *config,

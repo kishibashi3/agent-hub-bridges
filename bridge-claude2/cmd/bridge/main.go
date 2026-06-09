@@ -7,8 +7,8 @@
 // 動作フロー:
 //  1. MCP initialize ハンドシェイク (agent-hub-sdk/go)
 //  2. register で agent-hub に自 peer を登録
-//  3. hub session ループ: journal replay → startup catchup → polling loop
-//     - message 受信 → CommandRouter → MarkAsRead → handleOne → runner.query (on-demand subprocess)
+//  3. hub session ループ: journal replay → startup catchup → SSE push 駆動ループ
+//     - push 受信 → GetMessages → CommandRouter → MarkAsRead → handleOne → runner.query (on-demand subprocess)
 //     - cursor 永続化 (MarkAsRead は handleOne 前に完了済み — issue #176)
 //  4. SIGTERM/Ctrl+C → runGracefulDrain() で compact + 未処理メッセージ処理 → exit (issue #178)
 //
@@ -92,8 +92,6 @@ type config struct {
 	AddDirs     []string // --add-dir で指定した追加ディレクトリ (繰り返し可)
 	LogLevel    string
 	LogFile     string // ログファイルパス ("" = stderr のみ)
-	// PollInterval は get_messages のポーリング間隔。
-	PollInterval time.Duration
 	// ReconnectBackoff は MCP セッション再接続待機時間。
 	ReconnectBackoff time.Duration
 	// MaxRetries は circuit breaker の連続失敗上限 (0 = 無制限)。
@@ -112,7 +110,6 @@ func parseConfig() (*config, error) {
 		mode              = flag.String("mode", "stateful", "peer mode: stateful|stateless|global")
 		logLevel          = flag.String("log-level", "info", "log level: debug|info|warn|error")
 		logFile           = flag.String("log-file", "", "log file path (default: ~/.agent-hub/logs/bridge-<user>.log; overrides BRIDGE_LOG_DIR/BRIDGE_LOG_FILE)")
-		pollInterval      = flag.Duration("poll-interval", 5*time.Second, "get_messages polling interval")
 		reconnectBackoff  = flag.Duration("reconnect-backoff", 5*time.Second, "backoff on MCP reconnect")
 		maxRetries        = flag.Int("max-retries", 10, "circuit breaker: max consecutive get_messages failures (0 = unlimited)")
 		subprocessTimeout = flag.Duration("subprocess-timeout", 10*time.Minute, "claude subprocess max runtime per query (0 = no timeout)")
@@ -223,7 +220,6 @@ func parseConfig() (*config, error) {
 		AddDirs:           normalizedAddDirs,
 		LogLevel:          *logLevel,
 		LogFile:           resolvedLogFile,
-		PollInterval:      *pollInterval,
 		ReconnectBackoff:  *reconnectBackoff,
 		MaxRetries:        *maxRetries,
 		SubprocessTimeout: *subprocessTimeout,
@@ -381,7 +377,6 @@ func main() {
 		"workdir", cfg.Workdir,
 		"mode", cfg.Mode,
 		"model", orDefault(cfg.Model, "(claude default)"),
-		"poll_interval_s", cfg.PollInterval.Seconds(),
 		"subprocess_timeout_s", cfg.SubprocessTimeout.Seconds(),
 		"add_dirs_count", len(cfg.AddDirs),
 		"log_file", orDefault(cfg.LogFile, "(stderr only)"),
