@@ -1,6 +1,6 @@
-"""CLI entry point: `agent-hub-bridge-claude-p --user <name>` で bridge を起動.
+"""CLI entry point: `agent-hub-bridge-claude-p --participant <name>` で bridge を起動.
 
-  - `--user` required
+  - `--participant` required
   - `--display-name` / `--tenant` / `--workdir` optional (env で上書き可)
   - `--model` optional (env AGENT_HUB_MODEL で上書き可)
   - `--no-bypass-permissions` で permission bypass を無効化 (デフォルト: 有効)
@@ -31,7 +31,7 @@ def main(argv: list[str] | None = None) -> int:
         version=__version__,
     )
     parser.add_argument(
-        "--user",
+        "--participant",
         required=True,
         help="agent-hub での handle (例: claude-p-impl)。@ 抜きで指定する。",
     )
@@ -55,7 +55,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         config = Config.from_env_and_args(
-            user=args.user,
+            user=args.participant,
             display_name=args.display_name,
             tenant=args.tenant,
             workdir=args.workdir,

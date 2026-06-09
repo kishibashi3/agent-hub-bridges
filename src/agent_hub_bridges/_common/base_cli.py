@@ -1,13 +1,13 @@
 """全 bridge で 共通する argparse 引数のビルダー.
 
 旧 bridge-claude / bridge-slack / bridge-gemini が ほぼ同じ argparse 定義
-(`--user` / `--display-name` / `--tenant` / `--workdir`) を 個別に書いて
+(`--participant` / `--display-name` / `--tenant` / `--workdir`) を 個別に書いて
 いたので 1 つに集約。 bridge 固有の引数 (例: gemini の `--model`、
 slack の `--default-channel`) は 各 bridge 側で `add_argument` を 追加する。
 
-`--user` の semantics は bridge ごとに微妙に違うので 本ヘルパでは扱わない:
+`--participant` の semantics は bridge ごとに微妙に違うので 本ヘルパでは扱わない:
   - bridge-claude / bridge-gemini : required
-  - bridge-slack : optional (default `"slack-bot"`、 env AGENT_HUB_USER fallback)
+  - bridge-slack : optional (default `"slack-bot"`、 env AGENT_HUB_PARTICIPANT fallback)
   - bridge-a2a : optional (default は a2a agent name の slugify)
 """
 
@@ -25,8 +25,8 @@ def build_common_parser(
     """`--display-name` / `--tenant` / `--workdir` / `--version` だけ
     付けた parser を返す.
 
-    `--user` は 各 bridge で semantics が違う (required / default 有り等)
-    ので呼出側で `parser.add_argument("--user", ...)` を 別途追加する。
+    `--participant` は 各 bridge で semantics が違う (required / default 有り等)
+    ので呼出側で `parser.add_argument("--participant", ...)` を 別途追加する。
 
     Args:
         prog: argparse の prog (= `agent-hub-bridge-claude` 等)。

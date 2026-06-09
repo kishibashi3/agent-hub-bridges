@@ -39,7 +39,7 @@ def test_cli_requires_user(capsys: pytest.CaptureFixture[str]) -> None:
     # argparse の missing required は exit code 2
     assert exc_info.value.code == 2
     err = capsys.readouterr().err
-    assert "--user" in err
+    assert "--participant" in err
 
 
 def test_cli_missing_env_returns_2(
@@ -47,7 +47,7 @@ def test_cli_missing_env_returns_2(
 ) -> None:
     monkeypatch.delenv("AGENT_HUB_URL", raising=False)
     monkeypatch.delenv("GITHUB_PAT", raising=False)
-    rc = claude_cli.main(["--user", "test", "--workdir", str(tmp_path)])
+    rc = claude_cli.main(["--participant", "test", "--workdir", str(tmp_path)])
     assert rc == 2
     err = capsys.readouterr().err
     assert "error:" in err
@@ -66,7 +66,7 @@ def test_cli_calls_run_worker(
 
     rc = claude_cli.main(
         [
-            "--user",
+            "--participant",
             "claude-impl",
             "--display-name",
             "Claude Impl",
@@ -100,7 +100,7 @@ def test_cli_add_dir_single(
 
     rc = claude_cli.main(
         [
-            "--user", "claude-impl",
+            "--participant", "claude-impl",
             "--workdir", str(tmp_path),
             "--add-dir", str(other),
         ]
@@ -129,7 +129,7 @@ def test_cli_add_dir_multiple(
 
     rc = claude_cli.main(
         [
-            "--user", "claude-impl",
+            "--participant", "claude-impl",
             "--workdir", str(tmp_path),
             "--add-dir", str(dir_a),
             "--add-dir", str(dir_b),
@@ -154,7 +154,7 @@ def test_cli_no_add_dir_gives_empty(
     monkeypatch.setattr(claude_cli, "run_worker", fake_run_worker)
 
     rc = claude_cli.main(
-        ["--user", "claude-impl", "--workdir", str(tmp_path)]
+        ["--participant", "claude-impl", "--workdir", str(tmp_path)]
     )
     assert rc == 0
     assert captured["config"].add_dirs == ()
@@ -168,5 +168,5 @@ def test_cli_keyboard_interrupt_returns_130(
 
     monkeypatch.setattr(claude_cli, "run_worker", fake_run_worker)
 
-    rc = claude_cli.main(["--user", "claude-impl", "--workdir", str(tmp_path)])
+    rc = claude_cli.main(["--participant", "claude-impl", "--workdir", str(tmp_path)])
     assert rc == 130

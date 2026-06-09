@@ -1,7 +1,7 @@
 """CLI surface tests for `agent_hub_bridges.slack.cli`.
 
 `run_worker` は monkeypatch で stub 化し、 `main()` の argparse 挙動と
-exit code、 `--user` の default 解決順 (= claude と違って optional) を 確認。
+exit code、 `--participant` の default 解決順 (= claude と違って optional) を 確認。
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ def _full_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-test")
     monkeypatch.setenv("SLACK_APP_TOKEN", "xapp-test")
     monkeypatch.delenv("SLACK_DEFAULT_CHANNEL", raising=False)
-    monkeypatch.delenv("AGENT_HUB_USER", raising=False)
+    monkeypatch.delenv("AGENT_HUB_PARTICIPANT", raising=False)
     monkeypatch.delenv("AGENT_HUB_DISPLAY_NAME", raising=False)
     monkeypatch.delenv("AGENT_HUB_TENANT", raising=False)
 
@@ -38,7 +38,7 @@ def test_cli_version(capsys: pytest.CaptureFixture[str]) -> None:
 def test_cli_user_defaults_to_slack_bot(
     monkeypatch: pytest.MonkeyPatch, _full_env: None
 ) -> None:
-    """`--user` も env も 無ければ 'slack-bot' に倒れる (= 旧 repo 同等)."""
+    """`--participant` も env も 無ければ 'slack-bot' に倒れる (= 旧 repo 同等)."""
     captured: dict[str, Any] = {}
 
     async def fake_run_worker(config: Any) -> None:
@@ -51,8 +51,8 @@ def test_cli_user_defaults_to_slack_bot(
 
 
 def test_cli_user_from_env(monkeypatch: pytest.MonkeyPatch, _full_env: None) -> None:
-    """`--user` 未指定でも env `AGENT_HUB_USER` があれば そちらを使う."""
-    monkeypatch.setenv("AGENT_HUB_USER", "from-env")
+    """`--participant` 未指定でも env `AGENT_HUB_PARTICIPANT` があれば そちらを使う."""
+    monkeypatch.setenv("AGENT_HUB_PARTICIPANT", "from-env")
     captured: dict[str, Any] = {}
 
     async def fake_run_worker(config: Any) -> None:
@@ -67,14 +67,14 @@ def test_cli_user_from_env(monkeypatch: pytest.MonkeyPatch, _full_env: None) -> 
 def test_cli_user_cli_overrides_env(
     monkeypatch: pytest.MonkeyPatch, _full_env: None
 ) -> None:
-    monkeypatch.setenv("AGENT_HUB_USER", "from-env")
+    monkeypatch.setenv("AGENT_HUB_PARTICIPANT", "from-env")
     captured: dict[str, Any] = {}
 
     async def fake_run_worker(config: Any) -> None:
         captured["config"] = config
 
     monkeypatch.setattr(slack_cli, "run_worker", fake_run_worker)
-    rc = slack_cli.main(["--user", "from-cli"])
+    rc = slack_cli.main(["--participant", "from-cli"])
     assert rc == 0
     assert captured["config"].user == "from-cli"
 
@@ -86,7 +86,7 @@ def test_cli_missing_env_returns_2(
     monkeypatch.delenv("GITHUB_PAT", raising=False)
     monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb")
     monkeypatch.setenv("SLACK_APP_TOKEN", "xapp")
-    rc = slack_cli.main(["--user", "slack-bot"])
+    rc = slack_cli.main(["--participant", "slack-bot"])
     assert rc == 2
     err = capsys.readouterr().err
     assert "error:" in err
@@ -99,7 +99,7 @@ def test_cli_missing_slack_token_returns_2(
     monkeypatch.setenv("GITHUB_PAT", "g")
     monkeypatch.delenv("SLACK_BOT_TOKEN", raising=False)
     monkeypatch.delenv("SLACK_APP_TOKEN", raising=False)
-    rc = slack_cli.main(["--user", "slack-bot"])
+    rc = slack_cli.main(["--participant", "slack-bot"])
     assert rc == 2
     err = capsys.readouterr().err
     assert "SLACK_BOT_TOKEN" in err
