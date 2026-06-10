@@ -8,6 +8,8 @@
 //   journal replay → startup catchup → SSE push 駆動ループ (CommandRouter + handleOne)
 //   SSE SubscribeInbox で is_online=true を維持し、push 受信時のみ GetMessages を発火する (issue #218)。
 //   SIGTERM 受信時は SSE ループ内で runGracefulDrain() を呼んでから exit する (issue #178)。
+//   safety-net poll / heartbeat: SSE が silently dead の場合も定期的に GetMessages を呼ぶ (issue #234)。
+//   poll が失敗 → get_messages エラー → runWorker の reconnect ループが起動する。
 //
 // startupCatchup: bridge 起動時に未読メッセージを処理する (issue #98)。
 //
@@ -39,6 +41,14 @@ const (
 	defaultReconnectBackoffS = 5.0
 	maxRetriesEnv            = "AGENT_HUB_BRIDGE_MAX_RETRIES"
 	defaultMaxRetries        = 10
+)
+
+// safety-net poll 兼 heartbeat の設定 (issue #234)
+const (
+	// inboxPollIntervalEnv は safety-net poll 間隔を秒数で指定する環境変数。
+	// Python SDK の AGENT_HUB_INBOX_POLL_INTERVAL_S と同名で統一。
+	inboxPollIntervalEnv     = "AGENT_HUB_INBOX_POLL_INTERVAL_S"
+	defaultInboxPollInterval = 30 * time.Second
 )
 
 // runWorker はブリッジの outer loop。
@@ -180,6 +190,18 @@ func runHubSession(
 		"display_name", cfg.DisplayName,
 	)
 
+	// safety-net poll / heartbeat: SSE が silently dead になった場合も定期的に
+	// GetMessages を呼び、失敗したら reconnect ループへ戻す (issue #234)。
+	// Python SDK の inbox() の poll_loop + heartbeat_loop に相当。
+	// Go SDK はツール呼び出しを単一 goroutine で行う制約があるため、
+	// ticker を main select に組み込んで main goroutine から呼ぶ。
+	pollInterval := resolveInboxPollInterval()
+	pollTicker := time.NewTicker(pollInterval)
+	defer pollTicker.Stop()
+	slog.Info("runHubSession: safety-net poll enabled",
+		"interval_s", pollInterval.Seconds(),
+	)
+
 	// CommandRouter を生成 (Python の router = CommandRouter() に相当)
 	// SDK の CommandRouter を使う (issue #43)。
 	// on-demand モードでは /restart は no-op になる。
@@ -204,11 +226,14 @@ func runHubSession(
 
 	selfHandle := "@" + cfg.User
 
-	// --- SSE push 駆動ループ (issue #218) ---
-	// ポーリングを廃止し、inbox push 通知を受信したときのみ GetMessages を呼ぶ。
+	// --- SSE push 駆動ループ (issue #218, #234) ---
+	// 通常は inbox push 通知を受信したときのみ GetMessages を呼ぶ。
+	// SSE が silently dead の場合は pollTicker が定期的にトリガーして
+	// GetMessages を呼ぶ (safety-net poll / heartbeat)。
+	// GetMessages 失敗時は runWorker の reconnect ループが起動する。
 	// is_online=true は SSE 接続 (StartSSE + SubscribeInbox) が維持する。
 	for {
-		// push or SIGTERM を待つ
+		// push / safety-net poll / SIGTERM を待つ
 		select {
 		case <-ctx.Done():
 			// issue #178: graceful drain — compact → 未処理メッセージ確認 → 処理 → exit
@@ -217,6 +242,8 @@ func runHubSession(
 			return cursor, true, ctx.Err()
 		case <-pushCh:
 			slog.Debug("runHubSession: inbox push — calling GetMessages")
+		case <-pollTicker.C:
+			slog.Debug("runHubSession: safety-net poll / heartbeat — calling GetMessages")
 		}
 
 		msgs, err := client.GetMessages(ctx)

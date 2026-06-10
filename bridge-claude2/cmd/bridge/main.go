@@ -40,6 +40,7 @@
 //   BRIDGE_COMPACT_ARCHIVE_DIR  optional    compact archive ディレクトリ (SIGTERM compact 時に使用)
 //   BRIDGE_INVENTORY            optional    bridge inventory ファイルパス
 //   AGENT_HUB_BRIDGE_MAX_RETRIES optional   circuit breaker 連続失敗上限 (default: 10, 0=無限)
+//   AGENT_HUB_INBOX_POLL_INTERVAL_S optional safety-net poll / heartbeat 間隔秒数 (default: 30; issue #234)
 //   BRIDGE_LOG_DIR              optional    ログディレクトリ (省略 = ~/.agent-hub/logs/; --log-file が優先)
 //   BRIDGE_LOG_FILE             optional    ログファイルパス (省略 = BRIDGE_LOG_DIR/bridge-<user>.log)
 //
@@ -465,6 +466,25 @@ func orDefault(s, fallback string) string {
 		return s
 	}
 	return fallback
+}
+
+// resolveInboxPollInterval は AGENT_HUB_INBOX_POLL_INTERVAL_S env を解決する。
+// SSE が silently dead の場合に GetMessages を定期的に呼ぶ safety-net poll / heartbeat の間隔。
+// 優先順位: AGENT_HUB_INBOX_POLL_INTERVAL_S env > 30s (default)
+// 値は秒数 (小数点可)。例: "30", "60", "15.5"。
+func resolveInboxPollInterval() time.Duration {
+	if envVal := os.Getenv(inboxPollIntervalEnv); envVal != "" {
+		var n float64
+		if _, err := fmt.Sscan(envVal, &n); err != nil || n <= 0 {
+			slog.Warn("resolveInboxPollInterval: invalid value, using default",
+				"env", inboxPollIntervalEnv, "val", envVal,
+				"default_s", defaultInboxPollInterval.Seconds(),
+			)
+			return defaultInboxPollInterval
+		}
+		return time.Duration(n * float64(time.Second))
+	}
+	return defaultInboxPollInterval
 }
 
 // resolveSubprocessTimeout は --subprocess-timeout フラグ値 (-1 = 未指定) を解決する。
