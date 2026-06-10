@@ -739,7 +739,7 @@ func readSpawnPIDFile(path string) (int, error) {
 }
 
 // stopBridge sends SIGTERM (then SIGKILL on timeout) to the spawned bridge process for handle.
-func stopBridge(handle string) error {
+func stopBridge(handle string, sigTermTimeout time.Duration) error {
 	pidPath, err := spawnPIDFilePath(handle)
 	if err != nil {
 		return fmt.Errorf("resolve pid path: %w", err)
@@ -769,7 +769,7 @@ func stopBridge(handle string) error {
 	}
 	fmt.Printf("sent SIGTERM to @%s (pid=%d)\n", handle, pid)
 
-	deadline := time.Now().Add(15 * time.Second)
+	deadline := time.Now().Add(sigTermTimeout)
 	for time.Now().Before(deadline) {
 		time.Sleep(300 * time.Millisecond)
 		if !isProcessAlive(pid) {
@@ -781,6 +781,16 @@ func stopBridge(handle string) error {
 
 	fmt.Fprintf(os.Stderr, "warning: SIGTERM timeout — sending SIGKILL to @%s (pid=%d)\n", handle, pid)
 	_ = proc.Signal(syscall.SIGKILL)
+
+	// wait up to 2 seconds for the process to exit after SIGKILL
+	killDeadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(killDeadline) {
+		time.Sleep(100 * time.Millisecond)
+		if !isProcessAlive(pid) {
+			break
+		}
+	}
+
 	_ = os.Remove(pidPath)
 	fmt.Printf("bridge @%s killed\n", handle)
 	return nil
@@ -793,6 +803,7 @@ func stopBridge(handle string) error {
 func runRestart(args []string) error {
 	fs := flag.NewFlagSet("restart", flag.ContinueOnError)
 	allFlag := fs.Bool("all", false, "restart all bridges listed in bridges.json registry")
+	timeoutFlag := fs.String("timeout", "30s", "SIGTERM timeout before SIGKILL (e.g. 15s, 1m)")
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: agenthubctl restart @handle\n")
 		fmt.Fprintf(os.Stderr, "       agenthubctl restart --all\n\n")
@@ -802,6 +813,11 @@ func runRestart(args []string) error {
 	}
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+
+	sigTermTimeout, err := time.ParseDuration(*timeoutFlag)
+	if err != nil {
+		return fmt.Errorf("invalid --timeout value %q: %w", *timeoutFlag, err)
 	}
 
 	if *allFlag {
@@ -820,7 +836,7 @@ func runRestart(args []string) error {
 		var failed []string
 		for _, entry := range cfg.Bridges {
 			fmt.Printf("\n=== restarting @%s ===\n", entry.Handle)
-			if err := stopBridge(entry.Handle); err != nil {
+			if err := stopBridge(entry.Handle, sigTermTimeout); err != nil {
 				fmt.Fprintf(os.Stderr, "error stopping @%s: %v\n", entry.Handle, err)
 				failed = append(failed, entry.Handle)
 				continue
@@ -847,7 +863,7 @@ func runRestart(args []string) error {
 		return fmt.Errorf("handle must not be empty")
 	}
 
-	if err := stopBridge(handle); err != nil {
+	if err := stopBridge(handle, sigTermTimeout); err != nil {
 		return fmt.Errorf("stop @%s: %w", handle, err)
 	}
 	return runSpawn([]string{"@" + handle})
