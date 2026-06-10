@@ -7,6 +7,8 @@
 //	status                              Show fleet status (/health endpoint or PID check)
 //	remove @handle                      Remove a persona from fleet.yaml
 //	bridge spawn @handle [flags]        Spawn a single bridge from bridges.json registry
+//	restart @handle                     Stop then re-spawn a specific bridge
+//	restart --all                       Stop then re-spawn all bridges from bridges.json
 //
 // Global flag:
 //
@@ -16,7 +18,7 @@
 //  1. Same directory as agenthubctl
 //  2. PATH
 //
-// Issue: #150, #215
+// Issue: #150, #215, #235
 package main
 
 import (
@@ -54,7 +56,9 @@ func main() {
 		fmt.Fprintf(os.Stderr, "  stop                               Stop the fleet\n")
 		fmt.Fprintf(os.Stderr, "  status                             Show fleet status\n")
 		fmt.Fprintf(os.Stderr, "  remove @handle                     Remove a persona from fleet.yaml\n")
-		fmt.Fprintf(os.Stderr, "  bridge spawn @handle [flags]       Spawn a bridge from bridges.json registry\n\n")
+		fmt.Fprintf(os.Stderr, "  bridge spawn @handle [flags]       Spawn a bridge from bridges.json registry\n")
+		fmt.Fprintf(os.Stderr, "  restart @handle                    Stop then re-spawn a specific bridge\n")
+		fmt.Fprintf(os.Stderr, "  restart --all                      Stop then re-spawn all bridges from bridges.json\n\n")
 		fmt.Fprintf(os.Stderr, "Flags:\n")
 		fs.PrintDefaults()
 	}
@@ -87,6 +91,8 @@ func main() {
 		err = runRemove(*fleetFile, rest[0])
 	case "bridge":
 		err = runBridgeCmd(rest)
+	case "restart":
+		err = runRestart(rest)
 	default:
 		fmt.Fprintf(os.Stderr, "error: unknown command %q\n\n", cmd)
 		fs.Usage()
@@ -679,6 +685,13 @@ func runSpawn(args []string) error {
 		return fmt.Errorf("start bridge-tmux: %w", err)
 	}
 
+	// Save spawn PID file (best-effort — restart command uses this to find the process)
+	if pidPath, err := spawnPIDFilePath(handle); err == nil {
+		if mkErr := os.MkdirAll(filepath.Dir(pidPath), 0o750); mkErr == nil {
+			_ = writeSpawnPIDFile(pidPath, cmd.Process.Pid)
+		}
+	}
+
 	fmt.Printf("bridge spawned (pid=%d)\n", cmd.Process.Pid)
 	fmt.Printf("  handle:  @%s\n", handle)
 	fmt.Printf("  workdir: %s\n", spawnWorkdir)
@@ -692,6 +705,152 @@ func spawnLogPath(handle string) (string, error) {
 		return "", err
 	}
 	return filepath.Join(home, ".agent-hub", "logs", "bridge-"+handle+".log"), nil
+}
+
+// ──────────────────────────────────────────────────────────────────────── //
+// spawn PID file (per-bridge tracking for restart)                         //
+// ──────────────────────────────────────────────────────────────────────── //
+
+func spawnPIDFilePath(handle string) (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".agent-hub", "pids", "bridge-"+handle+".pid"), nil
+}
+
+func writeSpawnPIDFile(path string, pid int) error {
+	return os.WriteFile(path, []byte(strconv.Itoa(pid)+"\n"), 0o644)
+}
+
+func readSpawnPIDFile(path string) (int, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0, err
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil {
+		return 0, fmt.Errorf("parse pid from %q: %w", path, err)
+	}
+	if pid <= 0 {
+		return 0, fmt.Errorf("invalid pid in %q: %d", path, pid)
+	}
+	return pid, nil
+}
+
+// stopBridge sends SIGTERM (then SIGKILL on timeout) to the spawned bridge process for handle.
+func stopBridge(handle string) error {
+	pidPath, err := spawnPIDFilePath(handle)
+	if err != nil {
+		return fmt.Errorf("resolve pid path: %w", err)
+	}
+
+	pid, err := readSpawnPIDFile(pidPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			fmt.Fprintf(os.Stderr, "warning: no pid file for @%s — may not be running as a spawned bridge\n", handle)
+			return nil
+		}
+		return fmt.Errorf("read pid file for @%s: %w", handle, err)
+	}
+
+	if !isProcessAlive(pid) {
+		fmt.Printf("bridge @%s (pid=%d) is not running — removing stale pid file\n", handle, pid)
+		_ = os.Remove(pidPath)
+		return nil
+	}
+
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return fmt.Errorf("find process %d: %w", pid, err)
+	}
+	if err := proc.Signal(syscall.SIGTERM); err != nil {
+		return fmt.Errorf("send SIGTERM to @%s (pid=%d): %w", handle, pid, err)
+	}
+	fmt.Printf("sent SIGTERM to @%s (pid=%d)\n", handle, pid)
+
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		time.Sleep(300 * time.Millisecond)
+		if !isProcessAlive(pid) {
+			fmt.Printf("bridge @%s stopped\n", handle)
+			_ = os.Remove(pidPath)
+			return nil
+		}
+	}
+
+	fmt.Fprintf(os.Stderr, "warning: SIGTERM timeout — sending SIGKILL to @%s (pid=%d)\n", handle, pid)
+	_ = proc.Signal(syscall.SIGKILL)
+	_ = os.Remove(pidPath)
+	fmt.Printf("bridge @%s killed\n", handle)
+	return nil
+}
+
+// ──────────────────────────────────────────────────────────────────────── //
+// restart                                                                   //
+// ──────────────────────────────────────────────────────────────────────── //
+
+func runRestart(args []string) error {
+	fs := flag.NewFlagSet("restart", flag.ContinueOnError)
+	allFlag := fs.Bool("all", false, "restart all bridges listed in bridges.json registry")
+	fs.Usage = func() {
+		fmt.Fprintf(os.Stderr, "Usage: agenthubctl restart @handle\n")
+		fmt.Fprintf(os.Stderr, "       agenthubctl restart --all\n\n")
+		fmt.Fprintf(os.Stderr, "Stop then re-spawn a bridge (or all bridges from bridges.json).\n\n")
+		fmt.Fprintf(os.Stderr, "Flags:\n")
+		fs.PrintDefaults()
+	}
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	if *allFlag {
+		cfgPath, err := bridges.DefaultConfigPath()
+		if err != nil {
+			return fmt.Errorf("resolve config path: %w", err)
+		}
+		cfg, err := bridges.Load(cfgPath)
+		if err != nil {
+			return fmt.Errorf("load bridges.json: %w", err)
+		}
+		if len(cfg.Bridges) == 0 {
+			return fmt.Errorf("bridges.json has no bridge entries")
+		}
+
+		var failed []string
+		for _, entry := range cfg.Bridges {
+			fmt.Printf("\n=== restarting @%s ===\n", entry.Handle)
+			if err := stopBridge(entry.Handle); err != nil {
+				fmt.Fprintf(os.Stderr, "error stopping @%s: %v\n", entry.Handle, err)
+				failed = append(failed, entry.Handle)
+				continue
+			}
+			if err := runSpawn([]string{"@" + entry.Handle}); err != nil {
+				fmt.Fprintf(os.Stderr, "error spawning @%s: %v\n", entry.Handle, err)
+				failed = append(failed, entry.Handle)
+			}
+		}
+		if len(failed) > 0 {
+			return fmt.Errorf("restart failed for: %s", strings.Join(failed, ", "))
+		}
+		fmt.Printf("\nrestarted %d bridge(s)\n", len(cfg.Bridges))
+		return nil
+	}
+
+	rest := fs.Args()
+	if len(rest) == 0 {
+		fs.Usage()
+		return fmt.Errorf("@handle or --all is required")
+	}
+	handle := strings.TrimPrefix(rest[0], "@")
+	if handle == "" {
+		return fmt.Errorf("handle must not be empty")
+	}
+
+	if err := stopBridge(handle); err != nil {
+		return fmt.Errorf("stop @%s: %w", handle, err)
+	}
+	return runSpawn([]string{"@" + handle})
 }
 
 // ──────────────────────────────────────────────────────────────────────── //

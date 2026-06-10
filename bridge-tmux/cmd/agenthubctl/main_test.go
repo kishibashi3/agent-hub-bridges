@@ -380,6 +380,107 @@ func TestSpawnLogPath(t *testing.T) {
 }
 
 // ──────────────────────────────────────────────────────────────────────── //
+// spawnPIDFilePath / writeSpawnPIDFile / readSpawnPIDFile                   //
+// ──────────────────────────────────────────────────────────────────────── //
+
+func TestSpawnPIDFilePath(t *testing.T) {
+	path, err := spawnPIDFilePath("reviewer")
+	if err != nil {
+		t.Fatalf("spawnPIDFilePath: %v", err)
+	}
+	if !strings.HasSuffix(path, filepath.Join(".agent-hub", "pids", "bridge-reviewer.pid")) {
+		t.Errorf("unexpected pid path: %q", path)
+	}
+}
+
+func TestWriteReadSpawnPIDFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "bridge-test.pid")
+
+	if err := writeSpawnPIDFile(path, 42); err != nil {
+		t.Fatalf("writeSpawnPIDFile: %v", err)
+	}
+
+	pid, err := readSpawnPIDFile(path)
+	if err != nil {
+		t.Fatalf("readSpawnPIDFile: %v", err)
+	}
+	if pid != 42 {
+		t.Errorf("pid = %d, want 42", pid)
+	}
+}
+
+func TestReadSpawnPIDFile_NotExist(t *testing.T) {
+	_, err := readSpawnPIDFile("/nonexistent/bridge-x.pid")
+	if err == nil {
+		t.Fatal("expected error for missing file, got nil")
+	}
+	if !os.IsNotExist(err) {
+		t.Errorf("expected os.ErrNotExist, got %v", err)
+	}
+}
+
+func TestReadSpawnPIDFile_InvalidContent(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "bad.pid")
+	if err := os.WriteFile(path, []byte("notanumber\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	_, err := readSpawnPIDFile(path)
+	if err == nil {
+		t.Fatal("expected error for non-numeric content, got nil")
+	}
+}
+
+func TestReadSpawnPIDFile_ZeroPID(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "zero.pid")
+	if err := os.WriteFile(path, []byte("0\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	_, err := readSpawnPIDFile(path)
+	if err == nil {
+		t.Fatal("expected error for pid=0, got nil")
+	}
+}
+
+// ──────────────────────────────────────────────────────────────────────── //
+// stopBridge                                                                //
+// ──────────────────────────────────────────────────────────────────────── //
+
+func TestStopBridge_NoPIDFile(t *testing.T) {
+	// No PID file → warning only, no error
+	t.Setenv("HOME", t.TempDir())
+	if err := stopBridge("nonexistent-handle"); err != nil {
+		t.Errorf("expected nil for missing pid file, got %v", err)
+	}
+}
+
+func TestStopBridge_StalePIDFile(t *testing.T) {
+	// PID file exists but process is gone → stale file removed, no error
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	pidDir := filepath.Join(home, ".agent-hub", "pids")
+	if err := os.MkdirAll(pidDir, 0o750); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	pidPath := filepath.Join(pidDir, "bridge-test.pid")
+	if err := writeSpawnPIDFile(pidPath, 999999999); err != nil {
+		t.Fatalf("write pid: %v", err)
+	}
+
+	if err := stopBridge("test"); err != nil {
+		t.Errorf("unexpected error for stale pid: %v", err)
+	}
+
+	// PID file should have been cleaned up
+	if _, err := os.Stat(pidPath); !os.IsNotExist(err) {
+		t.Error("expected stale pid file to be removed")
+	}
+}
+
+// ──────────────────────────────────────────────────────────────────────── //
 // health snapshot parsing                                                   //
 // ──────────────────────────────────────────────────────────────────────── //
 

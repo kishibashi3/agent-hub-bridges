@@ -6,6 +6,17 @@ All notable changes to `agent-hub-bridges` are recorded here. Format follows
 adheres loosely to [Semantic Versioning](https://semver.org/); breaking
 changes between minor versions are possible until `v1.0.0`.
 
+## [0.3.1] — 2026-06-11
+
+### Added — agenthubctl restart コマンド (issue #235)
+
+- **agenthubctl**: `restart @handle` / `restart --all` コマンドを追加。
+  - `restart @handle`: 指定 bridge を stop (SIGTERM→SIGKILL) して re-spawn する
+  - `restart --all`: `bridges.json` に登録された全 bridge を一括 restart する
+  - `bridge spawn` 実行時に `~/.agent-hub/pids/bridge-<handle>.pid` を書き出すようになった。
+    `restart` はこの PID ファイルを使って対象プロセスを特定する。
+  - PID ファイルが存在しない場合 (= spawn 以外の方法で起動された bridge) は警告を出して spawn のみ実行する。
+
 ## [0.3.0] — 2026-06-10
 
 ### Added — GitHub App IAT モード (issue #73)
