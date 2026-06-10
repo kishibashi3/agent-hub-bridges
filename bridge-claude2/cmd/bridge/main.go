@@ -102,6 +102,9 @@ type config struct {
 	SubprocessTimeout time.Duration
 	// MaxQueryRetries は subprocess timeout 時のリトライ上限 (0 = リトライなし)。
 	MaxQueryRetries int
+	// ScannerBufferSize は stream-json bufio.Scanner のバッファサイズ (bytes)。
+	// AGENT_HUB_SCANNER_BUFFER_SIZE env で設定可能 (例: "4MB", "8MB")。デフォルト 4MB。
+	ScannerBufferSize int
 }
 
 func parseConfig() (*config, error) {
@@ -201,6 +204,12 @@ func parseConfig() (*config, error) {
 		return nil, err
 	}
 
+	// scanner-buffer-size: AGENT_HUB_SCANNER_BUFFER_SIZE env > 4MB
+	resolvedScannerBufferSize, err := resolveScannerBufferSize()
+	if err != nil {
+		return nil, err
+	}
+
 	// display_name: --display-name フラグ > "{user} — go bridge"
 	resolvedDisplayName := *displayName
 	if resolvedDisplayName == "" {
@@ -241,6 +250,7 @@ func parseConfig() (*config, error) {
 		MaxRetries:        *maxRetries,
 		SubprocessTimeout: resolvedSubprocessTimeout,
 		MaxQueryRetries:   resolvedMaxQueryRetries,
+		ScannerBufferSize: resolvedScannerBufferSize,
 	}, nil
 }
 
@@ -397,6 +407,7 @@ func main() {
 		"model", orDefault(cfg.Model, "(claude default)"),
 		"subprocess_timeout_s", cfg.SubprocessTimeout.Seconds(),
 		"max_query_retries", cfg.MaxQueryRetries,
+		"scanner_buffer_size", cfg.ScannerBufferSize,
 		"add_dirs_count", len(cfg.AddDirs),
 		"log_file", orDefault(cfg.LogFile, "(stderr only)"),
 	)
@@ -487,4 +498,45 @@ func resolveMaxQueryRetries(flagVal int) (int, error) {
 		return n, nil
 	}
 	return 2, nil
+}
+
+// resolveScannerBufferSize は AGENT_HUB_SCANNER_BUFFER_SIZE env を解決する。
+// 優先順位: AGENT_HUB_SCANNER_BUFFER_SIZE env > 4MB (default)
+// 受け付けるフォーマット: "<n>MB" または "<n>KB" (大文字小文字不問)。例: "4MB", "8MB", "512KB"。
+func resolveScannerBufferSize() (int, error) {
+	const defaultSize = 4 * 1024 * 1024 // 4MB
+	envVal := os.Getenv("AGENT_HUB_SCANNER_BUFFER_SIZE")
+	if envVal == "" {
+		return defaultSize, nil
+	}
+	n, err := parseByteSize(envVal)
+	if err != nil {
+		return 0, fmt.Errorf("AGENT_HUB_SCANNER_BUFFER_SIZE %q: %w", envVal, err)
+	}
+	if n <= 0 {
+		return 0, fmt.Errorf("AGENT_HUB_SCANNER_BUFFER_SIZE %q: must be positive", envVal)
+	}
+	return n, nil
+}
+
+// parseByteSize は "<n>MB" / "<n>KB" 形式の文字列を bytes に変換する。
+func parseByteSize(s string) (int, error) {
+	upper := strings.ToUpper(strings.TrimSpace(s))
+	var multiplier int
+	var numStr string
+	switch {
+	case strings.HasSuffix(upper, "MB"):
+		multiplier = 1024 * 1024
+		numStr = strings.TrimSuffix(upper, "MB")
+	case strings.HasSuffix(upper, "KB"):
+		multiplier = 1024
+		numStr = strings.TrimSuffix(upper, "KB")
+	default:
+		return 0, fmt.Errorf("unsupported unit: must end with MB or KB (e.g. \"4MB\", \"512KB\")")
+	}
+	var n int
+	if _, err := fmt.Sscan(strings.TrimSpace(numStr), &n); err != nil {
+		return 0, fmt.Errorf("cannot parse number %q: %w", numStr, err)
+	}
+	return n * multiplier, nil
 }
