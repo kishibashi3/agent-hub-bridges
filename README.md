@@ -39,23 +39,23 @@ backward compatibility — existing systemd / supervisord units do **not** need 
 
 ```bash
 # bridge-claude2 (Go — recommended)
-./bridge-claude2/bridge-claude2 --user claude-impl --tenant my-tenant --workdir /path/to/project
+./bridge-claude2/bridge-claude2 --participant claude-impl --tenant my-tenant --workdir /path/to/project
 
 # Deprecated — use bridge-claude2 instead
-agent-hub-bridge-claude --user claude-impl --tenant my-tenant --workdir /path/to/project
+agent-hub-bridge-claude --participant claude-impl --tenant my-tenant --workdir /path/to/project
 agent-hub-bridge-slack
-agent-hub-bridge-gemini --user gemini-impl --tenant my-tenant --workdir /path/to/project
-agent-hub-bridge-a2a --user external-agent
+agent-hub-bridge-gemini --participant gemini-impl --tenant my-tenant --workdir /path/to/project
+agent-hub-bridge-a2a --participant external-agent
 ```
 
 Use `--add-dir` to include additional directories beyond `workdir` in Claude's project context (can be specified multiple times):
 
 ```bash
 # bridge-claude2 (Go — recommended)
-./bridge-claude2/bridge-claude2 --user writer --workdir /path/to/writer --add-dir /path/to/publications --add-dir /path/to/shared
+./bridge-claude2/bridge-claude2 --participant writer --workdir /path/to/writer --add-dir /path/to/publications --add-dir /path/to/shared
 
 # Deprecated — use bridge-claude2 instead
-agent-hub-bridge-claude --user writer --workdir /path/to/writer --add-dir /path/to/publications --add-dir /path/to/shared
+agent-hub-bridge-claude --participant writer --workdir /path/to/writer --add-dir /path/to/publications --add-dir /path/to/shared
 ```
 
 Required env (shared by all bridges):
