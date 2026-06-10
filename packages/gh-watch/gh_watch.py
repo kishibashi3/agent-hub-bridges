@@ -16,7 +16,7 @@ Resource 書式:
   github/<owner>/<repo>/<resource-type>/<identifier>
   例: github/kishibashi3/agent-hub/pr/*
       github/kishibashi3/agent-hub/pr/100
-      github/kishibashi3/agent-hub/issues/*
+      github/kishibashi3/agent-hub/issue/*
 
 対応イベント種別:
   pr_opened, pr_closed, pr_merged, ci_complete, ci_success, ci_failure,
@@ -528,7 +528,7 @@ def handle_inbox_message(
         event_type = parsed["event_type"]
         label = parsed["label"] or None
 
-        if not RESOURCE_PATTERN.match(resource) and resource.split("/")[-1] != "*":
+        if not RESOURCE_PATTERN.match(resource):
             _send_message(
                 session_id, headers, sender,
                 f"resource 書式が不正です: `{resource}`\n"
@@ -604,8 +604,6 @@ def handle_inbox_message(
 
 
 def _verify_signature(body: bytes, signature: str) -> bool:
-    if not WEBHOOK_SECRET:
-        return True  # secret 未設定時は検証スキップ
     expected = "sha256=" + hmac.new(
         WEBHOOK_SECRET.encode("utf-8"), body, hashlib.sha256
     ).hexdigest()
@@ -631,7 +629,7 @@ class _WebhookHandler(http.server.BaseHTTPRequestHandler):
         body = self.rfile.read(length)
 
         sig = self.headers.get("X-Hub-Signature-256", "")
-        if WEBHOOK_SECRET and not _verify_signature(body, sig):
+        if not _verify_signature(body, sig):
             logger.warning("webhook signature verification failed")
             self.send_response(401)
             self.end_headers()
@@ -787,6 +785,10 @@ def main() -> None:
 
     signal.signal(signal.SIGTERM, _on_signal)
     signal.signal(signal.SIGINT, _on_signal)
+
+    if not WEBHOOK_SECRET:
+        logger.error("GH_WATCH_WEBHOOK_SECRET is required — set the GitHub App webhook secret")
+        sys.exit(1)
 
     logger.info("gh-watch starting: handle=@%s hub=%s webhook_port=%d", SELF_HANDLE, HUB_URL, WEBHOOK_PORT)
 
