@@ -8,6 +8,18 @@ changes between minor versions are possible until `v1.0.0`.
 
 ## [0.3.0] — 2026-06-10
 
+### Added — GitHub App IAT モード (issue #73)
+
+- **bridge-claude-p / client-codex / bridge-gemini**: `Engine.create()` 内で
+  `IATManager.from_env()` を一度だけ呼び `self._iat_mgr` に保持するよう修正。
+  従来は `_build_env()` を呼ぶたびに新規インスタンスを生成していたため、
+  リクエストごとに GitHub API フェッチが発生していた (PR #228 Critical 修正)。
+- **bridge-claude-p / client-codex / bridge-gemini**: `_build_env()` で
+  `GITHUB_APP_*` 環境変数を子プロセス env から除外するよう修正 (秘密鍵漏洩防止)。
+- `.env.example`: `GITHUB_APP_ID / GITHUB_APP_PRIVATE_KEY / GITHUB_APP_INSTALLATION_ID`
+  の記載を追加、`AGENT_HUB_USER` → `AGENT_HUB_PARTICIPANT` 置換。
+- `README.md`: `--user` → `--participant` 置換 (6 箇所)。
+
 ### Changed — AGENT_HUB_USER → AGENT_HUB_PARTICIPANT / --user → --participant (issue #224) **BREAKING**
 
 - **全 bridge (claude / claude_p / gemini / slack / a2a / codex / client_codex)**:

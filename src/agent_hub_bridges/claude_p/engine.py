@@ -28,6 +28,7 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
+from agent_hub_bridges._common.github_iat import IATManager
 from agent_hub_bridges.claude_p.config import Config
 
 logger = logging.getLogger(__name__)
@@ -62,11 +63,13 @@ class ClaudePCLIEngine:
         mcp_config_path: Path,
         cli_path: str,
         timeout_s: float,
+        iat_mgr: IATManager | None = None,
     ) -> None:
         self._config = config
         self._mcp_config_path = mcp_config_path
         self._cli_path = cli_path
         self._timeout_s = timeout_s
+        self._iat_mgr = iat_mgr
 
     @classmethod
     def create(cls, config: Config) -> ClaudePCLIEngine:
@@ -98,6 +101,7 @@ class ClaudePCLIEngine:
             mcp_config_path=mcp_config_path,
             cli_path=cli_path,
             timeout_s=timeout_s,
+            iat_mgr=IATManager.from_env(),
         )
 
     def close(self) -> None:
@@ -212,24 +216,21 @@ class ClaudePCLIEngine:
         GH_TOKEN: GITHUB_APP_* が設定されている場合は IAT を注入し、gh CLI が
         AgentHub [bot] 名義でコメントを投稿できるようにする (issue #73)。
         未設定の場合は GH_TOKEN を変更しない (PAT fallback = 従来動作)。
+        GITHUB_APP_* は子プロセス env から除外する (漏洩防止)。
         """
-        from agent_hub_bridges._common.github_iat import IATManager
-
         env = os.environ.copy()
         env["GITHUB_PAT"] = self._config.github_pat
         # ANTHROPIC_API_KEY を除外: subscription auth 優先、API billing 回避。
-        # 親 env にあっても subprocess には渡さない (設計: design-bridge-claude-p.md §4)。
         env.pop("ANTHROPIC_API_KEY", None)
+        # GITHUB_APP_* を除外: IAT は GH_TOKEN として注入済みなので秘密鍵等を子プロセスに渡さない。
+        for key in list(env):
+            if key.startswith("GITHUB_APP_"):
+                del env[key]
 
-        # GITHUB_APP_* (private key / app ID) はサブプロセスに渡さない — security。
-        for k in [k for k in env if k.startswith("GITHUB_APP_")]:
-            del env[k]
-
-        # GitHub App IAT モード (issue #73): GITHUB_APP_* が揃っていれば IAT を注入。
-        mgr = IATManager.from_env()
-        if mgr is not None:
+        # GitHub App IAT モード (issue #73)
+        if self._iat_mgr is not None:
             try:
-                env["GH_TOKEN"] = mgr.get_token()
+                env["GH_TOKEN"] = self._iat_mgr.get_token()
             except Exception:
                 logger.warning(
                     "github_iat: IAT fetch failed, falling back to default gh auth",

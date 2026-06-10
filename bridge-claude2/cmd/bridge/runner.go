@@ -22,7 +22,6 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -33,10 +32,6 @@ import (
 
 	githubclient "github.com/kishibashi3/agent-hub-bridges/packages/github-client"
 )
-
-// errSubprocessTimeout は SubprocessTimeout によって subprocess がキルされたことを示す sentinel。
-// worker.go の handleOne がリトライ判定に使う。context.Canceled (SIGTERM) とは区別される。
-var errSubprocessTimeout = errors.New("subprocess timeout")
 
 // streamAssistantContent は stream-json の assistant メッセージ内の content block。
 // tool_use の blocking 検出に使う。
@@ -179,13 +174,9 @@ func (r *claudeRunner) query(ctx context.Context, prompt, sessionID string, trac
 		// queryCtx がタイムアウト/キャンセルされて subprocess がキルされた場合、
 		// readUntilResult の ctx.Done() チェックは scanner.Scan() ブロック中には
 		// 効かないため EOF エラーとして返ってくる。実態を明示する。
-		if queryCtx.Err() == context.DeadlineExceeded {
-			// SubprocessTimeout が発火してキルされた。errSubprocessTimeout で wrap して
-			// handleOne の retry 判定が context.Canceled (SIGTERM) と区別できるようにする。
-			resultErr = fmt.Errorf("%w (SubprocessTimeout=%s): %v",
-				errSubprocessTimeout, r.cfg.SubprocessTimeout, queryCtx.Err())
-		} else if queryCtx.Err() != nil {
-			resultErr = fmt.Errorf("claude subprocess killed (ctx cancelled): %w", queryCtx.Err())
+		if queryCtx.Err() != nil {
+			resultErr = fmt.Errorf("claude subprocess killed (SubprocessTimeout=%s): %w",
+				r.cfg.SubprocessTimeout, queryCtx.Err())
 		} else if waitErr != nil {
 			resultErr = fmt.Errorf("%w (subprocess exit: %v)", resultErr, waitErr)
 		}
@@ -246,20 +237,13 @@ func (r *claudeRunner) spawnSubprocess(ctx context.Context) (*exec.Cmd, io.Write
 
 	// GitHub App IAT モード (issue #73): IAT manager が設定されていれば GH_TOKEN を注入する。
 	// gh CLI は GH_TOKEN を GITHUB_TOKEN より優先して使うため、これで bot identity になる。
-	// GITHUB_APP_* (private key / app ID / installation ID) はサブプロセスに渡さない — security。
+	// GITHUB_APP_* は子プロセスに渡さない（秘密鍵漏洩防止）。
 	if r.iatMgr != nil {
 		tok, err := r.iatMgr.GetToken(ctx)
 		if err != nil {
 			slog.Warn("runner: IAT fetch failed, falling back to default gh auth", "err", err)
 		} else {
-			base := os.Environ()
-			filtered := make([]string, 0, len(base)+1)
-			for _, e := range base {
-				if !strings.HasPrefix(e, "GITHUB_APP_") {
-					filtered = append(filtered, e)
-				}
-			}
-			cmd.Env = append(filtered, "GH_TOKEN="+tok)
+			cmd.Env = append(filteredEnv(), "GH_TOKEN="+tok)
 		}
 	}
 
@@ -277,8 +261,22 @@ func (r *claudeRunner) spawnSubprocess(ctx context.Context) (*exec.Cmd, io.Write
 		return nil, nil, nil, fmt.Errorf("runner: start subprocess: %w", err)
 	}
 	scanner := bufio.NewScanner(stdoutPipe)
-	scanner.Buffer(make([]byte, r.cfg.ScannerBufferSize), r.cfg.ScannerBufferSize)
+	scanner.Buffer(make([]byte, 512*1024), 512*1024) // 512 KB
 	return cmd, stdinPipe, scanner, nil
+}
+
+// filteredEnv は os.Environ() から GITHUB_APP_* を除いた環境変数スライスを返す。
+// IAT 注入時に秘密鍵等が子プロセスに漏洩しないようにする。
+func filteredEnv() []string {
+	raw := os.Environ()
+	filtered := make([]string, 0, len(raw))
+	for _, kv := range raw {
+		if strings.HasPrefix(kv, "GITHUB_APP_") {
+			continue
+		}
+		filtered = append(filtered, kv)
+	}
+	return filtered
 }
 
 // writeJSON は v を JSON としてエンコードして w に書き込む。

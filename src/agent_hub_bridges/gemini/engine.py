@@ -34,6 +34,7 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
+from agent_hub_bridges._common.github_iat import IATManager
 from agent_hub_bridges.gemini.config import Config
 
 logger = logging.getLogger(__name__)
@@ -168,6 +169,7 @@ class GeminiCLIEngine:
         max_retries: int = DEFAULT_MAX_RETRIES,
         backoff_base_s: float = DEFAULT_BACKOFF_BASE_S,
         backoff_cap_s: float = DEFAULT_BACKOFF_CAP_S,
+        iat_mgr: IATManager | None = None,
     ) -> None:
         self._config = config
         self._home_dir = home_dir
@@ -176,6 +178,7 @@ class GeminiCLIEngine:
         self._max_retries = max(max_retries, 0)
         self._backoff_base_s = max(backoff_base_s, 0.0)
         self._backoff_cap_s = max(backoff_cap_s, self._backoff_base_s)
+        self._iat_mgr = iat_mgr
 
     @classmethod
     def create(cls, config: Config) -> GeminiCLIEngine:
@@ -231,6 +234,7 @@ class GeminiCLIEngine:
             max_retries=max_retries,
             backoff_base_s=backoff_base_s,
             backoff_cap_s=backoff_cap_s,
+            iat_mgr=IATManager.from_env(),
         )
 
     def close(self) -> None:
@@ -418,23 +422,21 @@ class GeminiCLIEngine:
         - GITHUB_PAT は settings.json の `${GITHUB_PAT}` interpolation で
           参照されるので、確実に export しておく
         - GH_TOKEN: GITHUB_APP_* が設定されている場合は IAT を注入 (issue #73)。
+        - GITHUB_APP_* は子プロセス env から除外する (漏洩防止)。
         """
-        from agent_hub_bridges._common.github_iat import IATManager
-
         env = os.environ.copy()
         env["HOME"] = str(self._home_dir)
         env["GITHUB_PAT"] = self._config.github_pat
         env["GEMINI_API_KEY"] = self._config.gemini_api_key
-
-        # GITHUB_APP_* (private key / app ID) はサブプロセスに渡さない — security。
-        for k in [k for k in env if k.startswith("GITHUB_APP_")]:
-            del env[k]
+        # GITHUB_APP_* を除外: IAT は GH_TOKEN として注入済みなので秘密鍵等を子プロセスに渡さない。
+        for key in list(env):
+            if key.startswith("GITHUB_APP_"):
+                del env[key]
 
         # GitHub App IAT モード (issue #73)
-        mgr = IATManager.from_env()
-        if mgr is not None:
+        if self._iat_mgr is not None:
             try:
-                env["GH_TOKEN"] = mgr.get_token()
+                env["GH_TOKEN"] = self._iat_mgr.get_token()
             except Exception:
                 logger.warning(
                     "github_iat: IAT fetch failed, falling back to default gh auth",
