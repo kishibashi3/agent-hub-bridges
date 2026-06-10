@@ -35,6 +35,8 @@
 //   AGENT_HUB_JOURNAL_DIR       optional    journal ディレクトリ
 //   AGENT_HUB_BUSY_WINDOW_S     optional    /status busy 判定ウィンドウ秒数 (default: 60)
 //   AGENT_HUB_PUSH_SILENT_THRESHOLD_S optional gap 警告閾値秒数 (default: 25)
+//   AGENT_HUB_SUBPROCESS_TIMEOUT optional   claude subprocess 最大実行時間 (Go duration: "30m", "1h", "0" = 無制限; --subprocess-timeout フラグが優先)
+//   AGENT_HUB_MAX_QUERY_RETRIES optional    subprocess timeout 時のリトライ上限 (default: 2; --max-query-retries フラグが優先)
 //   BRIDGE_COMPACT_ARCHIVE_DIR  optional    compact archive ディレクトリ (SIGTERM compact 時に使用)
 //   BRIDGE_INVENTORY            optional    bridge inventory ファイルパス
 //   AGENT_HUB_BRIDGE_MAX_RETRIES optional   circuit breaker 連続失敗上限 (default: 10, 0=無限)
@@ -98,6 +100,11 @@ type config struct {
 	MaxRetries int
 	// SubprocessTimeout は runner.query の最大実行時間 (0 = タイムアウトなし)。
 	SubprocessTimeout time.Duration
+	// MaxQueryRetries は subprocess timeout 時のリトライ上限 (0 = リトライなし)。
+	MaxQueryRetries int
+	// ScannerBufferSize は stream-json bufio.Scanner のバッファサイズ (bytes)。
+	// AGENT_HUB_SCANNER_BUFFER_SIZE env で設定可能 (例: "4MB", "8MB")。デフォルト 4MB。
+	ScannerBufferSize int
 }
 
 func parseConfig() (*config, error) {
@@ -112,7 +119,8 @@ func parseConfig() (*config, error) {
 		logFile           = flag.String("log-file", "", "log file path (default: ~/.agent-hub/logs/bridge-<user>.log; overrides BRIDGE_LOG_DIR/BRIDGE_LOG_FILE)")
 		reconnectBackoff  = flag.Duration("reconnect-backoff", 5*time.Second, "backoff on MCP reconnect")
 		maxRetries        = flag.Int("max-retries", 10, "circuit breaker: max consecutive get_messages failures (0 = unlimited)")
-		subprocessTimeout = flag.Duration("subprocess-timeout", 10*time.Minute, "claude subprocess max runtime per query (0 = no timeout)")
+		subprocessTimeout = flag.Duration("subprocess-timeout", -1, "claude subprocess max runtime per query (0 = no timeout; -1 = use AGENT_HUB_SUBPROCESS_TIMEOUT env or default 30m)")
+		maxQueryRetries   = flag.Int("max-query-retries", -1, "max retries on subprocess timeout per message (-1 = use AGENT_HUB_MAX_QUERY_RETRIES env or default 2; 0 = no retry)")
 		showVersion       = flag.Bool("version", false, "print version and exit")
 		addDirs           stringSlice
 	)
@@ -184,6 +192,24 @@ func parseConfig() (*config, error) {
 		resolvedModel = os.Getenv("AGENT_HUB_MODEL")
 	}
 
+	// subprocess-timeout: --subprocess-timeout フラグ (0 = 未指定) > AGENT_HUB_SUBPROCESS_TIMEOUT env > 30m
+	resolvedSubprocessTimeout, err := resolveSubprocessTimeout(*subprocessTimeout)
+	if err != nil {
+		return nil, err
+	}
+
+	// max-query-retries: --max-query-retries フラグ (-1 = 未指定) > AGENT_HUB_MAX_QUERY_RETRIES env > 2
+	resolvedMaxQueryRetries, err := resolveMaxQueryRetries(*maxQueryRetries)
+	if err != nil {
+		return nil, err
+	}
+
+	// scanner-buffer-size: AGENT_HUB_SCANNER_BUFFER_SIZE env > 4MB
+	resolvedScannerBufferSize, err := resolveScannerBufferSize()
+	if err != nil {
+		return nil, err
+	}
+
 	// display_name: --display-name フラグ > "{user} — go bridge"
 	resolvedDisplayName := *displayName
 	if resolvedDisplayName == "" {
@@ -222,7 +248,9 @@ func parseConfig() (*config, error) {
 		LogFile:           resolvedLogFile,
 		ReconnectBackoff:  *reconnectBackoff,
 		MaxRetries:        *maxRetries,
-		SubprocessTimeout: *subprocessTimeout,
+		SubprocessTimeout: resolvedSubprocessTimeout,
+		MaxQueryRetries:   resolvedMaxQueryRetries,
+		ScannerBufferSize: resolvedScannerBufferSize,
 	}, nil
 }
 
@@ -378,6 +406,8 @@ func main() {
 		"mode", cfg.Mode,
 		"model", orDefault(cfg.Model, "(claude default)"),
 		"subprocess_timeout_s", cfg.SubprocessTimeout.Seconds(),
+		"max_query_retries", cfg.MaxQueryRetries,
+		"scanner_buffer_size", cfg.ScannerBufferSize,
 		"add_dirs_count", len(cfg.AddDirs),
 		"log_file", orDefault(cfg.LogFile, "(stderr only)"),
 	)
@@ -435,4 +465,78 @@ func orDefault(s, fallback string) string {
 		return s
 	}
 	return fallback
+}
+
+// resolveSubprocessTimeout は --subprocess-timeout フラグ値 (-1 = 未指定) を解決する。
+// 優先順位: flagVal (>=0) > AGENT_HUB_SUBPROCESS_TIMEOUT env > 30m (default)
+// 0 はタイムアウト無効を意味するため、未指定 sentinel は -1 を使う。
+func resolveSubprocessTimeout(flagVal time.Duration) (time.Duration, error) {
+	if flagVal >= 0 {
+		return flagVal, nil
+	}
+	if envVal := os.Getenv("AGENT_HUB_SUBPROCESS_TIMEOUT"); envVal != "" {
+		d, err := time.ParseDuration(envVal)
+		if err != nil {
+			return 0, fmt.Errorf("AGENT_HUB_SUBPROCESS_TIMEOUT %q: %w", envVal, err)
+		}
+		return d, nil
+	}
+	return 30 * time.Minute, nil
+}
+
+// resolveMaxQueryRetries は --max-query-retries フラグ値 (-1 = 未指定) を解決する。
+// 優先順位: flagVal (>=0) > AGENT_HUB_MAX_QUERY_RETRIES env > 2 (default)
+func resolveMaxQueryRetries(flagVal int) (int, error) {
+	if flagVal >= 0 {
+		return flagVal, nil
+	}
+	if envVal := os.Getenv("AGENT_HUB_MAX_QUERY_RETRIES"); envVal != "" {
+		var n int
+		if _, err := fmt.Sscan(envVal, &n); err != nil || n < 0 {
+			return 0, fmt.Errorf("AGENT_HUB_MAX_QUERY_RETRIES %q: must be a non-negative integer", envVal)
+		}
+		return n, nil
+	}
+	return 2, nil
+}
+
+// resolveScannerBufferSize は AGENT_HUB_SCANNER_BUFFER_SIZE env を解決する。
+// 優先順位: AGENT_HUB_SCANNER_BUFFER_SIZE env > 4MB (default)
+// 受け付けるフォーマット: "<n>MB" または "<n>KB" (大文字小文字不問)。例: "4MB", "8MB", "512KB"。
+func resolveScannerBufferSize() (int, error) {
+	const defaultSize = 4 * 1024 * 1024 // 4MB
+	envVal := os.Getenv("AGENT_HUB_SCANNER_BUFFER_SIZE")
+	if envVal == "" {
+		return defaultSize, nil
+	}
+	n, err := parseByteSize(envVal)
+	if err != nil {
+		return 0, fmt.Errorf("AGENT_HUB_SCANNER_BUFFER_SIZE %q: %w", envVal, err)
+	}
+	if n <= 0 {
+		return 0, fmt.Errorf("AGENT_HUB_SCANNER_BUFFER_SIZE %q: must be positive", envVal)
+	}
+	return n, nil
+}
+
+// parseByteSize は "<n>MB" / "<n>KB" 形式の文字列を bytes に変換する。
+func parseByteSize(s string) (int, error) {
+	upper := strings.ToUpper(strings.TrimSpace(s))
+	var multiplier int
+	var numStr string
+	switch {
+	case strings.HasSuffix(upper, "MB"):
+		multiplier = 1024 * 1024
+		numStr = strings.TrimSuffix(upper, "MB")
+	case strings.HasSuffix(upper, "KB"):
+		multiplier = 1024
+		numStr = strings.TrimSuffix(upper, "KB")
+	default:
+		return 0, fmt.Errorf("unsupported unit: must end with MB or KB (e.g. \"4MB\", \"512KB\")")
+	}
+	var n int
+	if _, err := fmt.Sscan(strings.TrimSpace(numStr), &n); err != nil {
+		return 0, fmt.Errorf("cannot parse number %q: %w", numStr, err)
+	}
+	return n * multiplier, nil
 }

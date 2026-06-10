@@ -2,7 +2,7 @@
 # stop-bridge.sh — bridge worker を停止して inventory を更新する
 #
 # 使い方:
-#   scripts/stop-bridge.sh --user <handle>     # 単体停止
+#   scripts/stop-bridge.sh --participant <handle>     # 単体停止
 #   scripts/stop-bridge.sh --dead              # hub 切断中 bridge を一括終了
 #
 # --dead モード:
@@ -32,12 +32,12 @@ fi
 # ---------------------------------------------------------------------------
 # 引数パース
 # ---------------------------------------------------------------------------
-mode="user"  # default: --user モード
+mode="user"  # default: --participant モード
 user_handle=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --user)
+        --participant)
             user_handle="$2"
             mode="user"
             shift 2
@@ -47,17 +47,17 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         -h|--help)
-            echo "usage: $0 --user <handle>"     >&2
+            echo "usage: $0 --participant <handle>"     >&2
             echo "       $0 --dead"              >&2
             echo ""                              >&2
-            echo "  --user <handle>  指定 bridge を停止して inventory を更新する" >&2
-            echo "  --dead           dead marker (/tmp/agent-hub-bridge-*.dead) の" >&2
-            echo "                   bridge を一括 kill して inventory を更新する"  >&2
+            echo "  --participant <handle>  指定 bridge を停止して inventory を更新する" >&2
+            echo "  --dead                 dead marker (/tmp/agent-hub-bridge-*.dead) の" >&2
+            echo "                         bridge を一括 kill して inventory を更新する"  >&2
             exit 0
             ;;
         *)
             echo "error: unknown argument: $1" >&2
-            echo "usage: $0 --user <handle> | --dead" >&2
+            echo "usage: $0 --participant <handle> | --dead" >&2
             exit 2
             ;;
     esac
@@ -91,7 +91,7 @@ _stop_one() {
 
     # pgrep で PID を取得 (末尾スペースで部分一致を防ぐ)
     local PID=""
-    PID=$(pgrep -f "agent-hub-bridge-claude --user ${handle} " | head -1 || true)
+    PID=$(pgrep -f "agent-hub-bridge-claude --participant ${handle} " | head -1 || true)
 
     if [[ -z "$PID" ]]; then
         echo "info: @${handle} — no running process found" >&2
@@ -168,11 +168,11 @@ if [[ "$mode" == "dead" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# --user モード: 単体停止
+# --participant モード: 単体停止
 # ---------------------------------------------------------------------------
 if [[ -z "$user_handle" ]]; then
-    echo "error: --user <handle> is required" >&2
-    echo "usage: $0 --user <handle>" >&2
+    echo "error: --participant <handle> is required" >&2
+    echo "usage: $0 --participant <handle>" >&2
     echo "       $0 --dead" >&2
     exit 2
 fi

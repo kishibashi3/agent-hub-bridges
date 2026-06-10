@@ -95,7 +95,7 @@ provides-extras = ["claude", "slack", "gemini", "a2a", "github-app", "client-cod
 [[package]]
 name = "agent-hub-sdk"
 version = "0.9.0"
-source = { git = "https://github.com/kishibashi3/agent-hub-sdk.git?subdirectory=python&rev=v0.9.0#d10b9951f6333ec95534b92328dcbe676d7eb0fe" }
+source = { git = "https://github.com/kishibashi3/agent-hub-sdk.git?subdirectory=python&rev=feat%2Fparticipant-rename-52#417ea46a6a376bc8915062e2e3f0c742ff4f9e5f" }
 dependencies = [
     { name = "anyio" },
     { name = "mcp" },

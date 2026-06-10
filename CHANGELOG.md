@@ -20,6 +20,23 @@ changes between minor versions are possible until `v1.0.0`.
   の記載を追加、`AGENT_HUB_USER` → `AGENT_HUB_PARTICIPANT` 置換。
 - `README.md`: `--user` → `--participant` 置換 (6 箇所)。
 
+### Changed — AGENT_HUB_USER → AGENT_HUB_PARTICIPANT / --user → --participant (issue #224) **BREAKING**
+
+- **全 bridge (claude / claude_p / gemini / slack / a2a / codex / client_codex)**:
+  env var `AGENT_HUB_USER` を `AGENT_HUB_PARTICIPANT` に改名。
+  CLI フラグ `--user` を `--participant` に変更。
+- **`.env.example`**: `AGENT_HUB_USER=` → `AGENT_HUB_PARTICIPANT=`、コメント更新。
+- **`scripts/stop-bridge.sh`**: `--user <handle>` フラグを `--participant <handle>` に改名。
+  pgrep パターン (`--user` → `--participant`) を修正。
+- **`README.md`**: 起動例コマンドの `--user` → `--participant` を全更新。
+- version bump: `0.1.2` → `0.3.0` (agent-hub server minor 揃え — server v0.3.x との互換ペア)
+
+> **移行**: `AGENT_HUB_USER=xxx` を設定している場合は `AGENT_HUB_PARTICIPANT=xxx` に変更。
+> `.env` ファイル・systemd unit・起動スクリプトを更新してください。
+> 後方互換 alias はありません。
+
+Refs kishibashi3/agent-hub#285
+
 ## [0.1.2] — 2026-06-09
 
 ### Changed — X-Agent-Hub-Client ヘッダーを全 MCP リクエストに付与 (issue #280)

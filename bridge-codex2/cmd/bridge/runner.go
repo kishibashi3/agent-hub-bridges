@@ -238,7 +238,7 @@ func (r *codexRunner) buildEnv() []string {
 func (r *codexRunner) readOutput(ctx context.Context, stdout io.Reader, tracker *activityTracker) queryUsage {
 	var usage queryUsage
 	scanner := bufio.NewScanner(stdout)
-	scanner.Buffer(make([]byte, 512*1024), 512*1024)
+	scanner.Buffer(make([]byte, r.cfg.ScannerBufferSize), r.cfg.ScannerBufferSize)
 
 	for scanner.Scan() {
 		select {

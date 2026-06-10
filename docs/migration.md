@@ -13,11 +13,12 @@ agent-hub-bridge-claude --user claude-impl --tenant my-tenant
 新 (M1 以降):
 ```bash
 pip install "agent-hub-bridges[claude] @ git+https://github.com/kishibashi3/agent-hub-bridges.git"
-agent-hub-bridge-claude --user claude-impl --tenant my-tenant
+agent-hub-bridge-claude --participant claude-impl --tenant my-tenant
 ```
 
-CLI 名 / 引数 / env vars は **変えない**。 ユーザ視点では install 元の URL
-を 差し替えるだけで動く想定。
+CLI 名は **変えない**。ユーザ視点では install 元の URL を差し替えるだけで動く想定。
+
+> **⚠ v0.3.0 breaking change**: `--user` → `--participant`、`AGENT_HUB_USER` → `AGENT_HUB_PARTICIPANT` に変更。deployment script / env file の更新が必要。
 
 ## 影響範囲 (operator / deployer)
 
@@ -26,8 +27,8 @@ CLI 名 / 引数 / env vars は **変えない**。 ユーザ視点では instal
 | 旧 repo URL | M5 で archive 済み (2026-05-21) | 対応不要 |
 | pip install 行 | repo URL + extra 名 が変わる | deployment script 更新 |
 | CLI 名 (`agent-hub-bridge-<name>`) | 不変 | なし |
-| CLI 引数 (`--user` etc) | 不変 | なし |
-| env vars (`AGENT_HUB_*`) | 不変 | なし |
+| CLI 引数 (`--participant` etc) | **v0.3.0 で変更** (`--user` → `--participant`) | deployment script 更新要 |
+| env vars (`AGENT_HUB_PARTICIPANT` etc) | **v0.3.0 で変更** (`AGENT_HUB_USER` → `AGENT_HUB_PARTICIPANT`) | env file 更新要 |
 | systemd unit / supervisord conf | 不変 | なし (install 行のみ) |
 
 ## 各 bridge の移植メモ
