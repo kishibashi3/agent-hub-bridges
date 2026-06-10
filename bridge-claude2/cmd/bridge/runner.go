@@ -277,7 +277,7 @@ func (r *claudeRunner) spawnSubprocess(ctx context.Context) (*exec.Cmd, io.Write
 		return nil, nil, nil, fmt.Errorf("runner: start subprocess: %w", err)
 	}
 	scanner := bufio.NewScanner(stdoutPipe)
-	scanner.Buffer(make([]byte, 512*1024), 512*1024) // 512 KB
+	scanner.Buffer(make([]byte, r.cfg.ScannerBufferSize), r.cfg.ScannerBufferSize)
 	return cmd, stdinPipe, scanner, nil
 }
 
