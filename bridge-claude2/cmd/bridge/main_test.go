@@ -6,6 +6,66 @@ import (
 	"time"
 )
 
+// TestResolveInboxPollInterval は safety-net poll 間隔の解決優先順位を検証する (issue #234)。
+// AGENT_HUB_INBOX_POLL_INTERVAL_S env → 30s デフォルト
+func TestResolveInboxPollInterval(t *testing.T) {
+	tests := []struct {
+		name    string
+		envVal  string
+		wantD   time.Duration
+		wantLog bool // 不正値 → デフォルト + warn ログ
+	}{
+		{
+			name:   "env=unset → default 30s",
+			envVal: "",
+			wantD:  30 * time.Second,
+		},
+		{
+			name:   "env=60 → 60s",
+			envVal: "60",
+			wantD:  60 * time.Second,
+		},
+		{
+			name:   "env=15.5 → 15.5s",
+			envVal: "15.5",
+			wantD:  time.Duration(15.5 * float64(time.Second)),
+		},
+		{
+			name:    "env=invalid → default 30s (warn)",
+			envVal:  "notanumber",
+			wantD:   30 * time.Second,
+			wantLog: true,
+		},
+		{
+			name:    "env=0 → default 30s (warn: non-positive)",
+			envVal:  "0",
+			wantD:   30 * time.Second,
+			wantLog: true,
+		},
+		{
+			name:    "env=-5 → default 30s (warn: non-positive)",
+			envVal:  "-5",
+			wantD:   30 * time.Second,
+			wantLog: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.envVal != "" {
+				t.Setenv(inboxPollIntervalEnv, tc.envVal)
+			} else {
+				os.Unsetenv(inboxPollIntervalEnv)
+			}
+
+			got := resolveInboxPollInterval()
+			if got != tc.wantD {
+				t.Errorf("got %v, want %v", got, tc.wantD)
+			}
+		})
+	}
+}
+
 // TestParseConfig_SubprocessTimeoutDefaults は subprocess-timeout の解決優先順位を検証する。
 // --subprocess-timeout フラグ (-1=未指定) → AGENT_HUB_SUBPROCESS_TIMEOUT env → 30m デフォルト (issue #226)
 func TestParseConfig_SubprocessTimeoutDefaults(t *testing.T) {
