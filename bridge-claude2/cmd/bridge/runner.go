@@ -237,12 +237,13 @@ func (r *claudeRunner) spawnSubprocess(ctx context.Context) (*exec.Cmd, io.Write
 
 	// GitHub App IAT モード (issue #73): IAT manager が設定されていれば GH_TOKEN を注入する。
 	// gh CLI は GH_TOKEN を GITHUB_TOKEN より優先して使うため、これで bot identity になる。
+	// GITHUB_APP_* は子プロセスに渡さない（秘密鍵漏洩防止）。
 	if r.iatMgr != nil {
 		tok, err := r.iatMgr.GetToken(ctx)
 		if err != nil {
 			slog.Warn("runner: IAT fetch failed, falling back to default gh auth", "err", err)
 		} else {
-			cmd.Env = append(os.Environ(), "GH_TOKEN="+tok)
+			cmd.Env = append(filteredEnv(), "GH_TOKEN="+tok)
 		}
 	}
 
@@ -262,6 +263,20 @@ func (r *claudeRunner) spawnSubprocess(ctx context.Context) (*exec.Cmd, io.Write
 	scanner := bufio.NewScanner(stdoutPipe)
 	scanner.Buffer(make([]byte, 512*1024), 512*1024) // 512 KB
 	return cmd, stdinPipe, scanner, nil
+}
+
+// filteredEnv は os.Environ() から GITHUB_APP_* を除いた環境変数スライスを返す。
+// IAT 注入時に秘密鍵等が子プロセスに漏洩しないようにする。
+func filteredEnv() []string {
+	raw := os.Environ()
+	filtered := make([]string, 0, len(raw))
+	for _, kv := range raw {
+		if strings.HasPrefix(kv, "GITHUB_APP_") {
+			continue
+		}
+		filtered = append(filtered, kv)
+	}
+	return filtered
 }
 
 // writeJSON は v を JSON としてエンコードして w に書き込む。
