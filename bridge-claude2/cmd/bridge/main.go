@@ -42,7 +42,7 @@
 //   AGENT_HUB_BRIDGE_MAX_RETRIES optional   circuit breaker 連続失敗上限 (default: 10, 0=無限)
 //   AGENT_HUB_INBOX_POLL_INTERVAL_S optional safety-net poll / heartbeat 間隔秒数 (default: 30; issue #234)
 //   BRIDGE_LOG_DIR              optional    ログディレクトリ (省略 = ~/.agent-hub/logs/; --log-file が優先)
-//   BRIDGE_LOG_FILE             optional    ログファイルパス (省略 = BRIDGE_LOG_DIR/bridge-<user>.log)
+//   BRIDGE_LOG_FILE             optional    ログファイルパス (省略 = BRIDGE_LOG_DIR/bridge-<participant>.log)
 //
 // Issue: #155 (original), features: #162-#170
 package main
@@ -83,7 +83,7 @@ func (s *stringSlice) Set(v string) error {
 }
 
 type config struct {
-	User        string
+	Participant string
 	DisplayName string
 	AgentHubURL string
 	GitHubPAT   string
@@ -110,14 +110,15 @@ type config struct {
 
 func parseConfig() (*config, error) {
 	var (
-		user              = flag.String("user", "", "agent-hub handle (without @) [required]")
+		participantVal    string
+		userDeprecated    string
 		displayName       = flag.String("display-name", "", "display name (optional)")
 		tenant            = flag.String("tenant", "", "agent-hub tenant ID (overrides AGENT_HUB_TENANT env)")
 		workdir           = flag.String("workdir", "", "peer workdir with CLAUDE.md (default: cwd)")
 		model             = flag.String("model", "", "Claude model override (default: AGENT_HUB_MODEL env or claude default)")
 		mode              = flag.String("mode", "stateful", "peer mode: stateful|stateless|global")
 		logLevel          = flag.String("log-level", "info", "log level: debug|info|warn|error")
-		logFile           = flag.String("log-file", "", "log file path (default: ~/.agent-hub/logs/bridge-<user>.log; overrides BRIDGE_LOG_DIR/BRIDGE_LOG_FILE)")
+		logFile           = flag.String("log-file", "", "log file path (default: ~/.agent-hub/logs/bridge-<handle>.log; overrides BRIDGE_LOG_DIR/BRIDGE_LOG_FILE)")
 		reconnectBackoff  = flag.Duration("reconnect-backoff", 5*time.Second, "backoff on MCP reconnect")
 		maxRetries        = flag.Int("max-retries", 10, "circuit breaker: max consecutive get_messages failures (0 = unlimited)")
 		subprocessTimeout = flag.Duration("subprocess-timeout", -1, "claude subprocess max runtime per query (0 = no timeout; -1 = use AGENT_HUB_SUBPROCESS_TIMEOUT env or default 30m)")
@@ -125,6 +126,9 @@ func parseConfig() (*config, error) {
 		showVersion       = flag.Bool("version", false, "print version and exit")
 		addDirs           stringSlice
 	)
+	flag.StringVar(&participantVal, "participant", "", "agent-hub handle (without @) [required]")
+	flag.StringVar(&participantVal, "p", "", "agent-hub handle (short alias for --participant)")
+	flag.StringVar(&userDeprecated, "user", "", "deprecated: use --participant / -p")
 	flag.Var(&addDirs, "add-dir", "add extra directory to Claude context (repeatable)")
 	flag.Parse()
 
@@ -133,11 +137,17 @@ func parseConfig() (*config, error) {
 		os.Exit(0)
 	}
 
+	// --user is a deprecated alias for --participant / -p
+	if participantVal == "" && userDeprecated != "" {
+		fmt.Fprintf(os.Stderr, "warning: --user is deprecated, use --participant / -p instead\n")
+		participantVal = userDeprecated
+	}
+
 	if err := validateLogLevel(*logLevel); err != nil {
 		return nil, err
 	}
-	if *user == "" {
-		return nil, fmt.Errorf("--user is required")
+	if participantVal == "" {
+		return nil, fmt.Errorf("--participant (or -p) is required")
 	}
 	if *mode != "stateful" && *mode != "stateless" && *mode != "global" {
 		return nil, fmt.Errorf("--mode must be stateful|stateless|global, got %q", *mode)
@@ -211,10 +221,10 @@ func parseConfig() (*config, error) {
 		return nil, err
 	}
 
-	// display_name: --display-name フラグ > "{user} — go bridge"
+	// display_name: --display-name フラグ > "{participant} — go bridge"
 	resolvedDisplayName := *displayName
 	if resolvedDisplayName == "" {
-		resolvedDisplayName = *user + " — go bridge"
+		resolvedDisplayName = participantVal + " — go bridge"
 	}
 
 	// log file: --log-file フラグ > BRIDGE_LOG_FILE env > BRIDGE_LOG_DIR env / ~/.agent-hub/logs/
@@ -231,11 +241,11 @@ func parseConfig() (*config, error) {
 			}
 			logDir = filepath.Join(home, ".agent-hub", "logs")
 		}
-		resolvedLogFile = filepath.Join(logDir, "bridge-"+*user+".log")
+		resolvedLogFile = filepath.Join(logDir, "bridge-"+participantVal+".log")
 	}
 
 	return &config{
-		User:              *user,
+		Participant:       participantVal,
 		DisplayName:       resolvedDisplayName,
 		AgentHubURL:       url,
 		GitHubPAT:         pat,
@@ -318,8 +328,8 @@ func setupLogger(level, logFile string) (close func()) {
 // PAT をコマンドライン引数 (ps で見える) に渡さないためファイル経由にする。
 func writeMCPConfig(cfg *config) (string, error) {
 	headers := map[string]string{
-		"Authorization": "Bearer " + cfg.GitHubPAT,
-		"X-User-Id":     cfg.User,
+		"Authorization":  "Bearer " + cfg.GitHubPAT,
+		"X-Participant-Id": cfg.Participant,
 	}
 	if cfg.Tenant != "" {
 		headers["X-Tenant-Id"] = cfg.Tenant
@@ -335,7 +345,7 @@ func writeMCPConfig(cfg *config) (string, error) {
 		},
 	}
 
-	f, err := os.CreateTemp("", fmt.Sprintf("bridge-claude2-%s-*.json", cfg.User))
+	f, err := os.CreateTemp("", fmt.Sprintf("bridge-claude2-%s-*.json", cfg.Participant))
 	if err != nil {
 		return "", fmt.Errorf("create mcp config temp file: %w", err)
 	}
@@ -402,7 +412,7 @@ func main() {
 
 	slog.Info("bridge-claude2 starting",
 		"version", version,
-		"handle", "@"+cfg.User,
+		"handle", "@"+cfg.Participant,
 		"workdir", cfg.Workdir,
 		"mode", cfg.Mode,
 		"model", orDefault(cfg.Model, "(claude default)"),
@@ -425,7 +435,7 @@ func main() {
 	defer os.Remove(mcpConfigPath)
 
 	// issue #267: telemetry 初期化 (AGENT_HUB_TELEMETRY_URL 未設定なら no-op)
-	initTelemetry("@" + cfg.User)
+	initTelemetry("@" + cfg.Participant)
 	defer shutdownTelemetry()
 
 	// worker を起動 (内部で reconnect loop を回す)

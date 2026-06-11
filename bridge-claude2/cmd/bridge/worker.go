@@ -63,8 +63,8 @@ const (
 // idle compact watchdog は on-demand bridge では不要なため削除済み (issue #179)。
 func runWorker(ctx context.Context, cfg *config, mcpConfigPath string) {
 	// reconnect をまたいで共有する state
-	cursor := loadCursor(cfg.User)
-	journal := newJournal(cfg.User)
+	cursor := loadCursor(cfg.Participant)
+	journal := newJournal(cfg.Participant)
 	tracker := &activityTracker{}
 	gapTracker := &messageGapTracker{}
 
@@ -114,13 +114,13 @@ func runWorker(ctx context.Context, cfg *config, mcpConfigPath string) {
 			// circuit breaker
 			if maxRetries > 0 && consecutiveFailures >= maxRetries {
 				slog.Error("[circuit-breaker] ALERT: hub connection assumed lost",
-					"user", cfg.User,
+					"user", cfg.Participant,
 					"consecutive_failures", consecutiveFailures,
 					"max_retries", maxRetries,
 				)
 				// dead marker + inventory 通知 (issue #82)
-				writeDeadMarker(cfg.User)
-				writeLostHubToInventory(cfg.User, os.Getpid())
+				writeDeadMarker(cfg.Participant)
+				writeLostHubToInventory(cfg.Participant, os.Getpid())
 				slog.Error("[circuit-breaker] dead marker written — run stop-bridge.sh --dead to clean up")
 				return
 			}
@@ -152,7 +152,7 @@ func runHubSession(
 ) (string, bool, error) {
 	// --- hub client 初期化 ---
 	client, err := agenthub.New(
-		cfg.AgentHubURL, cfg.GitHubPAT, cfg.User, cfg.Tenant,
+		cfg.AgentHubURL, cfg.GitHubPAT, cfg.Participant, cfg.Tenant,
 		agenthub.WithClientName("bridge-claude2"),
 	)
 	if err != nil {
@@ -185,7 +185,7 @@ func runHubSession(
 	})
 
 	slog.Info("runHubSession: registered and listening",
-		"handle", "@"+cfg.User,
+		"handle", "@"+cfg.Participant,
 		"mode", cfg.Mode,
 		"display_name", cfg.DisplayName,
 	)
@@ -224,7 +224,7 @@ func runHubSession(
 		slog.Warn("runHubSession: startup catchup error (continuing)", "err", err)
 	}
 
-	selfHandle := "@" + cfg.User
+	selfHandle := "@" + cfg.Participant
 
 	// --- SSE push 駆動ループ (issue #218, #234) ---
 	// 通常は inbox push 通知を受信したときのみ GetMessages を呼ぶ。
@@ -293,7 +293,7 @@ func runHubSession(
 
 			// issue #37, #176: process → save_cursor の順 (crash-safe secondary guard)。
 			// MarkAsRead は上記で処理前に呼び済み。
-			saveCursor(cfg.User, msg.Timestamp)
+			saveCursor(cfg.Participant, msg.Timestamp)
 			cursor = msg.Timestamp
 		}
 	}
@@ -342,7 +342,7 @@ func startupCatchup(
 	slog.Info("[startup-catchup] processing unread messages",
 		"nl_count", len(nlMsgs), "cmd_count", cmdCount)
 
-	selfHandle := "@" + cfg.User
+	selfHandle := "@" + cfg.Participant
 
 	for _, msg := range nlMsgs {
 		// 自己ループ防止
@@ -378,7 +378,7 @@ func startupCatchup(
 
 		// issue #37, #176: process → save_cursor の順 (crash-safe secondary guard)。
 		// MarkAsRead は上記で処理前に呼び済み。
-		saveCursor(cfg.User, msg.Timestamp)
+		saveCursor(cfg.Participant, msg.Timestamp)
 		cursor = msg.Timestamp
 	}
 
@@ -414,7 +414,7 @@ func handleOne(
 	slog.Info("← message",
 		"msg_id", msg.ID, "from", msg.Sender, "body_preview", truncate(msg.Body, 120))
 
-	prompt := formatPrompt("@"+cfg.User, msg)
+	prompt := formatPrompt("@"+cfg.Participant, msg)
 
 	const retryBackoff = 5 * time.Second
 	var lastUsage queryUsage
@@ -593,7 +593,7 @@ func runGracefulDrain(
 		if err := handleOne(drainCtx, client, runner, msg, cfg, tracker, journal); err != nil {
 			slog.Error("[drain] handleOne error", "msg_id", msg.ID, "err", err)
 		}
-		saveCursor(cfg.User, msg.Timestamp)
+		saveCursor(cfg.Participant, msg.Timestamp)
 	}
 	slog.Info("[drain] graceful drain completed")
 }

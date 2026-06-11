@@ -22,6 +22,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -32,6 +33,10 @@ import (
 
 	githubclient "github.com/kishibashi3/agent-hub-bridges/packages/github-client"
 )
+
+// errSubprocessTimeout は SubprocessTimeout によって subprocess がキルされたことを示す sentinel。
+// worker.go の handleOne がリトライ判定に使う。context.Canceled (SIGTERM) とは区別される。
+var errSubprocessTimeout = errors.New("subprocess timeout")
 
 // streamAssistantContent は stream-json の assistant メッセージ内の content block。
 // tool_use の blocking 検出に使う。
@@ -175,8 +180,13 @@ func (r *claudeRunner) query(ctx context.Context, prompt, sessionID string, trac
 		// readUntilResult の ctx.Done() チェックは scanner.Scan() ブロック中には
 		// 効かないため EOF エラーとして返ってくる。実態を明示する。
 		if queryCtx.Err() != nil {
-			resultErr = fmt.Errorf("claude subprocess killed (SubprocessTimeout=%s): %w",
-				r.cfg.SubprocessTimeout, queryCtx.Err())
+			if errors.Is(queryCtx.Err(), context.DeadlineExceeded) {
+				resultErr = fmt.Errorf("claude subprocess killed (SubprocessTimeout=%s): %w",
+					r.cfg.SubprocessTimeout, errSubprocessTimeout)
+			} else {
+				resultErr = fmt.Errorf("claude subprocess killed (SubprocessTimeout=%s): %w",
+					r.cfg.SubprocessTimeout, queryCtx.Err())
+			}
 		} else if waitErr != nil {
 			resultErr = fmt.Errorf("%w (subprocess exit: %v)", resultErr, waitErr)
 		}
