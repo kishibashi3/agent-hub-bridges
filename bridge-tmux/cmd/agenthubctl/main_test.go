@@ -451,7 +451,7 @@ func TestReadSpawnPIDFile_ZeroPID(t *testing.T) {
 func TestStopBridge_NoPIDFile(t *testing.T) {
 	// No PID file → warning only, no error
 	t.Setenv("HOME", t.TempDir())
-	if err := stopBridge("nonexistent-handle"); err != nil {
+	if err := stopBridge("nonexistent-handle", 30*time.Second); err != nil {
 		t.Errorf("expected nil for missing pid file, got %v", err)
 	}
 }
@@ -470,7 +470,7 @@ func TestStopBridge_StalePIDFile(t *testing.T) {
 		t.Fatalf("write pid: %v", err)
 	}
 
-	if err := stopBridge("test"); err != nil {
+	if err := stopBridge("test", 30*time.Second); err != nil {
 		t.Errorf("unexpected error for stale pid: %v", err)
 	}
 
