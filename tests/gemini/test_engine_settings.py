@@ -1,7 +1,7 @@
 """GeminiCLIEngine の isolated settings.json 生成ロジックのテスト.
 
 `gemini` 本体は呼び出さない。`_write_isolated_settings` が user 設定の
-agent-hub MCP 設定を継承しつつ、X-User-Id / X-Tenant-Id を bridge の
+agent-hub MCP 設定を継承しつつ、X-Participant-Id / X-Tenant-Id を bridge の
 identity で上書きする挙動だけを検証する。
 """
 
@@ -46,7 +46,7 @@ def test_write_isolated_settings_no_user_settings(monkeypatch, tmp_path: Path) -
     block = payload["mcpServers"]["agent-hub"]
 
     assert block["httpUrl"] == "http://example.invalid/mcp"
-    assert block["headers"]["X-User-Id"] == "gemini-test"
+    assert block["headers"]["X-Participant-Id"] == "gemini-test"
     assert block["headers"]["X-Tenant-Id"] == "kaz"
     assert "Bearer" in block["headers"]["Authorization"]
 
@@ -63,7 +63,7 @@ def test_write_isolated_settings_inherits_and_overrides(
                 "httpUrl": "http://hub.example/mcp",
                 "headers": {
                     "Authorization": "Bearer ${GITHUB_PAT}",
-                    "X-User-Id": "gemini-cli",  # ← これは上書きされるはず
+                    "X-Participant-Id": "gemini-cli",  # ← これは上書きされるはず
                     "X-Tenant-Id": "kaz",  # ← これも override 対象
                     "X-Extra": "preserved",  # ← 関係ない header は残す
                 },
@@ -87,12 +87,46 @@ def test_write_isolated_settings_inherits_and_overrides(
     # URL は user 設定を継承
     assert block["httpUrl"] == "http://hub.example/mcp"
     # identity headers は bridge の値で上書き
-    assert block["headers"]["X-User-Id"] == "gemini-impl"
+    assert block["headers"]["X-Participant-Id"] == "gemini-impl"
     assert block["headers"]["X-Tenant-Id"] == "kishi"
     # 既存の関係ない header は残る
     assert block["headers"]["X-Extra"] == "preserved"
     # Authorization は user 設定のまま (env interpolation を保持)
     assert block["headers"]["Authorization"] == "Bearer ${GITHUB_PAT}"
+
+
+def test_write_isolated_settings_strips_legacy_user_id_header(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """user 設定に旧名 X-User-Id が残っていても伝播させず、X-Participant-Id に統一する."""
+    fake_home = tmp_path / "fakehome"
+    (fake_home / ".gemini").mkdir(parents=True)
+    user_settings = {
+        "mcpServers": {
+            "agent-hub": {
+                "httpUrl": "http://hub.example/mcp",
+                "headers": {
+                    "Authorization": "Bearer ${GITHUB_PAT}",
+                    "X-User-Id": "stale-handle",  # ← 旧名。strip されるはず
+                    "X-Tenant-Id": "kaz",
+                },
+            }
+        }
+    }
+    (fake_home / ".gemini" / "settings.json").write_text(json.dumps(user_settings))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: fake_home))
+
+    home_dir = tmp_path / "isolated"
+    home_dir.mkdir()
+    cfg = _make_config(user="gemini-impl", tenant="kishi", tmp_workdir=tmp_path)
+    _write_isolated_settings(home_dir, cfg)
+
+    headers = json.loads(
+        (home_dir / ".gemini" / "settings.json").read_text()
+    )["mcpServers"]["agent-hub"]["headers"]
+    # 旧名は伝播しない / 新名に bridge identity が入る
+    assert "X-User-Id" not in headers
+    assert headers["X-Participant-Id"] == "gemini-impl"
 
 
 def test_write_isolated_settings_strips_tenant_when_unset(
@@ -109,7 +143,7 @@ def test_write_isolated_settings_strips_tenant_when_unset(
                         "httpUrl": "http://hub.example/mcp",
                         "headers": {
                             "Authorization": "Bearer ${GITHUB_PAT}",
-                            "X-User-Id": "gemini-cli",
+                            "X-Participant-Id": "gemini-cli",
                             "X-Tenant-Id": "kaz",
                         },
                     }
@@ -126,7 +160,7 @@ def test_write_isolated_settings_strips_tenant_when_unset(
 
     payload = json.loads((home_dir / ".gemini" / "settings.json").read_text())
     headers = payload["mcpServers"]["agent-hub"]["headers"]
-    assert headers["X-User-Id"] == "gemini-default"
+    assert headers["X-Participant-Id"] == "gemini-default"
     assert "X-Tenant-Id" not in headers
 
 

@@ -155,7 +155,7 @@ class GeminiCLIEngine:
     state:
       - `_home_dir`: per-bridge の isolated HOME (Path)。`__init__` で作成し、
         `close()` で削除する。中の `.gemini/settings.json` には worker の
-        identity (X-User-Id) を埋めた agent-hub MCP 設定が入っている。
+        identity (X-Participant-Id) を埋めた agent-hub MCP 設定が入っている。
       - `_cli_path`: 実行する gemini binary path。
       - `_timeout_s`: 1 ターンあたりの timeout。
     """
@@ -187,7 +187,7 @@ class GeminiCLIEngine:
         - gemini CLI の path を解決
         - per-bridge HOME (mkdtemp) を作成
         - user の `~/.gemini/settings.json` から `mcpServers.agent-hub` を
-          コピーし、X-User-Id / X-Tenant-Id を bridge の identity で上書き
+          コピーし、X-Participant-Id / X-Tenant-Id を bridge の identity で上書き
         - HOME 内に `.gemini/settings.json` を書く
         - retry / backoff のチューニングを env から読む
           (GEMINI_MAX_RETRIES / GEMINI_BACKOFF_BASE_S / GEMINI_BACKOFF_CAP_S)
@@ -463,7 +463,7 @@ def _write_isolated_settings(home_dir: Path, config: Config) -> None:
     """isolated HOME 配下に `.gemini/settings.json` を書く.
 
     user の `~/.gemini/settings.json` から `mcpServers.agent-hub` ブロックを
-    コピーし、X-User-Id / X-Tenant-Id を worker の handle で上書きする。
+    コピーし、X-Participant-Id / X-Tenant-Id を worker の handle で上書きする。
     user 設定が無ければ最小 config を新規生成する。
     """
     config_dir = home_dir / GEMINI_CONFIG_SUBDIR
@@ -486,8 +486,10 @@ def _write_isolated_settings(home_dir: Path, config: Config) -> None:
         agent_hub_block = {"httpUrl": config.agent_hub_url}
         headers = {"Authorization": "Bearer ${GITHUB_PAT}"}
 
-    # bridge の identity で上書き (user 設定の X-User-Id は伝播させない)
-    headers["X-User-Id"] = config.user
+    # bridge の identity で上書き (user 設定の旧 X-User-Id / X-Participant-Id は
+    # 伝播させない。旧名が残っていると stale な identity header が leak するため pop する)
+    headers.pop("X-User-Id", None)
+    headers["X-Participant-Id"] = config.user
     if config.tenant:
         headers["X-Tenant-Id"] = config.tenant
     else:

@@ -86,7 +86,7 @@ class TestWriteMcpConfig:
         path = _write_mcp_config(cfg)
         data = json.loads(path.read_text())
         path.unlink()
-        assert data["mcpServers"]["agent-hub"]["headers"]["X-User-Id"] == "myuser"
+        assert data["mcpServers"]["agent-hub"]["headers"]["X-Participant-Id"] == "myuser"
 
     def test_contains_tenant_header_when_set(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
