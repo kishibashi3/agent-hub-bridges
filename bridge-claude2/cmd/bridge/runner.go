@@ -51,6 +51,7 @@ type streamAssistantContent struct {
 // streamAssistantMessage は stream-json の assistant イベントの message フィールド。
 type streamAssistantMessage struct {
 	Role    string                   `json:"role"`
+	Model   string                   `json:"model"` // 実際に応答したモデル名 (issue #242)
 	Content []streamAssistantContent `json:"content"`
 }
 
@@ -80,6 +81,10 @@ type queryUsage struct {
 	CacheReadInputTokens int
 	TotalCostUSD         *float64
 	IsError              bool
+	// Model は stream-json の assistant メッセージから抽出した実応答モデル名 (issue #242)。
+	// AGENT_HUB_MODEL 未設定で cfg.Model が空でも、ここに実モデル名が乗る。
+	// 取得できなかった場合は "" のまま (emitSpan 側で fallback)。
+	Model string
 }
 
 // claudeRunner は Claude CLI subprocess の設定を保持する。
@@ -333,6 +338,12 @@ func readUntilResult(ctx context.Context, scanner *bufio.Scanner, stdinWriter io
 			// activity tracking: Claude が応答を生成中
 			if tracker != nil {
 				tracker.markActive()
+			}
+			// issue #242: 実際に応答したモデル名を capture する。
+			// AGENT_HUB_MODEL 未設定 (cfg.Model 空) でも、ここで実モデル名が取れる。
+			// 複数の assistant イベントが流れるが model は同一なので最後の値で上書きしてよい。
+			if ev.Message != nil && ev.Message.Model != "" {
+				usage.Model = ev.Message.Model
 			}
 			// blocking command 検出 (issue #101)
 			if !isCompact && ev.Message != nil {

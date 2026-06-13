@@ -8,7 +8,8 @@
 // span 属性 (GenAI semantic conventions):
 //   - message.id:                       受信 agent-hub message ID (caused_by_id)
 //   - gen_ai.system:                    固定値 "anthropic" (issue #265)
-//   - gen_ai.request.model:             Claude model 名
+//   - gen_ai.request.model:             実応答モデル名 (stream-json 由来、未取得時は要求モデル→claude-default) (issue #242)
+//   - gen_ai.response.model:            実応答モデル名 (取得できた場合のみ) (issue #242)
 //   - gen_ai.usage.input_tokens:        input tokens
 //   - gen_ai.usage.output_tokens:       output tokens
 //   - gen_ai.usage.cache_read.input_tokens: cache read tokens
@@ -93,14 +94,27 @@ func shutdownTelemetry() {
 	}
 }
 
+// resolveSpanModel は span に記録するモデル名を決定する (issue #242)。
+// 優先順位: 実応答モデル (stream-json の assistant.message.model) > 要求モデル (cfg.Model)
+// > "claude-default" fallback。
+// AGENT_HUB_MODEL 未設定 (requestModel 空) でも responseModel が取れていれば実モデル名が残る。
+func resolveSpanModel(responseModel, requestModel string) string {
+	return orDefault(responseModel, orDefault(requestModel, "claude-default"))
+}
+
 // emitSpan は 1 メッセージ処理後に OTLP span を emit する (issue #267)。
 // globalTracer が nil (AGENT_HUB_TELEMETRY_URL 未設定) の場合はサイレント skip。
 // 例外は slog.Warn で読み捨て — span 失敗で bridge を停止させない。
-func emitSpan(causedByID, model string, usage queryUsage) {
+//
+// requestModel は cfg.Model (= AGENT_HUB_MODEL の要求モデル、未設定なら空)。
+// usage.Model は stream-json から抽出した実応答モデル (issue #242)。
+// span の gen_ai.request.model には resolveSpanModel で解決した実モデルを乗せ、
+// otelite の by_model 集計が実モデルで割れるようにする (claude-default 丸めの解消)。
+func emitSpan(causedByID, requestModel string, usage queryUsage) {
 	if globalTracer == nil {
 		return
 	}
-	model = orDefault(model, "claude-default")
+	model := resolveSpanModel(usage.Model, requestModel)
 	defer func() {
 		if r := recover(); r != nil {
 			slog.Warn("[telemetry] emitSpan panic (non-fatal)", "recover", r)
@@ -138,6 +152,11 @@ func emitSpan(causedByID, model string, usage queryUsage) {
 		attribute.Int("gen_ai.usage.input_tokens", usage.InputTokens),
 		attribute.Int("gen_ai.usage.output_tokens", usage.OutputTokens),
 		attribute.Int("gen_ai.usage.cache_read.input_tokens", usage.CacheReadInputTokens),
+	}
+	// issue #242: 実応答モデルが取れた場合は semconv 準拠で gen_ai.response.model も乗せる。
+	// (gen_ai.request.model は集計互換のため実モデルを乗せているが、厳密な応答モデルはこちら)
+	if usage.Model != "" {
+		attrs = append(attrs, attribute.String("gen_ai.response.model", usage.Model))
 	}
 	if usage.TotalCostUSD != nil {
 		attrs = append(attrs, attribute.Float64("gen_ai.usage.cost_usd", *usage.TotalCostUSD))
