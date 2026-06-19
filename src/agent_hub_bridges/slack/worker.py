@@ -132,7 +132,7 @@ async def run_worker(config: Config) -> None:
     thread_ctx = ThreadContext()
 
     async with AgentHub.connect(
-        user=config.user,
+        participant=config.user,
         tenant=config.tenant,
         display_name=config.display_name,
         url=config.agent_hub_url,
