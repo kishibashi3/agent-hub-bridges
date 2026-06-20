@@ -6,6 +6,39 @@ All notable changes to `agent-hub-bridges` are recorded here. Format follows
 adheres loosely to [Semantic Versioning](https://semver.org/); breaking
 changes between minor versions are possible until `v1.0.0`.
 
+## [0.3.2] — 2026-06-19
+
+### Fixed — installer first-chat 貫通 (user→participant rename 追従, issue #239 系)
+
+2026-06-11 の cross-repo rename インシデント (user→participant 用語統一) で
+bridges 側が取り残されており、installer の実機 E2E で first-chat が貫通しない
+壊れが 2 件確定したため修正。go-bridge フリートは無関係 (Python bridges のみ)。
+
+- **[Blocker] Bug4 — sdk connect 引数**: 全 bridge worker の
+  `AgentHub.connect(user=...)` 呼び出しを `participant=...` に修正
+  (claude / claude_p / gemini / slack / codex / client_codex / a2a の 7 worker)。
+  agent-hub-sdk v0.9.0 は `connect(*, participant: str, ...)` を期待しており、
+  旧 `user=` のままでは `TypeError: connect() got an unexpected keyword
+  argument 'user'` で無限 reconnect していた。sdk v0.9.0 の実シグネチャを
+  `inspect.signature` で確認した上で合わせた。
+- **Bug3 — GitHub PAT env 名統一**: `_common.base_config` の PAT 読み出しを
+  `AGENT_HUB_GITHUB_PAT` (エコシステム統一名) 優先に変更。旧名 `GITHUB_PAT` は
+  deprecated alias として当面受理し、使用時に WARN を出す (段階的 deprecation、
+  ハード破壊しない)。`load_github_pat()` ヘルパーを新設。
+- `.env.example` / `README.md`: `AGENT_HUB_GITHUB_PAT` を正本として記載
+  (旧名 alias の注記付き)。
+
+### 調査済み事項
+
+- **sdk v0.9.0 の connect シグネチャを実物で確認** (憶測なし):
+  `(*, participant: str, tenant, display_name, url, pat, client_type)`。
+  `user=` kwarg は存在しない。`.venv` の installed sdk == 0.9.0 で確認。
+- **影響範囲の列挙**: `AgentHub.connect(user=...)` と `GITHUB_PAT` 読み出しは
+  どちらも全 bridge 共通経路 (前者は各 worker、後者は `load_base_config` 1 箇所)
+  のため、claude だけでなく 7 bridge 全てを一括修正 (片側更新による縮退回避)。
+- 後方互換: `GITHUB_PAT` を alias 維持したため既存 env / 既存テストは無改変で
+  green (705 passed)。
+
 ## [0.3.1] — 2026-06-11
 
 ### Added — agenthubctl restart コマンド (issue #235)

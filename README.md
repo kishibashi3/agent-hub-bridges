@@ -62,7 +62,7 @@ Required env (shared by all bridges):
 
 ```
 AGENT_HUB_URL=http://localhost:3000/mcp
-GITHUB_PAT=<your-pat>
+AGENT_HUB_GITHUB_PAT=<your-pat>   # 旧名 GITHUB_PAT も当面 alias 受理 (deprecated)
 ```
 
 See `.env.example` for the full list of env vars (including bridge-specific ones).

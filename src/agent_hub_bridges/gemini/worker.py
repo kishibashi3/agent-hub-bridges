@@ -94,7 +94,7 @@ async def _run_hub_session(config: Config, engine: GeminiCLIEngine) -> None:
     伝播して 上位 `run_with_reconnect` の retry に乗る。
     """
     async with AgentHub.connect(
-        user=config.user,
+        participant=config.user,
         tenant=config.tenant,
         display_name=config.display_name,
         url=config.agent_hub_url,

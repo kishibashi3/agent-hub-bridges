@@ -224,7 +224,7 @@ async def _run_hub_session(
     display_name = config.display_name or _derive_display_name(card, config.user)
 
     async with AgentHub.connect(
-        user=config.user,
+        participant=config.user,
         tenant=config.tenant,
         display_name=display_name,
         url=config.agent_hub_url,

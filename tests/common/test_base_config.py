@@ -18,6 +18,7 @@ import pytest
 
 from agent_hub_bridges._common.base_config import (
     load_base_config,
+    load_github_pat,
     load_optional_env,
     load_required_env,
 )
@@ -90,6 +91,37 @@ def _hub_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("AGENT_HUB_WORKDIR", raising=False)
 
 
+# ---------------------------------------------------------------------------
+# load_github_pat (AGENT_HUB_GITHUB_PAT 統一 + GITHUB_PAT deprecated alias)
+# ---------------------------------------------------------------------------
+
+
+def test_load_github_pat_prefers_canonical(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AGENT_HUB_GITHUB_PAT", "ghp_new")
+    monkeypatch.setenv("GITHUB_PAT", "ghp_legacy")
+    assert load_github_pat() == "ghp_new"
+
+
+def test_load_github_pat_legacy_alias_accepted(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.delenv("AGENT_HUB_GITHUB_PAT", raising=False)
+    monkeypatch.setenv("GITHUB_PAT", "ghp_legacy")
+    import logging
+
+    with caplog.at_level(logging.WARNING):
+        assert load_github_pat() == "ghp_legacy"
+    # deprecation を WARN で通知している (ハード破壊しない段階的 deprecation)。
+    assert any("deprecated" in r.message for r in caplog.records)
+
+
+def test_load_github_pat_missing_both_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("AGENT_HUB_GITHUB_PAT", raising=False)
+    monkeypatch.delenv("GITHUB_PAT", raising=False)
+    with pytest.raises(ValueError, match="AGENT_HUB_GITHUB_PAT"):
+        load_github_pat()
+
+
 def test_load_base_config_missing_url(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("AGENT_HUB_URL", raising=False)
     monkeypatch.setenv("GITHUB_PAT", "x")
@@ -99,6 +131,7 @@ def test_load_base_config_missing_url(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_load_base_config_missing_pat(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("AGENT_HUB_URL", "http://h")
+    monkeypatch.delenv("AGENT_HUB_GITHUB_PAT", raising=False)
     monkeypatch.delenv("GITHUB_PAT", raising=False)
     with pytest.raises(ValueError, match="GITHUB_PAT"):
         load_base_config(user="alice")
