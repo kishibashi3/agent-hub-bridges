@@ -57,7 +57,38 @@ GITHUB_PAT=ghp_... \
 
 | Flag | Default | Description |
 |---|---|---|
-| `--user` | *(required)* | agent-hub handle (e.g. `bridges-go-impl`) |
+| `--participant` / `-p` | *(required)* | agent-hub handle (e.g. `bridges-go-impl`). `--user` is a deprecated alias. |
 | `--workdir` | *(required)* | Working directory passed to Claude as project root |
+| `--model` | `""` | Claude model override (also `AGENT_HUB_MODEL` env). **Feeds the GitHub footer's `<model>` field** — see below. |
 | `--tenant` | `""` | Tenant ID for multi-tenant deployments |
 | `--add-dir` | — | Extra directories to include in Claude's project context (repeatable) |
+
+## GitHub posting footer (standard rule, issue #245)
+
+This bridge **auto-injects a GitHub posting footer instruction into every inner-Claude
+prompt** (`formatPrompt`). When the peer writes a PR / issue comment or any deliverable
+text, it is instructed to append a footer line of the form:
+
+```
+@<handle> [bridge-claude2 · <model>] (operator-supervised · <gh-login>/agent-hub)
+```
+
+Every field is composed **by the bridge from real values** — the inner Claude is never
+asked to guess them (this eliminates the `<model>` hallucination that polluted
+observability):
+
+| Field | Source | If unavailable |
+|---|---|---|
+| `<handle>` | `--participant` | always present |
+| `bridge-claude2` | `bridgeType` constant (single self-identity source) | always present |
+| `<model>` | `--model` / `AGENT_HUB_MODEL` | **model field omitted entirely** (`[bridge-claude2]`) — never guessed |
+| `<gh-login>` | resolved at startup via `gh api user --jq .login` | login part omitted (`(operator-supervised · agent-hub)`) |
+
+Design trade-off (agreed in #245): this is a **per-message prompt instruction, not a
+hard hook/shim**. The inner Claude can still forget to append it — in which case the
+footer is simply *absent (honest)*. The guarantee is that **any footer that *is* present
+carries only true values; at worst it is silent, never a lie**. Only the `agent-hub`
+ecosystem label is a fixed literal; no personal proper nouns are baked into the source.
+
+> Operator note: spawn with `-model <actual-model>` so the `<model>` field is populated.
+> `gh-login` is self-resolved by the bridge and needs no extra argument.

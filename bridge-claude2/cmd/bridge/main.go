@@ -69,6 +69,11 @@ import (
 // go build -ldflags "-X main.version=0.6.0"
 var version = "dev"
 
+// bridgeType はこの bridge の正準名 (self-identity)。起動バナー・MCP client name・
+// GitHub 投稿 footer 等で参照する単一 source。footer 等に bridge-type の生文字列を
+// 直書きせず必ずこの定数を経由する (issue #245: 真値以外をハードコードしない原則)。
+const bridgeType = "bridge-claude2"
+
 // ──────────────────────────────────────────────────────────────────────── //
 // 設定                                                                     //
 // ──────────────────────────────────────────────────────────────────────── //
@@ -106,6 +111,11 @@ type config struct {
 	// ScannerBufferSize は stream-json bufio.Scanner のバッファサイズ (bytes)。
 	// AGENT_HUB_SCANNER_BUFFER_SIZE env で設定可能 (例: "4MB", "8MB")。デフォルト 4MB。
 	ScannerBufferSize int
+	// GHLogin は起動時に解決した GitHub login 名 (footer の <gh-login> 用、issue #245)。
+	// 解決失敗時は ""。
+	GHLogin string
+	// GitHubFooter は bridge が真値から組成した GitHub 投稿用 footer (issue #245)。
+	GitHubFooter string
 }
 
 func parseConfig() (*config, error) {
@@ -133,7 +143,7 @@ func parseConfig() (*config, error) {
 	flag.Parse()
 
 	if *showVersion {
-		fmt.Printf("bridge-claude2/%s (agent-hub-bridges)\n", version)
+		fmt.Printf("%s/%s (agent-hub-bridges)\n", bridgeType, version)
 		os.Exit(0)
 	}
 
@@ -345,7 +355,7 @@ func writeMCPConfig(cfg *config) (string, error) {
 		},
 	}
 
-	f, err := os.CreateTemp("", fmt.Sprintf("bridge-claude2-%s-*.json", cfg.Participant))
+	f, err := os.CreateTemp("", fmt.Sprintf("%s-%s-*.json", bridgeType, cfg.Participant))
 	if err != nil {
 		return "", fmt.Errorf("create mcp config temp file: %w", err)
 	}
@@ -377,8 +387,12 @@ func writeMCPConfig(cfg *config) (string, error) {
 
 // formatPrompt は受信メッセージを claude への user prompt に変換する。
 // Python bridge (_common/prompt.py: format_peer_message_prompt) と同等。
-func formatPrompt(selfHandle string, msg agenthub.Message) string {
-	return fmt.Sprintf(
+//
+// footer が非空なら、GitHub 投稿時に付与すべき規約 footer の指示を毎メッセージ末尾に
+// 注入する (issue #245)。これにより内側 Claude が model 等を幻覚で埋めるのを防ぎ、
+// bridge が真値から組成した footer のみが使われるようにする。
+func formatPrompt(selfHandle string, msg agenthub.Message, footer string) string {
+	base := fmt.Sprintf(
 		"あなたは agent-hub の peer worker `%s` として動いています。\n"+
 			"agent-hub 経由で %s から以下の message が届きました。\n"+
 			"宛先: %s\n"+
@@ -394,6 +408,50 @@ func formatPrompt(selfHandle string, msg agenthub.Message) string {
 		msg.Sender, msg.ID,
 		msg.Sender,
 	)
+	if footer == "" {
+		return base
+	}
+	return base + fmt.Sprintf(
+		"\n\n【GitHub 投稿ルール (issue #245)】git / GitHub への投稿"+
+			"(PR・issue のコメント等) や成果物テキストを作成する場合は、文末に次の "+
+			"footer 行を**そのまま**付けること。model 等は推測で書き換えず、"+
+			"この literal を一切変更しないこと:\n%s",
+		footer,
+	)
+}
+
+// buildGitHubFooter は GitHub 投稿用の規約 footer を bridge の知る真値から組成する。
+// 形式: @<handle> [<bridge-type> · <model>] (operator-supervised · <gh-login>/agent-hub)
+//   - model が空なら model 欄ごと省略: [<bridge-type>]
+//   - ghLogin が空なら login 部を省略: (operator-supervised · agent-hub)
+//
+// 全フィールド (handle / bridgeType / model / ghLogin) は呼び出し側が真値で渡す。
+// 唯一の固定リテラルは ecosystem ラベル "agent-hub" のみ (issue #245)。
+// 内側 Claude に model / login を推測させないため、欠けている真値は「省略」に倒す
+// (嘘を出さない)。ソースに個人固有名詞を焼かず、ghLogin は実行時解決した値を渡す。
+func buildGitHubFooter(handle, bridgeType, model, ghLogin string) string {
+	bridgeLabel := bridgeType
+	if model != "" {
+		bridgeLabel = bridgeType + " · " + model
+	}
+	repoRef := "agent-hub"
+	if ghLogin != "" {
+		repoRef = ghLogin + "/agent-hub"
+	}
+	return fmt.Sprintf("@%s [%s] (operator-supervised · %s)", handle, bridgeLabel, repoRef)
+}
+
+// resolveGHLogin は起動時に GitHub の login 名を解決する (footer の <gh-login> 用)。
+// `gh api user --jq .login` を実行し、失敗時は "" を返す (footer の login 部は省略)。
+// 個人固有名詞をソースに焼かないため、必ず実行時に解決する (issue #245)。
+func resolveGHLogin() string {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "gh", "api", "user", "--jq", ".login").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
 }
 
 // ──────────────────────────────────────────────────────────────────────── //
@@ -410,12 +468,19 @@ func main() {
 	closeLogger := setupLogger(cfg.LogLevel, cfg.LogFile)
 	defer closeLogger()
 
-	slog.Info("bridge-claude2 starting",
+	// issue #245: GitHub 投稿 footer を真値から組成する。gh-login は実行時解決
+	// (失敗時は login 部を省略)。formatPrompt で毎メッセージ内側 Claude に注入される。
+	cfg.GHLogin = resolveGHLogin()
+	cfg.GitHubFooter = buildGitHubFooter(cfg.Participant, bridgeType, cfg.Model, cfg.GHLogin)
+
+	slog.Info(bridgeType+" starting",
 		"version", version,
 		"handle", "@"+cfg.Participant,
 		"workdir", cfg.Workdir,
 		"mode", cfg.Mode,
 		"model", orDefault(cfg.Model, "(claude default)"),
+		"gh_login", orDefault(cfg.GHLogin, "(unresolved)"),
+		"github_footer", cfg.GitHubFooter,
 		"subprocess_timeout_s", cfg.SubprocessTimeout.Seconds(),
 		"max_query_retries", cfg.MaxQueryRetries,
 		"scanner_buffer_size", cfg.ScannerBufferSize,
@@ -441,7 +506,7 @@ func main() {
 	// worker を起動 (内部で reconnect loop を回す)
 	runWorker(ctx, cfg, mcpConfigPath)
 
-	slog.Info("bridge-claude2 stopped")
+	slog.Info(bridgeType + " stopped")
 }
 
 // ──────────────────────────────────────────────────────────────────────── //

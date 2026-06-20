@@ -6,6 +6,29 @@ All notable changes to `agent-hub-bridges` are recorded here. Format follows
 adheres loosely to [Semantic Versioning](https://semver.org/); breaking
 changes between minor versions are possible until `v1.0.0`.
 
+## [0.3.3] — 2026-06-20
+
+### Changed — bridge-claude2: GitHub 投稿 footer を真値注入 (issue #245)
+
+peer が `gh` で PR / issue にコメントするときの規約 footer の `<model>` 欄を
+内側 Claude が幻覚で埋めており (`fable-5` / `opus-4.8` / `sonnet-4.6` がバラバラ)、
+observability を汚染していた。bridge が真値から footer を組成し、`formatPrompt` で
+毎メッセージ内側 Claude に指示注入する方式に変更した。server 変更不要のため patch bump。
+
+- **`formatPrompt` に footer 指示を常時注入**: GitHub 投稿・成果物テキスト作成時に
+  付与すべき footer literal を毎メッセージ末尾に指示として渡す (`cmd/bridge/main.go`)。
+- **footer は bridge が真値から組成** (`buildGitHubFooter`):
+  `@<handle> [bridge-claude2 · <model>] (operator-supervised · <gh-login>/agent-hub)`
+  - `<handle>` = `cfg.Participant`、`bridge-claude2` = `bridgeType` 定数 (自己同定の単一 source)
+  - `<model>` = `--model` / `AGENT_HUB_MODEL`。**空なら model 欄ごと省略** (推測で埋めない)
+  - `<gh-login>` = 起動時に `gh api user --jq .login` で解決。失敗時は login 部を省略
+  - 唯一の固定リテラルは `agent-hub` ラベルのみ。個人固有名詞はソースに焼かない。
+- **割り切り**: 強制 (hook/shim) ではなく per-message プロンプト指示。付け忘れたら
+  「footer 欠落 (正直)」に倒れる。**present な footer は必ず真値・嘘ゼロ**を保証。
+- 自己同定リテラル (`bridge-claude2`) を `bridgeType` 定数に集約 (起動バナー /
+  MCP client name / temp file / telemetry tracer / footer の単一 source 化)。
+- docs: `bridge-claude2/README.md` に footer 自動注入を標準ルールとして明記。
+
 ## [0.3.2] — 2026-06-19
 
 ### Fixed — installer first-chat 貫通 (user→participant rename 追従, issue #239 系)

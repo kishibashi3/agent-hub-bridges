@@ -153,7 +153,7 @@ func runHubSession(
 	// --- hub client 初期化 ---
 	client, err := agenthub.New(
 		cfg.AgentHubURL, cfg.GitHubPAT, cfg.Participant, cfg.Tenant,
-		agenthub.WithClientName("bridge-claude2"),
+		agenthub.WithClientName(bridgeType),
 	)
 	if err != nil {
 		return cursor, false, fmt.Errorf("agenthub.New: %w", err)
@@ -414,7 +414,7 @@ func handleOne(
 	slog.Info("← message",
 		"msg_id", msg.ID, "from", msg.Sender, "body_preview", truncate(msg.Body, 120))
 
-	prompt := formatPrompt("@"+cfg.Participant, msg)
+	prompt := formatPrompt("@"+cfg.Participant, msg, cfg.GitHubFooter)
 
 	const retryBackoff = 5 * time.Second
 	var lastUsage queryUsage

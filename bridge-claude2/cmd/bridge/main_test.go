@@ -2,8 +2,11 @@ package main
 
 import (
 	"os"
+	"strings"
 	"testing"
 	"time"
+
+	agenthub "github.com/kishibashi3/agent-hub-sdk/go"
 )
 
 // TestResolveInboxPollInterval は safety-net poll 間隔の解決優先順位を検証する (issue #234)。
@@ -145,7 +148,7 @@ func TestParseConfig_SubprocessTimeoutDefaults(t *testing.T) {
 func TestParseConfig_MaxQueryRetriesDefaults(t *testing.T) {
 	tests := []struct {
 		name    string
-		flagVal int    // -1 = フラグ未指定
+		flagVal int // -1 = フラグ未指定
 		envVal  string
 		wantN   int
 		wantErr bool
@@ -204,5 +207,79 @@ func TestParseConfig_MaxQueryRetriesDefaults(t *testing.T) {
 				t.Errorf("got %d, want %d", got, tc.wantN)
 			}
 		})
+	}
+}
+
+// TestBuildGitHubFooter は footer が真値から正しく組成され、欠けた値は
+// 「省略」に倒れる (嘘を出さない) ことを検証する (issue #245)。
+func TestBuildGitHubFooter(t *testing.T) {
+	const bt = "bridge-claude2"
+	tests := []struct {
+		name    string
+		handle  string
+		model   string
+		ghLogin string
+		want    string
+	}{
+		{
+			name:    "all present",
+			handle:  "ntv-reviewer",
+			model:   "opus-4.8",
+			ghLogin: "kishibashi3",
+			want:    "@ntv-reviewer [bridge-claude2 · opus-4.8] (operator-supervised · kishibashi3/agent-hub)",
+		},
+		{
+			name:    "model omitted when empty",
+			handle:  "ntv-reviewer",
+			model:   "",
+			ghLogin: "kishibashi3",
+			want:    "@ntv-reviewer [bridge-claude2] (operator-supervised · kishibashi3/agent-hub)",
+		},
+		{
+			name:    "gh-login omitted when empty",
+			handle:  "ntv-reviewer",
+			model:   "opus-4.8",
+			ghLogin: "",
+			want:    "@ntv-reviewer [bridge-claude2 · opus-4.8] (operator-supervised · agent-hub)",
+		},
+		{
+			name:    "both model and gh-login omitted",
+			handle:  "ntv-reviewer",
+			model:   "",
+			ghLogin: "",
+			want:    "@ntv-reviewer [bridge-claude2] (operator-supervised · agent-hub)",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := buildGitHubFooter(tc.handle, bt, tc.model, tc.ghLogin); got != tc.want {
+				t.Errorf("buildGitHubFooter() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestFormatPrompt_FooterInjection は footer が非空なら指示が注入され、
+// 空なら base prompt のみになることを検証する (issue #245)。
+func TestFormatPrompt_FooterInjection(t *testing.T) {
+	msg := agenthub.Message{
+		ID:     "msg-1",
+		Sender: "@alice",
+		To:     "@bob",
+		Body:   "hello",
+	}
+	footer := "@bob [bridge-claude2 · opus-4.8] (operator-supervised · kishibashi3/agent-hub)"
+
+	withFooter := formatPrompt("@bob", msg, footer)
+	if !strings.Contains(withFooter, footer) {
+		t.Errorf("formatPrompt() should contain footer literal %q", footer)
+	}
+	if !strings.Contains(withFooter, "GitHub 投稿ルール") {
+		t.Error("formatPrompt() should contain the footer instruction header")
+	}
+
+	withoutFooter := formatPrompt("@bob", msg, "")
+	if strings.Contains(withoutFooter, "GitHub 投稿ルール") {
+		t.Error("formatPrompt() with empty footer should not inject the footer instruction")
 	}
 }

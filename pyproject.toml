@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agent-hub-bridges"
-version = "0.3.2"
+version = "0.3.3"
 description = "Monorepo of agent-hub bridge workers (Claude / Gemini / Slack / A2A)"
 readme = "README.md"
 license = { text = "Apache-2.0" }
