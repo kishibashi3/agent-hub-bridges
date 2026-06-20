@@ -377,7 +377,7 @@ def _write_config_toml(temp_codex_home: Path, config: Config) -> None:
         f'bearer_token_env_var = "GITHUB_PAT"\n'
         f"\n"
         f"[mcp_servers.agent-hub.env_http_headers]\n"
-        f'X-User-Id = "{_ENV_USER_ID}"\n'
+        f'X-Participant-Id = "{_ENV_USER_ID}"\n'
         f"{tenant_line}"
     )
     config_path = temp_codex_home / "config.toml"

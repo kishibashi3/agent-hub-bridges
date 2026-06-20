@@ -250,7 +250,7 @@ def _write_mcp_config(config: Config) -> Path:
     """
     headers: dict[str, str] = {
         "Authorization": f"Bearer {config.github_pat}",
-        "X-User-Id": config.user,
+        "X-Participant-Id": config.user,
     }
     if config.tenant:
         headers["X-Tenant-Id"] = config.tenant

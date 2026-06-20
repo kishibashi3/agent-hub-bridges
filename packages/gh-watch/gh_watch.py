@@ -100,7 +100,7 @@ def _build_headers() -> dict[str, str]:
     if PAT:
         headers["Authorization"] = f"Bearer {PAT}"
         if HANDLE_OVERRIDE:
-            headers["X-User-Id"] = HANDLE_OVERRIDE
+            headers["X-Participant-Id"] = HANDLE_OVERRIDE
     else:
         logger.error("AGENT_HUB_GITHUB_PAT is required")
         sys.exit(1)
