@@ -457,8 +457,16 @@ func handleOne(
 	// (context.Canceled) はシャットダウン時の期待動作であり実エラーではない。
 	// 送信者への擬陽性エラー報告をスキップする。journalledSend を呼ばないことで
 	// journal.write 自体を回避し、次回起動時の replay による遅延誤送信も防ぐ。
-	// (graceful drain 中は handleOne に drainCtx が渡るため ctx.Err() == nil となり、
-	//  通常どおりエラー報告される。)
+	//
+	// この分岐 (ctx.Err() != nil) は context.Canceled だけでなく
+	// context.DeadlineExceeded も捕捉する点に注意 (issue #250):
+	//   - 通常の polling loop では ctx が cancel → context.Canceled。
+	//   - graceful drain 中は handleOne に drainCtx (WithTimeout) が渡る。drain が
+	//     時間内に終われば ctx.Err() == nil なので通常どおりエラー報告される。
+	//     ただし drain timeout (runGracefulDrain の compactTimeout + SubprocessTimeout
+	//     + 1分) を超過した場合は ctx.Err() == context.DeadlineExceeded となり、
+	//     この分岐で抑制される。drain は時間制限付きの best-effort なので、timeout
+	//     超過後のエラー報告も実質的に擬陽性であり、抑制は意図的な挙動である。
 	if ctx.Err() != nil {
 		slog.Info("handleOne: query cancelled by shutdown — suppressing error report",
 			"msg_id", msg.ID, "err", lastErr)
