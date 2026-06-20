@@ -452,6 +452,19 @@ func handleOne(
 	}
 
 	_ = lastUsage // usage は既に emitSpan 済み
+
+	// issue #240: SIGTERM 等で ctx がキャンセルされた状態の query 失敗
+	// (context.Canceled) はシャットダウン時の期待動作であり実エラーではない。
+	// 送信者への擬陽性エラー報告をスキップする。journalledSend を呼ばないことで
+	// journal.write 自体を回避し、次回起動時の replay による遅延誤送信も防ぐ。
+	// (graceful drain 中は handleOne に drainCtx が渡るため ctx.Err() == nil となり、
+	//  通常どおりエラー報告される。)
+	if ctx.Err() != nil {
+		slog.Info("handleOne: query cancelled by shutdown — suppressing error report",
+			"msg_id", msg.ID, "err", lastErr)
+		return lastErr
+	}
+
 	slog.Error("handleOne: claude query error", "msg_id", msg.ID, "err", lastErr)
 	errMsg := fmt.Sprintf("(auto) %s error: %v", bridgeType, lastErr)
 	_ = journalledSend(ctx, client, journal, msg.Sender, errMsg, msg.ID)
