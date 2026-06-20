@@ -453,7 +453,7 @@ func handleOne(
 
 	_ = lastUsage // usage は既に emitSpan 済み
 	slog.Error("handleOne: claude query error", "msg_id", msg.ID, "err", lastErr)
-	errMsg := fmt.Sprintf("(auto) bridge-claude2 error: %v", lastErr)
+	errMsg := fmt.Sprintf("(auto) %s error: %v", bridgeType, lastErr)
 	_ = journalledSend(ctx, client, journal, msg.Sender, errMsg, msg.ID)
 	return lastErr
 }

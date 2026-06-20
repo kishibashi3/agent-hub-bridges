@@ -15,13 +15,13 @@ import (
 
 const (
 	inventoryEnv       = "BRIDGE_INVENTORY"
-	deadMarkerTemplate = "/tmp/bridge-claude2-%s.dead"
+	deadMarkerTemplate = "/tmp/%s-%s.dead"
 )
 
 // writeDeadMarker は dead marker ファイルを作成する。
 // 失敗しても WARNING ログのみ (bridge を落とさない)。
 func writeDeadMarker(user string) {
-	path := fmt.Sprintf(deadMarkerTemplate, user)
+	path := fmt.Sprintf(deadMarkerTemplate, bridgeType, user)
 	ts := time.Now().UTC().Format(time.RFC3339)
 	if err := os.WriteFile(path, []byte(ts+"\n"), 0o644); err != nil {
 		slog.Warn("inventory: failed to write dead marker", "path", path, "err", err)

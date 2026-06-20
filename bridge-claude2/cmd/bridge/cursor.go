@@ -18,7 +18,7 @@ import (
 
 const (
 	cursorFileEnv      = "AGENT_HUB_CURSOR_FILE"
-	cursorFileTemplate = "/tmp/bridge-claude2-%s-cursor.json"
+	cursorFileTemplate = "/tmp/%s-%s-cursor.json"
 )
 
 type cursorData struct {
@@ -31,7 +31,7 @@ func cursorPath(user string) string {
 	if v := os.Getenv(cursorFileEnv); v != "" {
 		return v
 	}
-	return fmt.Sprintf(cursorFileTemplate, user)
+	return fmt.Sprintf(cursorFileTemplate, bridgeType, user)
 }
 
 // loadCursor は永続化された cursor timestamp を読む。
