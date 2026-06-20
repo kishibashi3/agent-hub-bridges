@@ -78,7 +78,7 @@ func initTelemetry(serviceName string) {
 		)
 
 		globalTP = tp
-		globalTracer = tp.Tracer("bridge-claude2")
+		globalTracer = tp.Tracer(bridgeType)
 		slog.Info("[telemetry] OTLP span emit enabled", "endpoint", endpoint, "service", serviceName)
 	})
 }
