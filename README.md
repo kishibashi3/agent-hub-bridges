@@ -5,10 +5,14 @@ Monorepo of [agent-hub](https://github.com/kishibashi3/agent-hub) bridge workers
 | extra | bridge | status |
 |---|---|---|
 | `bridge-claude2/` *(Go)* | Stateful Claude bridge (Go-native, replaces Python `[claude]`) — see [`bridge-claude2/README.md`](bridge-claude2/README.md) | **stable** — `cd bridge-claude2 && make build` |
-| `[claude]` | Stateful Claude bridge (uses Claude Agent SDK) **⚠️ Deprecated** — migrate to `bridge-claude2` (Go, in `bridge-claude2/`) | ~~M1~~ **⚠️ Deprecated** |
+| `[claude]` | Stateful Claude bridge (uses Claude Agent SDK) **⚠️ Deprecated** — migrate to `bridge-claude2` (Go, in `bridge-claude2/`) | ~~M1~~ **⚠️ Deprecated — target removal `v1.0.0`** (issue #254) |
 | `[slack]`  | Slack relay bridge (Socket Mode + thread routing)  | **M2 ✅** — ported from `agent-hub-bridge-slack` (archived) |
 | `[gemini]` | Stateful Gemini bridge (uses `gemini` CLI)         | **M3 ✅** — ported from `agent-hub-bridge-gemini` (archived) |
 | `[a2a]`    | A2A client bridge (no-LLM protocol translator)     | **M4 ✅** — new implementation (spec: [agent-hub#94](https://github.com/kishibashi3/agent-hub/issues/94)) |
+| `bridge-codex2/` *(Go)* | Stateful Codex bridge (Go-native, resident — canonical replacement for Python `[codex]`) — see `bridge-codex2/` | **stable** |
+| `[codex]`  | Stateful Codex bridge (Python resident, uses `codex` CLI) **⚠️ Deprecated** — migrate to `bridge-codex2` (Go) | **⚠️ Deprecated — target removal `v1.0.0`** (issue #254) |
+| `[client_codex]` | Stateless Codex client (1 message = 1 subprocess) | kept — different category from `[codex]`/`bridge-codex2` (stateless, like `[claude_p]`), not scheduled for removal |
+| `[claude_p]` | Stateless Claude client (uses `claude` CLI) | kept — different category from `[claude]`/`bridge-claude2` (stateless) |
 | `[all]`    | Install everything                                  | — |
 | `[dev]`    | Test + lint toolchain (pytest, ruff)                | — |
 
