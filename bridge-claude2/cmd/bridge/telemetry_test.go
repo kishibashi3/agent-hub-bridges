@@ -170,3 +170,67 @@ func TestReadUntilResult_SentMessageObserved(t *testing.T) {
 		})
 	}
 }
+
+// TestReadUntilResult_SentMessageConfirmed は send_message tool_use に対応する
+// tool_result の成否 (is_error) まで確認して usage.SentMessageConfirmed に反映する
+// ことを検証する (issue #266: tool_use 観測だけでは「送信済み」と断定できない、という
+// レビュー指摘への対応)。
+func TestReadUntilResult_SentMessageConfirmed(t *testing.T) {
+	tests := []struct {
+		name          string
+		lines         []string
+		wantObserved  bool
+		wantConfirmed bool
+	}{
+		{
+			name: "tool_result success → confirmed",
+			lines: []string{
+				`{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"mcp__agent-hub__send_message","input":{}}]}}`,
+				`{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","is_error":false}]}}`,
+				`{"type":"result","subtype":"success","is_error":false}`,
+			},
+			wantObserved:  true,
+			wantConfirmed: true,
+		},
+		{
+			name: "tool_result is_error=true → observed but not confirmed",
+			lines: []string{
+				`{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"mcp__agent-hub__send_message","input":{}}]}}`,
+				`{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","is_error":true}]}}`,
+				`{"type":"result","subtype":"success","is_error":false}`,
+			},
+			wantObserved:  true,
+			wantConfirmed: false,
+		},
+		{
+			name: "killed before tool_result arrives → observed but not confirmed",
+			lines: []string{
+				`{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"mcp__agent-hub__send_message","input":{}}]}}`,
+			},
+			wantObserved:  true,
+			wantConfirmed: false,
+		},
+		{
+			name: "tool_result for unrelated tool_use_id → not confirmed",
+			lines: []string{
+				`{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"mcp__agent-hub__send_message","input":{}}]}}`,
+				`{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"other","is_error":false}]}}`,
+				`{"type":"result","subtype":"success","is_error":false}`,
+			},
+			wantObserved:  true,
+			wantConfirmed: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			scanner := bufio.NewScanner(strings.NewReader(strings.Join(tt.lines, "\n") + "\n"))
+			usage, _ := readUntilResult(context.Background(), scanner, io.Discard, nil, false)
+			if usage.SentMessageObserved != tt.wantObserved {
+				t.Errorf("usage.SentMessageObserved = %v, want %v", usage.SentMessageObserved, tt.wantObserved)
+			}
+			if usage.SentMessageConfirmed != tt.wantConfirmed {
+				t.Errorf("usage.SentMessageConfirmed = %v, want %v", usage.SentMessageConfirmed, tt.wantConfirmed)
+			}
+		})
+	}
+}
