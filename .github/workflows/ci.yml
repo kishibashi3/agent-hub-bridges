@@ -48,11 +48,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - dir: bridge-tmux
-            test-path: ./cmd/agenthubctl/... ./internal/fleet/...
-          - dir: bridge-codex2
-            test-path: ./...
+        dir: [bridge-tmux, bridge-codex2]
     steps:
       - uses: actions/checkout@v4
 
@@ -64,4 +60,4 @@ jobs:
 
       - name: go test
         working-directory: ${{ matrix.dir }}
-        run: go test ${{ matrix.test-path }}
+        run: go test ./...
