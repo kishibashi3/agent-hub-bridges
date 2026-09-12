@@ -48,7 +48,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        dir: [bridge-tmux, bridge-codex2]
+        dir: [bridge-tmux]
     steps:
       - uses: actions/checkout@v4
 
