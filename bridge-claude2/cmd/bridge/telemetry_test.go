@@ -118,3 +118,55 @@ func TestReadUntilResult_ExtractsModel(t *testing.T) {
 		})
 	}
 }
+
+// TestReadUntilResult_SentMessageObserved は stream-json 中の
+// `mcp__agent-hub__send_message` tool_use を検知して usage.SentMessageObserved に
+// 反映することを検証する (issue #264: 二重起動時の矛盾応答防止)。
+func TestReadUntilResult_SentMessageObserved(t *testing.T) {
+	tests := []struct {
+		name  string
+		lines []string
+		want  bool
+	}{
+		{
+			name: "send_message tool_use observed",
+			lines: []string{
+				`{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"mcp__agent-hub__send_message","input":{}}]}}`,
+				`{"type":"result","subtype":"success","is_error":false}`,
+			},
+			want: true,
+		},
+		{
+			name: "no send_message tool_use → false",
+			lines: []string{
+				`{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Read","input":{}}]}}`,
+				`{"type":"result","subtype":"success","is_error":false}`,
+			},
+			want: false,
+		},
+		{
+			name: "partial tool name match does not count (exact match only)",
+			lines: []string{
+				`{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"mcp__agent-hub__send_message_v2","input":{}}]}}`,
+				`{"type":"result","subtype":"success","is_error":false}`,
+			},
+			want: false,
+		},
+		{
+			name: "observed even when subprocess is killed before the result event (timeout)",
+			lines: []string{
+				`{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"mcp__agent-hub__send_message","input":{}}]}}`,
+			},
+			want: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			scanner := bufio.NewScanner(strings.NewReader(strings.Join(tt.lines, "\n") + "\n"))
+			usage, _ := readUntilResult(context.Background(), scanner, io.Discard, nil, false)
+			if usage.SentMessageObserved != tt.want {
+				t.Errorf("usage.SentMessageObserved = %v, want %v", usage.SentMessageObserved, tt.want)
+			}
+		})
+	}
+}

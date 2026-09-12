@@ -445,6 +445,21 @@ func handleOne(
 			return nil
 		}
 
+		// issue #264: subprocess が result 到達前に timeout kill されても、その前に
+		// `mcp__agent-hub__send_message` を tool_use していた場合、hub には既に
+		// 応答が送信済みの可能性が高い。ここでリトライすると同一 inbound message に
+		// 対して 2 個目の Claude セッションが起動し、矛盾する内容の応答を二重送信
+		// してしまう (実例: 同一トピックについて食い違う応答が短時間に連続送信された)。
+		// 二重送信のリスクの方が「タイムアウトでリトライして完了させる」利益より
+		// 重いため、この場合はリトライせず打ち切る。
+		if usage.SentMessageObserved {
+			slog.Warn("handleOne: subprocess failed after already invoking send_message — "+
+				"skipping retry to avoid duplicate/contradictory reply (issue #264)",
+				"msg_id", msg.ID, "attempt", attempt, "err", err,
+			)
+			break
+		}
+
 		// SubprocessTimeout による中断のみリトライ対象。それ以外はすぐ break。
 		if !errors.Is(err, errSubprocessTimeout) {
 			break
@@ -452,6 +467,14 @@ func handleOne(
 	}
 
 	_ = lastUsage // usage は既に emitSpan 済み
+
+	// issue #264: 直前の attempt で既に send_message が観測されていた場合、送信者へ
+	// エラー通知を journalledSend で追加送信すると (1) 既に届いている応答と紛らわしい
+	// (2) それ自体が二重送信になる。ここでは送信をスキップして黙って終了する
+	// (ログには既に警告済み)。
+	if lastUsage.SentMessageObserved {
+		return lastErr
+	}
 
 	// issue #240: SIGTERM 等で ctx がキャンセルされた状態の query 失敗
 	// (context.Canceled) はシャットダウン時の期待動作であり実エラーではない。

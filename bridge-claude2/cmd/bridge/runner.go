@@ -85,7 +85,19 @@ type queryUsage struct {
 	// AGENT_HUB_MODEL 未設定で cfg.Model が空でも、ここに実モデル名が乗る。
 	// 取得できなかった場合は "" のまま (emitSpan 側で fallback)。
 	Model string
+	// SentMessageObserved は stream-json 中に Claude が
+	// `mcp__agent-hub__send_message` を tool_use したことを検知したかどうか (issue #264)。
+	// SubprocessTimeout で subprocess が result イベント到達前に kill された場合でも、
+	// tool_use はそれより前に stdout へ流れているため、この時点で MCP 呼び出しは
+	// 既に発火済み (= hub 側に送信済みの可能性が高い) とみなせる。
+	// handleOne はこれを見てリトライを抑止し、二重起動による矛盾応答を防ぐ。
+	SentMessageObserved bool
 }
+
+// sendMessageToolName は Claude が agent-hub へ返信する際に呼ぶ MCP tool の完全名。
+// 部分一致だと将来追加されるツールで誤検知するリスクがあるため完全一致のみを見る
+// (Python bridge の issue #92 と同じ方針)。
+const sendMessageToolName = "mcp__agent-hub__send_message"
 
 // claudeRunner は Claude CLI subprocess の設定を保持する。
 // on-demand モードでは subprocess はフィールドとして保持せず、
@@ -345,10 +357,19 @@ func readUntilResult(ctx context.Context, scanner *bufio.Scanner, stdinWriter io
 			if ev.Message != nil && ev.Message.Model != "" {
 				usage.Model = ev.Message.Model
 			}
-			// blocking command 検出 (issue #101)
+			// blocking command 検出 (issue #101) + send_message tool_use 検知 (issue #264)。
+			// issue #264: result イベント到達前に subprocess が timeout kill されても、
+			// ここまでの stdout は既に読めているため「応答が hub に送信済みかもしれない」
+			// ことを handleOne 側へ伝えられる。
 			if !isCompact && ev.Message != nil {
 				for _, block := range ev.Message.Content {
-					if block.Type == "tool_use" && block.Name == "Bash" {
+					if block.Type != "tool_use" {
+						continue
+					}
+					if block.Name == sendMessageToolName {
+						usage.SentMessageObserved = true
+					}
+					if block.Name == "Bash" {
 						var input struct {
 							Command string `json:"command"`
 						}
