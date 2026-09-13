@@ -43,17 +43,21 @@ jobs:
         run: pytest -v
 
   go-test:
-    name: go test (bridge-tmux)
+    name: go test (${{ matrix.dir }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        dir: [bridge-tmux, bridge-codex2]
     steps:
       - uses: actions/checkout@v4
 
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version-file: bridge-tmux/go.mod
-          cache-dependency-path: bridge-tmux/go.sum
+          go-version-file: ${{ matrix.dir }}/go.mod
+          cache-dependency-path: ${{ matrix.dir }}/go.sum
 
       - name: go test
-        working-directory: bridge-tmux
-        run: go test ./cmd/agenthubctl/... ./internal/fleet/...
+        working-directory: ${{ matrix.dir }}
+        run: go test ./...

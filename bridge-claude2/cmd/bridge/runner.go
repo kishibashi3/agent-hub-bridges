@@ -46,6 +46,10 @@ type streamAssistantContent struct {
 	Name  string          `json:"name"`
 	Input json.RawMessage `json:"input,omitempty"`
 	Text  string          `json:"text,omitempty"` // text block 用 (compact サマリー収集)
+	// ToolUseID / IsError は type=="tool_result" block 用 (issue #266: tool_use だけでなく
+	// hub 側の成否 (tool_result.is_error) まで確認して SentMessageConfirmed を立てるため)。
+	ToolUseID string `json:"tool_use_id,omitempty"`
+	IsError   bool   `json:"is_error,omitempty"`
 }
 
 // streamAssistantMessage は stream-json の assistant イベントの message フィールド。
@@ -85,7 +89,26 @@ type queryUsage struct {
 	// AGENT_HUB_MODEL 未設定で cfg.Model が空でも、ここに実モデル名が乗る。
 	// 取得できなかった場合は "" のまま (emitSpan 側で fallback)。
 	Model string
+	// SentMessageObserved は stream-json 中に Claude が
+	// `mcp__agent-hub__send_message` を tool_use したことを検知したかどうか (issue #264)。
+	// tool_use はあくまで「Claude が呼び出そうとした」ことしか示さない。hub 側で
+	// reject/失敗した場合も tool_use 自体は観測されるため、これ単独では「送信済み」の
+	// 確証にならない (issue #266 レビュー指摘)。リトライ/エラー通知の抑止判断には
+	// 下記 SentMessageConfirmed を使うこと。
+	SentMessageObserved bool
+	// SentMessageConfirmed は send_message tool_use に対応する tool_result が
+	// is_error=false で返ってきたことまで確認できたかどうか (issue #266)。
+	// これが true の場合のみ「hub に確実に送信済み」とみなせる。tool_use は観測できたが
+	// tool_result が来る前に subprocess が kill された場合や、tool_result が
+	// is_error=true だった場合は false のままになる (= 未確定/失敗 として通常の
+	// リトライ・エラー通知フローに進ませる)。
+	SentMessageConfirmed bool
 }
+
+// sendMessageToolName は Claude が agent-hub へ返信する際に呼ぶ MCP tool の完全名。
+// 部分一致だと将来追加されるツールで誤検知するリスクがあるため完全一致のみを見る
+// (Python bridge の issue #92 と同じ方針)。
+const sendMessageToolName = "mcp__agent-hub__send_message"
 
 // claudeRunner は Claude CLI subprocess の設定を保持する。
 // on-demand モードでは subprocess はフィールドとして保持せず、
@@ -313,6 +336,10 @@ func readUntilResult(ctx context.Context, scanner *bufio.Scanner, stdinWriter io
 	var usage queryUsage
 	var resultErr error
 	resultReceived := false
+	// sendMessageToolUseID は send_message tool_use を観測した際の tool_use_id (issue #266)。
+	// 後続の "user" イベントに含まれる対応する tool_result (is_error) を突き合わせて
+	// usage.SentMessageConfirmed を確定させるために保持する。
+	var sendMessageToolUseID string
 
 	for scanner.Scan() {
 		select {
@@ -345,10 +372,20 @@ func readUntilResult(ctx context.Context, scanner *bufio.Scanner, stdinWriter io
 			if ev.Message != nil && ev.Message.Model != "" {
 				usage.Model = ev.Message.Model
 			}
-			// blocking command 検出 (issue #101)
+			// blocking command 検出 (issue #101) + send_message tool_use 検知 (issue #264)。
+			// issue #264: result イベント到達前に subprocess が timeout kill されても、
+			// ここまでの stdout は既に読めているため「応答が hub に送信済みかもしれない」
+			// ことを handleOne 側へ伝えられる。
 			if !isCompact && ev.Message != nil {
 				for _, block := range ev.Message.Content {
-					if block.Type == "tool_use" && block.Name == "Bash" {
+					if block.Type != "tool_use" {
+						continue
+					}
+					if block.Name == sendMessageToolName {
+						usage.SentMessageObserved = true
+						sendMessageToolUseID = block.ID
+					}
+					if block.Name == "Bash" {
 						var input struct {
 							Command string `json:"command"`
 						}
@@ -371,6 +408,26 @@ func readUntilResult(ctx context.Context, scanner *bufio.Scanner, stdinWriter io
 							}
 						}
 					}
+				}
+			}
+		}
+
+		// issue #266: send_message tool_use に対応する tool_result を確認して
+		// SentMessageConfirmed を確定させる。CLI は実行した tool_use の結果を
+		// "user" role のイベントとして stdout に折り返す。tool_use が観測できても
+		// hub 側が reject/失敗していれば is_error=true の tool_result が返るため、
+		// tool_use の観測だけで「送信済み」とみなすのは不十分 (レビュー指摘)。
+		if ev.Type == "user" && sendMessageToolUseID != "" && !usage.SentMessageConfirmed && ev.Message != nil {
+			for _, block := range ev.Message.Content {
+				if block.Type != "tool_result" || block.ToolUseID != sendMessageToolUseID {
+					continue
+				}
+				if block.IsError {
+					slog.Warn("runner: send_message tool_result reported failure — "+
+						"not treating as sent (issue #266)",
+						"tool_use_id", block.ToolUseID)
+				} else {
+					usage.SentMessageConfirmed = true
 				}
 			}
 		}
