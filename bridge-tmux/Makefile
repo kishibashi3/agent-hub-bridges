@@ -2,8 +2,9 @@ BRIDGE  := bridge-tmux
 CTL     := agenthubctl
 CMD_BRIDGE := ./cmd/bridge
 CMD_CTL    := ./cmd/agenthubctl
+INSTALL_DIR ?= $(HOME)/.local/bin
 
-.PHONY: build build-arm64 vet test clean
+.PHONY: build build-arm64 vet test clean install
 
 build:
 	go build -o $(BRIDGE) $(CMD_BRIDGE)
@@ -22,6 +23,11 @@ test:
 clean:
 	rm -f $(BRIDGE) $(BRIDGE)-arm64 $(CTL) $(CTL)-arm64
 
+install: build
+	install -d $(INSTALL_DIR)
+	install -m 755 $(BRIDGE) $(INSTALL_DIR)/$(BRIDGE)
+	install -m 755 $(CTL)    $(INSTALL_DIR)/$(CTL)
+
 # 使用例:
 #   make build
 #   AGENT_HUB_URL=http://... GITHUB_PAT=ghp_... \
@@ -30,3 +36,6 @@ clean:
 #   ./agenthubctl --fleet fleet.yaml start
 #   ./agenthubctl --fleet fleet.yaml status
 #   ./agenthubctl --fleet fleet.yaml stop
+#
+#   make install                      # ~/.local/bin に bridge-tmux / agenthubctl を配置
+#   PATH に ~/.local/bin が入っていれば agenthubctl bridge spawn は basename 解決で動く
