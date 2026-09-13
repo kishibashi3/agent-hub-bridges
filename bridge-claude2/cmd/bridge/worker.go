@@ -445,6 +445,34 @@ func handleOne(
 			return nil
 		}
 
+		// issue #264/#266: subprocess が result 到達前に timeout kill されても、その前に
+		// `mcp__agent-hub__send_message` の tool_result が is_error=false で確認できて
+		// いれば、hub には既に応答が確実に送信済みである。ここでリトライすると同一
+		// inbound message に対して 2 個目の Claude セッションが起動し、矛盾する内容の
+		// 応答を二重送信してしまう (実例: 同一トピックについて食い違う応答が短時間に
+		// 連続送信された)。二重送信のリスクの方が「タイムアウトでリトライして完了させる」
+		// 利益より重いため、この場合はリトライせず打ち切る。
+		//
+		// tool_use は観測できたが tool_result での成功確認が取れていない場合
+		// (usage.SentMessageObserved && !usage.SentMessageConfirmed) は、hub 側の
+		// reject/失敗や tool_result 到達前の kill を含む未確定状態であり、「送信済み」
+		// と決めつけて通知を握りつぶすと二重送信より悪いサイレント消失になりうる
+		// (issue #266 レビュー指摘)。この場合は抑止せず通常のリトライ/エラー報告に
+		// 進める。ログにも状態を残し、別チャネル (slog) から観測可能にする。
+		if usage.SentMessageObserved && !usage.SentMessageConfirmed {
+			slog.Warn("handleOne: send_message tool_use observed but not confirmed sent "+
+				"(no successful tool_result seen) — treating as unsent, not suppressing retry/notification (issue #266)",
+				"msg_id", msg.ID, "attempt", attempt, "err", err,
+			)
+		}
+		if usage.SentMessageConfirmed {
+			slog.Warn("handleOne: subprocess failed after send_message already confirmed sent — "+
+				"skipping retry to avoid duplicate/contradictory reply (issue #264)",
+				"msg_id", msg.ID, "attempt", attempt, "err", err,
+			)
+			break
+		}
+
 		// SubprocessTimeout による中断のみリトライ対象。それ以外はすぐ break。
 		if !errors.Is(err, errSubprocessTimeout) {
 			break
@@ -452,6 +480,13 @@ func handleOne(
 	}
 
 	_ = lastUsage // usage は既に emitSpan 済み
+
+	// issue #264/#266: 直前の attempt で send_message の送信成功が確定していた場合のみ、
+	// 送信者へのエラー通知 (journalledSend) をスキップする。tool_use のみ観測 (未確定) の
+	// 場合はスキップせず通常通り通知する (詳細は上記ループ内コメント参照)。
+	if lastUsage.SentMessageConfirmed {
+		return lastErr
+	}
 
 	// issue #240: SIGTERM 等で ctx がキャンセルされた状態の query 失敗
 	// (context.Canceled) はシャットダウン時の期待動作であり実エラーではない。

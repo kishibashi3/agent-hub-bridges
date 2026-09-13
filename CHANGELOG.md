@@ -6,6 +6,27 @@ All notable changes to `agent-hub-bridges` are recorded here. Format follows
 adheres loosely to [Semantic Versioning](https://semver.org/); breaking
 changes between minor versions are possible until `v1.0.0`.
 
+## [0.3.4] — 2026-09-12
+
+### Deprecated — Python legacy bridge の削除期限を明記 (issue #254)
+
+世代交代（Python → Go）の中間状態が長く、Deprecated 項目の削除期限が
+「将来の minor」としか書かれていなかった（agent-hub エコシステム評価レポート
+issue #319 W8）。具体的な削除予定バージョンを明記する。プロトコル・API 変更を
+伴わないドキュメントのみの変更のため patch bump。
+
+- **`[claude]` (Python, Claude Agent SDK 利用)**: `bridge-claude2` (Go) が
+  stable の代替として存在するため **`v1.0.0` で削除予定**。
+- **`[codex]` (Python resident, `codex` CLI 利用)**: `bridge-codex2` (Go,
+  issue #186 で実装完了) を正本の resident 実装とし、**`v1.0.0` で削除予定**。
+- **`[client_codex]`（stateless, 1 message = 1 subprocess）は削除対象外**:
+  `[codex]`/`bridge-codex2` とは異なるカテゴリ（stateless client）で、
+  `[claude_p]` が `bridge-claude2` と並存しているのと同じ位置づけ。
+- 削除の実行自体はこの変更に含まない。ecosystem CLAUDE.md の段階的
+  deprecation 手順（deprecated 化→運用ログで consumer 移行確認→flag off→削除）
+  に従い、実行前に issue #254 で consumer 移行状況を確認する。
+- agent-hub 側の `X-User-Id` header 削除期限 (issue #325) と方針・書式を揃えた。
+
 ## [0.3.3] — 2026-06-20
 
 ### Changed — bridge-claude2: GitHub 投稿 footer を真値注入 (issue #245)

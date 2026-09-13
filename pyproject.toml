@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agent-hub-bridges"
-version = "0.3.3"
+version = "0.3.4"
 description = "Monorepo of agent-hub bridge workers (Claude / Gemini / Slack / A2A)"
 readme = "README.md"
 license = { text = "Apache-2.0" }
@@ -27,10 +27,11 @@ classifiers = [
 #   pip install "agent-hub-bridges[claude]"
 # のように必要な bridge だけ pull する。
 dependencies = [
-    # agent-hub-sdk feat/participant-rename-52 (PR #54 — user→participant 用語統一)。
-    # ParticipantNotFoundError 公開 + PeerNotFoundError alias 追加。
-    # LGTM 取得済み。タグ付け後に v0.10.0 に固定する。
-    "agent-hub-sdk @ git+https://github.com/kishibashi3/agent-hub-sdk.git@feat/participant-rename-52#subdirectory=python",
+    # agent-hub-sdk (issue #260): stale branch pin (feat/participant-rename-52,
+    # PR #54 era) が main の bugfix を拾えなかったため main の merge commit に更新。
+    # 5854dc6b = agent-hub-sdk#58 (mcp>=1.0,<2.0 pin、closes agent-hub-sdk#57)。
+    # v0.10.0 タグ作成後、追って tag pin に更新予定。
+    "agent-hub-sdk @ git+https://github.com/kishibashi3/agent-hub-sdk.git@5854dc6bc3559f78431a0e97343c4186409bef48#subdirectory=python",
     "anyio>=4.0.0",
     "python-dotenv>=1.0.0",
 ]
