@@ -28,7 +28,7 @@ wheels = [
 
 [[package]]
 name = "agent-hub-bridges"
-version = "0.3.0"
+version = "0.3.4"
 source = { editable = "." }
 dependencies = [
     { name = "agent-hub-sdk" },
@@ -75,7 +75,7 @@ slack = [
 requires-dist = [
     { name = "a2a-sdk", marker = "extra == 'a2a'", specifier = ">=1.0.3,<2" },
     { name = "agent-hub-bridges", extras = ["claude", "slack", "gemini", "a2a", "client-codex", "codex", "claude-p", "github-app"], marker = "extra == 'all'" },
-    { name = "agent-hub-sdk", git = "https://github.com/kishibashi3/agent-hub-sdk.git?subdirectory=python&rev=v0.9.0" },
+    { name = "agent-hub-sdk", git = "https://github.com/kishibashi3/agent-hub-sdk.git?subdirectory=python&rev=5854dc6bc3559f78431a0e97343c4186409bef48" },
     { name = "aiohttp", marker = "extra == 'slack'", specifier = ">=3.9.0" },
     { name = "anyio", specifier = ">=4.0.0" },
     { name = "claude-agent-sdk", marker = "extra == 'claude'", specifier = ">=0.1.0" },
@@ -94,8 +94,8 @@ provides-extras = ["claude", "slack", "gemini", "a2a", "github-app", "client-cod
 
 [[package]]
 name = "agent-hub-sdk"
-version = "0.9.0"
-source = { git = "https://github.com/kishibashi3/agent-hub-sdk.git?subdirectory=python&rev=feat%2Fparticipant-rename-52#417ea46a6a376bc8915062e2e3f0c742ff4f9e5f" }
+version = "0.10.0"
+source = { git = "https://github.com/kishibashi3/agent-hub-sdk.git?subdirectory=python&rev=5854dc6bc3559f78431a0e97343c4186409bef48#5854dc6bc3559f78431a0e97343c4186409bef48" }
 dependencies = [
     { name = "anyio" },
     { name = "mcp" },
