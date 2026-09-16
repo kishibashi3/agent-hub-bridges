@@ -23,7 +23,8 @@ import (
 	agenthub "github.com/kishibashi3/agent-hub-sdk/go"
 )
 
-// deferredBodyPreviewLen は記録する本文の先頭文字数 (WARN で内容を推測できる程度)。
+// deferredBodyPreviewLen は記録する本文の先頭バイト数 (WARN で内容を推測できる程度)。
+// truncate はバイト単位で切るため、日本語では約 40 文字になる。
 const deferredBodyPreviewLen = 120
 
 // deferredRecord は `<user>.deferred` の 1 行。
@@ -149,7 +150,7 @@ func warnLostDeferred(store *deferredStore) {
 	if len(recs) == 0 {
 		return
 	}
-	slog.Warn("[limit] previous process exited during limit sleep — deferred messages were NOT processed "+
+	slog.Warn("[limit] previous process exited during limit sleep — deferred messages may not have been processed "+
 		"(already marked as read on hub; not re-dispatched)",
 		"count", len(recs), "path", store.path)
 	for _, r := range recs {
