@@ -193,7 +193,7 @@ func TestSleepingDisplayName(t *testing.T) {
 	}
 }
 
-// TestIsAutoErrorEcho は `(auto) bridge-claude2 error:` で始まる inbound の判定を検証する (提案 3)。
+// TestIsAutoErrorEcho は `(auto) ` で始まる inbound (自分と他 bridge の auto 返信) の判定を検証する (提案 3 / issue #275)。
 // autoErrorPrefix は handleOne が実際に送る auto 返信の先頭と同一定数であること。
 func TestIsAutoErrorEcho(t *testing.T) {
 	outgoing := fmt.Sprintf("%s %v", autoErrorPrefix, errors.New(errSessionLimit))
@@ -203,8 +203,17 @@ func TestIsAutoErrorEcho(t *testing.T) {
 	if !isAutoErrorEcho(outgoing) {
 		t.Error("own auto reply must be detected as echo")
 	}
-	if isAutoErrorEcho("(auto) bridge-claude2 error") {
-		t.Error("prefix without colon is not an auto error")
+	for _, other := range []string{
+		"(auto) bridge workdir does not exist: /tmp/x",
+		"(auto) claude -p engine error: boom",
+		"(auto) gemini error: boom",
+	} {
+		if !isAutoErrorEcho(other) {
+			t.Errorf("auto reply from other bridges must be detected as echo (issue #275): %q", other)
+		}
+	}
+	if isAutoErrorEcho("(automatic) not an auto reply") {
+		t.Error("common prefix must include the trailing space")
 	}
 	if !isAutoErrorEcho("(自動応答) gemini CLI engine でエラー: boom") {
 		t.Error("legacy `(自動応答)` auto reply from Python bridges must be detected as echo (issue #272)")
