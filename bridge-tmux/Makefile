@@ -38,4 +38,4 @@ install: build
 #
 #   make install                      # ~/.local/bin に bridge-tmux だけを配置
 #   agenthubctl は配置しない。agent-hub-control の make install で入れる (#287)
-#   PATH に ~/.local/bin が入っていれば agenthubctl bridge spawn は basename 解決で動く
+#   PATH に ~/.local/bin が入っていれば、agenthubctl bridge spawn は bridge-tmux を basename で解決して起動できる
