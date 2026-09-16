@@ -99,7 +99,7 @@ func TestRunFleet_ContextCancel(t *testing.T) {
 		},
 	}
 	global := &config{
-		AgentHubURL:      "http://localhost:0",  // 接続しない
+		AgentHubURL:      "http://localhost:0", // 接続しない
 		GitHubPAT:        "test-pat",
 		SpawnTimeout:     time.Second,
 		ActivityIdle:     time.Second,

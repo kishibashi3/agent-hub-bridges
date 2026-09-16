@@ -64,9 +64,9 @@ type counterRunner struct {
 	n atomic.Int64
 }
 
-func (r *counterRunner) run(_ ...string) error                            { return nil }
-func (r *counterRunner) runCtx(_ context.Context, _ ...string) error     { return nil }
-func (r *counterRunner) runWithStdin(_ io.Reader, _ ...string) error     { return nil }
+func (r *counterRunner) run(_ ...string) error                       { return nil }
+func (r *counterRunner) runCtx(_ context.Context, _ ...string) error { return nil }
+func (r *counterRunner) runWithStdin(_ io.Reader, _ ...string) error { return nil }
 func (r *counterRunner) output(_ ...string) ([]byte, error) {
 	n := r.n.Add(1)
 	return []byte(fmt.Sprintf("content-%d", n)), nil
@@ -242,10 +242,10 @@ func TestSession_Start_AlreadyAlive_StopsFirst(t *testing.T) {
 	// Stop() calls: IsAlive (nil=alive), send-keys C-c (nil), wait, IsAlive (error=dead)
 	// Then new-session, send-keys start, capturePaneText x2
 	r.runQueue = []error{
-		nil,                       // Start: IsAlive → alive → will Stop
-		nil,                       // Stop: IsAlive → alive
-		nil,                       // Stop: send-keys C-c
-		fmt.Errorf("no session"),  // Stop: IsAlive after wait → dead (skip kill)
+		nil,                      // Start: IsAlive → alive → will Stop
+		nil,                      // Stop: IsAlive → alive
+		nil,                      // Stop: send-keys C-c
+		fmt.Errorf("no session"), // Stop: IsAlive after wait → dead (skip kill)
 		// new-session: nil (runDef)
 		// send-keys: nil (runDef)
 	}

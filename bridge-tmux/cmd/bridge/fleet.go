@@ -29,9 +29,9 @@ import (
 	"sync"
 	"time"
 
-	agenthub "github.com/kishibashi3/agent-hub-sdk/go"
 	fleetpkg "github.com/kishibashi3/agent-hub-bridges/bridge-tmux/internal/fleet"
 	"github.com/kishibashi3/agent-hub-bridges/bridge-tmux/internal/tmux"
+	agenthub "github.com/kishibashi3/agent-hub-sdk/go"
 )
 
 // Type aliases so the rest of package main continues using the original names.

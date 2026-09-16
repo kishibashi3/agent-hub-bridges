@@ -11,9 +11,10 @@
 //  5. SIGTERM/Ctrl+C でグレースフルシャットダウン
 //
 // 環境変数:
-//   AGENT_HUB_URL    required
-//   GITHUB_PAT       required
-//   AGENT_HUB_TENANT optional
+//
+//	AGENT_HUB_URL    required
+//	GITHUB_PAT       required
+//	AGENT_HUB_TENANT optional
 //
 // Issue: #110, #142
 package main
@@ -33,8 +34,8 @@ import (
 	"syscall"
 	"time"
 
-	agenthub "github.com/kishibashi3/agent-hub-sdk/go"
 	"github.com/kishibashi3/agent-hub-bridges/bridge-tmux/internal/tmux"
+	agenthub "github.com/kishibashi3/agent-hub-sdk/go"
 )
 
 // ──────────────────────────────────────────────────────────────────────── //
