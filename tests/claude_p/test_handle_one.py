@@ -77,6 +77,8 @@ class TestWorkdirMissing:
         call_kwargs = hub.send.call_args.kwargs
         assert call_kwargs["to"] == "@alice"
         assert call_kwargs["caused_by"] == "msg-001"  # issue #84
+        # issue #275: bridge-claude2 と同じ `(auto) <bridge-type> error:` prefix
+        assert call_kwargs["message"].startswith("(auto) bridge-claude-p error: ")
 
     @pytest.mark.asyncio
     async def test_error_logged_when_workdir_missing(
@@ -147,6 +149,7 @@ class TestEngineErrorFallback:
         call_kwargs = hub.send.call_args.kwargs
         assert call_kwargs["to"] == "@alice"
         assert call_kwargs["caused_by"] == "msg-001"  # issue #84
+        assert call_kwargs["message"].startswith("(auto) bridge-claude-p error: ")
 
 
 # ---------- workdir present ----------

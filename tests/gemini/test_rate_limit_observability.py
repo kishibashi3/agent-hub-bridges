@@ -238,6 +238,8 @@ class TestRateLimitFallbackDM:
         assert call_kwargs.kwargs["caused_by"] == "msg-001"  # issue #84
         body = call_kwargs.kwargs["message"].lower()
         assert "rate-limit" in body or "rate-limited" in body
+        # issue #275: bridge-claude2 と同じ `(auto) <bridge-type> error:` prefix
+        assert call_kwargs.kwargs["message"].startswith("(auto) bridge-gemini error: ")
 
     @pytest.mark.asyncio
     async def test_fallback_dm_not_sent_on_success(self) -> None:

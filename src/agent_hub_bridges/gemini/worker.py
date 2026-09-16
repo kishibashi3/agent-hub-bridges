@@ -35,6 +35,10 @@ from agent_hub_bridges.gemini.engine import GeminiCLIEngine, is_rate_limit_error
 
 logger = logging.getLogger(__name__)
 
+# issue #275: auto 返信の prefix。bridge-claude2 の `autoErrorPrefix` と同じ
+# `(auto) <bridge-type> error:` 形式にそろえる (受信側の echo 判定は `(auto) ` の前方一致)。
+_AUTO_ERROR_PREFIX = "(auto) bridge-gemini error:"
+
 
 def _format_prompt(self_handle: str, msg: IncomingMessage) -> str:
     """受信 message を gemini CLI への user prompt に整形.
@@ -146,7 +150,7 @@ async def _handle_one(
                 await hub.send(
                     to=msg.sender,
                     message=(
-                        f"(自動応答) gemini CLI engine でエラー: "
+                        f"{_AUTO_ERROR_PREFIX} gemini CLI engine でエラー: "
                         f"{type(exc).__name__}: {exc}"
                     ),
                     caused_by=msg.id,  # issue #84: caused_by 因果チェーン
@@ -174,7 +178,7 @@ async def _handle_one(
                 await hub.send(
                     to=msg.sender,
                     message=(
-                        f"(自動応答) gemini API が rate-limited のため "
+                        f"{_AUTO_ERROR_PREFIX} gemini API が rate-limited のため "
                         f"{result.attempts} 回 retry しましたが失敗しました。"
                         f"しばらく時間をおいて再送をお願いします。"
                     ),
