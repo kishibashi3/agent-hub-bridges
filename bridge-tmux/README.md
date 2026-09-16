@@ -27,6 +27,17 @@ make build          # amd64
 make build-arm64    # Raspberry Pi 5 用
 ```
 
+## インストール
+
+```bash
+make install        # ~/.local/bin に bridge-tmux を配置 (INSTALL_DIR で変更可)
+```
+
+`make install` で配置するのは `bridge-tmux` だけです。`agenthubctl` は配置しません。
+`agenthubctl` は agent-hub-control の `make install` で入れてください。
+2 か所に同じ名前の `agenthubctl` があると、PATH の順序で古い方が使われるおそれがあるためです (#287)。
+`make build` で作る `./agenthubctl` は、このディレクトリで直接実行する場合だけに使います。
+
 ## 起動
 
 ```bash
