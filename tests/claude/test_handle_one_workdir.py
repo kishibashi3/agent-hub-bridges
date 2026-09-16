@@ -146,6 +146,8 @@ class TestWorkdirMissing:
         assert call_kwargs["to"] == "@alice"
         # メッセージに workdir パスが含まれる
         assert str(missing) in call_kwargs["message"]
+        # issue #275: bridge-claude2 と同じ `(auto) <bridge-type> error:` prefix
+        assert call_kwargs["message"].startswith("(auto) bridge-claude error: ")
 
     @pytest.mark.asyncio
     async def test_error_logged_when_workdir_missing(

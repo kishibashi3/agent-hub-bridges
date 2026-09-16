@@ -41,6 +41,10 @@ from agent_hub_bridges.a2a.config import Config
 
 logger = logging.getLogger(__name__)
 
+# issue #275: auto 返信の prefix。bridge-claude2 の `autoErrorPrefix` と同じ
+# `(auto) <bridge-type> error:` 形式にそろえる (受信側の echo 判定は `(auto) ` の前方一致)。
+_AUTO_ERROR_PREFIX = "(auto) bridge-a2a error:"
+
 
 def _extract_reply_text_from_response(response: StreamResponse) -> tuple[str, int]:
     """1 つの StreamResponse から text と non-text skip 数を取り出す.
@@ -300,7 +304,7 @@ async def _handle_one(
                         # str(exc) は A2A エンドポイント URL や認証情報を含む
                         # 可能性があるため type 名のみ送信する (Minor: PR #68 review)。
                         # 詳細は logger.exception で ops ログに記録済み。
-                        f"(自動応答) A2A agent でエラー: {type(exc).__name__}"
+                        f"{_AUTO_ERROR_PREFIX} A2A agent でエラー: {type(exc).__name__}"
                     ),
                 )
             except Exception:

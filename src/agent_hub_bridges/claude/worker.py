@@ -63,6 +63,10 @@ from agent_hub_bridges.claude.telemetry import configure as configure_telemetry
 
 logger = logging.getLogger(__name__)
 
+# issue #275: auto 返信の prefix。bridge-claude2 の `autoErrorPrefix` と同じ
+# `(auto) <bridge-type> error:` 形式にそろえる (受信側の echo 判定は `(auto) ` の前方一致)。
+_AUTO_ERROR_PREFIX = "(auto) bridge-claude error:"
+
 # issue #46: stdout スニフによる busy 判定ウィンドウ (秒)。
 # ASSISTANT: ログが直近この秒数以内に流れていれば /status → "busy"。
 # 60s に設定した根拠:
@@ -1114,7 +1118,7 @@ async def _handle_one(
                     journal,
                     to=msg.sender,
                     message=(
-                        f"(自動応答) bridge の workdir が存在しません: "
+                        f"{_AUTO_ERROR_PREFIX} bridge の workdir が存在しません: "
                         f"{config.workdir}"
                     ),
                     caused_by=msg.id,

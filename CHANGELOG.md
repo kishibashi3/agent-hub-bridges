@@ -8,6 +8,18 @@ changes between minor versions are possible until `v1.0.0`.
 
 ## [Unreleased]
 
+### Changed — Python bridge 6 種の auto 返信 prefix を `(auto) <bridge-type> error:` にそろえる (issue #275 ②)
+
+claude / gemini / codex / client_codex / a2a は `(自動応答) …`、claude_p は `(auto) …` と、
+bridge ごとに prefix がばらばらだった。bridge-claude2 の `autoErrorPrefix` と同じ形にそろえる。
+後ろに続くエラー本文は変えていない。
+
+- 各 worker に `_AUTO_ERROR_PREFIX` を置く (`bridge-claude` / `bridge-claude-p` / `bridge-gemini` /
+  `bridge-codex` / `client-codex` / `bridge-a2a`)。
+- 前提として、bridge-claude2 の `isAutoErrorEcho` を `(auto) ` の前方一致に広げてある (#279)。
+  稼働中の Python bridge は、respawn するまで古い prefix を送り続ける。
+- legacy の `(自動応答)` 判定の削除 (③) は、operator が respawn を確認するまで保留する。
+
 ### Fixed — bridge-claude2: workdir 不在時の auto 返信にも echo guard / 送信元別 cooldown を掛ける (issue #272)
 
 workdir 不在時の `(自動応答) bridge の workdir が存在しません: …` は `handleOne` 冒頭で

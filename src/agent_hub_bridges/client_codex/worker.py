@@ -29,6 +29,10 @@ from agent_hub_bridges.client_codex.engine import CodexCLIEngine
 
 logger = logging.getLogger(__name__)
 
+# issue #275: auto 返信の prefix。bridge-claude2 の `autoErrorPrefix` と同じ
+# `(auto) <bridge-type> error:` 形式にそろえる (受信側の echo 判定は `(auto) ` の前方一致)。
+_AUTO_ERROR_PREFIX = "(auto) client-codex error:"
+
 
 def _format_prompt(self_handle: str, msg: IncomingMessage) -> str:
     """受信 message を codex exec への user prompt に整形."""
@@ -118,7 +122,7 @@ async def _handle_one(
                 await hub.send(
                     to=msg.sender,
                     message=(
-                        f"(自動応答) bridge の workdir が存在しません: {config.workdir}"
+                        f"{_AUTO_ERROR_PREFIX} bridge の workdir が存在しません: {config.workdir}"
                     ),
                 )
             except Exception:
@@ -141,7 +145,7 @@ async def _handle_one(
                 await hub.send(
                     to=msg.sender,
                     message=(
-                        f"(自動応答) codex CLI engine でエラー: "
+                        f"{_AUTO_ERROR_PREFIX} codex CLI engine でエラー: "
                         f"{type(exc).__name__}: {exc}"
                     ),
                 )
