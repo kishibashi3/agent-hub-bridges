@@ -53,11 +53,16 @@ const autoErrorPrefix = "(auto) " + bridgeType + " error:"
 // 判定するために残す (issue #272)。
 const legacyAutoReplyPrefix = "(自動応答)"
 
+// autoReplyCommonPrefix は fleet 内の全 bridge が auto 返信の先頭に付ける共通文字列。
+// bridge-type ごとに続く文言は異なる (`(auto) <bridge-type> error:` 等) ため、受信判定は
+// この共通部分の前方一致で行い、他 bridge の auto 返信も echo として扱う (issue #275)。
+const autoReplyCommonPrefix = "(auto) "
+
 // isAutoErrorEcho は inbound message が他 bridge (または自分) の auto 返信かどうかを返す。
 // これに対して auto エラー返信を返すと bridge ⇄ bridge で相互反射するため、呼び出し側は
 // この場合 auto 返信を抑止する (issue #267 変種 3)。
 func isAutoErrorEcho(body string) bool {
-	return strings.HasPrefix(body, autoErrorPrefix) || strings.HasPrefix(body, legacyAutoReplyPrefix)
+	return strings.HasPrefix(body, autoReplyCommonPrefix) || strings.HasPrefix(body, legacyAutoReplyPrefix)
 }
 
 // limitReachedError は claude 起動失敗が spend/session limit によるものであることを示す。
