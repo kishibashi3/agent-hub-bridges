@@ -35,6 +35,8 @@ type mockHub struct {
 	srv   *httptest.Server
 	mu    sync.Mutex
 	calls []toolCall
+	// inbox は get_messages が順に返す JSON 配列テキスト。尽きたら "[]" を返す。
+	inbox []string
 }
 
 func newMockHub(t *testing.T) *mockHub {
@@ -68,8 +70,16 @@ func newMockHub(t *testing.T) *mockHub {
 		case "tools/call":
 			h.mu.Lock()
 			h.calls = append(h.calls, toolCall{Name: req.Params.Name, Args: req.Params.Arguments})
+			text := "ok"
+			if req.Params.Name == "get_messages" {
+				text = "[]"
+				if len(h.inbox) > 0 {
+					text, h.inbox = h.inbox[0], h.inbox[1:]
+				}
+			}
 			h.mu.Unlock()
-			fmt.Fprintf(w, `{"jsonrpc":"2.0","id":%d,"result":{"content":[{"type":"text","text":"ok"}],"isError":false}}`, id)
+			quoted, _ := json.Marshal(text)
+			fmt.Fprintf(w, `{"jsonrpc":"2.0","id":%d,"result":{"content":[{"type":"text","text":%s}],"isError":false}}`, id, quoted)
 		default:
 			fmt.Fprintf(w, `{"jsonrpc":"2.0","id":%d,"result":{}}`, id)
 		}
@@ -93,9 +103,20 @@ func (h *mockHub) callsNamed(name string) []toolCall {
 // writeFakeClaude は stream-json の result イベントを 1 行出力して終了する claude CLI 代替を書く。
 func writeFakeClaude(t *testing.T, dir string, resultLine string, exitCode int) string {
 	t.Helper()
+	return writeRecordingFakeClaude(t, dir, "/dev/null", resultLine, exitCode)
+}
+
+// writeRecordingFakeClaude は writeFakeClaude と同じだが、受け取った user message 行を
+// logPath に追記する (呼び出し順の検証用)。
+//
+// runner は initialize → user message の 2 行を書いてから result を読み、result 到達まで
+// stdin を開けておく。そのため EOF は待たず 2 行読んでから result を出す。読む前に exit
+// すると runner の write が broken pipe になり、result line が返らない (issue #271 追記 M2)。
+func writeRecordingFakeClaude(t *testing.T, dir, logPath, resultLine string, exitCode int) string {
+	t.Helper()
 	path := filepath.Join(dir, "fake-claude")
-	script := fmt.Sprintf("#!/bin/sh\nexec 3<&0; cat <&3 >/dev/null &\nprintf '%%s\\n' '%s'\nexit %d\n",
-		strings.ReplaceAll(resultLine, "'", `'\''`), exitCode)
+	script := fmt.Sprintf("#!/bin/sh\nread -r _init\nread -r msg\nprintf '%%s\\n' \"$msg\" >> '%s'\nprintf '%%s\\n' '%s'\nexit %d\n",
+		logPath, strings.ReplaceAll(resultLine, "'", `'\''`), exitCode)
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}

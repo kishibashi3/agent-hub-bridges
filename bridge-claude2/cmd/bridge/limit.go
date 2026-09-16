@@ -204,12 +204,16 @@ func sleepingDisplayName(base string, until time.Time, kind string) string {
 // deferred は limit に当たった時点で「MarkAsRead 済みだが未処理」のメッセージ。
 // bridge は処理前に MarkAsRead する (issue #176) ため、hub の queue には戻せない。
 // in-memory で保持し、復帰後に hub の未読より先に処理する。
+//
+// store が非 nil なら、enter のたびに deferred 一覧をファイルにも書く (issue #271 M2)。
+// ファイルは復帰後に deferred を処理し終えた時点 (finishResume) で消す。
 type limitSleeper struct {
 	mu       sync.Mutex
 	active   bool
 	until    time.Time
 	kind     string
 	deferred []agenthub.Message
+	store    *deferredStore
 }
 
 // enter は休眠状態に入る。既に休眠中なら until/kind を上書きし deferred を追記する。
@@ -220,6 +224,7 @@ func (s *limitSleeper) enter(e *limitReachedError, deferred []agenthub.Message) 
 	s.until = e.Until
 	s.kind = e.Kind
 	s.deferred = append(s.deferred, deferred...)
+	s.store.save(s.deferred, s.kind, s.until)
 }
 
 // state は (休眠中か, 解除時刻, 種別) を返す。
@@ -246,6 +251,16 @@ func (s *limitSleeper) wake() []agenthub.Message {
 	d := s.deferred
 	s.deferred = nil
 	return d
+}
+
+// finishResume は復帰後の deferred 処理が終わったときに呼ぶ。再度休眠に入っていなければ
+// deferred の記録ファイルを消す (再休眠中なら enter が残りで上書き済みなので残す)。
+func (s *limitSleeper) finishResume() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.active {
+		s.store.clear()
+	}
 }
 
 // asLimitError は err が limitReachedError を含むなら取り出す。

@@ -77,7 +77,10 @@ func runWorker(ctx context.Context, cfg *config, mcpConfigPath string) {
 	tracker := &activityTracker{}
 	gapTracker := &messageGapTracker{}
 	// issue #268: limit 休眠状態。reconnect をまたいで休眠と deferred を引き継ぐ。
-	sleeper := &limitSleeper{}
+	// issue #271: deferred はファイルにも記録する。前回プロセスが休眠中に落ちていれば
+	// その deferred (MarkAsRead 済み・未処理) を WARN で出す。
+	sleeper := &limitSleeper{store: newDeferredStore(cfg.Participant)}
+	warnLostDeferred(sleeper.store)
 
 	// on-demand モード: runner は状態を持たないため単一インスタンスを使い回す。
 	// Python の ClaudeSDKClient と違い、subprocess はフィールドに保持しない。
@@ -290,6 +293,11 @@ func runHubSession(
 			// 復帰時も router を渡してスラッシュコマンドを claude に流さない (PR #269 review M3)
 			cursor = processMessages(ctx, cfg, client, runner, router, cursor,
 				tracker, gapTracker, journal, sleeper, deferred, "[limit-resume]")
+			// issue #271: 処理し終えたら deferred の記録を消す。SIGTERM で中断された場合は
+			// 残りが未処理のまま流れているので、次回起動時の WARN のために残す。
+			if ctx.Err() == nil {
+				sleeper.finishResume()
+			}
 			if sleeping, _, _ := sleeper.state(); sleeping {
 				continue // deferred 処理中に再度 limit → もう一度休眠
 			}
@@ -740,7 +748,7 @@ func runGracefulDrain(
 ) {
 	// issue #268: limit 休眠中は compact も message 処理も limit で失敗するだけなので
 	// 何もせず exit する。deferred (MarkAsRead 済み・未処理) はプロセス終了で失われる
-	// ため ID を WARN で残す (次回起動時に operator が追えるように)。
+	// ため ID を WARN で残す。記録ファイル (issue #271) は消さないので次回起動時にも WARN が出る。
 	if sleeping, until, kind := sleeper.state(); sleeping {
 		deferred := sleeper.wake()
 		ids := make([]string, 0, len(deferred))
