@@ -94,7 +94,7 @@ func (h *mockHub) callsNamed(name string) []toolCall {
 func writeFakeClaude(t *testing.T, dir string, resultLine string, exitCode int) string {
 	t.Helper()
 	path := filepath.Join(dir, "fake-claude")
-	script := fmt.Sprintf("#!/bin/sh\ncat >/dev/null &\nprintf '%%s\\n' '%s'\nexit %d\n",
+	script := fmt.Sprintf("#!/bin/sh\nexec 3<&0; cat <&3 >/dev/null &\nprintf '%%s\\n' '%s'\nexit %d\n",
 		strings.ReplaceAll(resultLine, "'", `'\''`), exitCode)
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
 		t.Fatal(err)

@@ -369,6 +369,15 @@ func processMessages(
 			continue
 		}
 
+		// issue #264: 直前までの内側セッションが先回りで返信/既読化済みの inbound は
+		// 再 dispatch しない (二重応答防止)。
+		if runner.innerHandled.has(msg.ID) {
+			slog.Warn(logPrefix+": skipping already-replied-by-inner-session message (issue #264)",
+				"msg_id", msg.ID, "from", msg.Sender)
+			_ = client.MarkAsRead(ctx, msg.ID)
+			continue
+		}
+
 		// issue #176: MarkAsRead を handleOne 前に呼ぶ。
 		// SSE 駆動でも処理前に MarkAsRead しないと次回 GetMessages で
 		// 同一メッセージが返ってきて二重 dispatch が発生する。
@@ -511,6 +520,10 @@ func handleOne(
 		emitSpan(msg.ID, cfg.Model, usage)
 		lastUsage = usage
 		lastErr = err
+		// issue #264 方針 A: 内側セッションが自分で返信/既読化した他の inbound を記録し、
+		// 次の GetMessages で再 dispatch されないようにする (query の成否に関わらず、
+		// tool_result で確認済みの分は hub に効いているので記録する)。
+		recordInnerHandled(runner, msg.ID, usage.InnerHandledIDs)
 
 		if err == nil {
 			slog.Info("→ message processed", "msg_id", msg.ID, "from", msg.Sender)
@@ -531,13 +544,16 @@ func handleOne(
 		// と決めつけて通知を握りつぶすと二重送信より悪いサイレント消失になりうる
 		// (issue #266 レビュー指摘)。この場合は抑止せず通常のリトライ/エラー報告に
 		// 進める。ログにも状態を残し、別チャネル (slog) から観測可能にする。
-		if usage.SentMessageObserved && !usage.SentMessageConfirmed {
+		// PR #273 レビュー M1: 抑止は「処理中の msg.ID への返信」が成功確認できた場合に限る。
+		// 別 inbound への先回り返信 (issue #264) だけでは X の応答にならないので、通常の
+		// リトライ/エラー通知/limit 休眠に進める。
+		if usage.SentMessageObserved && !usage.repliedTo(msg.ID) {
 			slog.Warn("handleOne: send_message tool_use observed but not confirmed sent "+
 				"(no successful tool_result seen) — treating as unsent, not suppressing retry/notification (issue #266)",
 				"msg_id", msg.ID, "attempt", attempt, "err", err,
 			)
 		}
-		if usage.SentMessageConfirmed {
+		if usage.repliedTo(msg.ID) {
 			slog.Warn("handleOne: subprocess failed after send_message already confirmed sent — "+
 				"skipping retry to avoid duplicate/contradictory reply (issue #264)",
 				"msg_id", msg.ID, "attempt", attempt, "err", err,
@@ -553,10 +569,11 @@ func handleOne(
 
 	_ = lastUsage // usage は既に emitSpan 済み
 
-	// issue #264/#266: 直前の attempt で send_message の送信成功が確定していた場合のみ、
+	// issue #264/#266: 直前の attempt で処理中 inbound への send_message の送信成功
+	// (caused_by == msg.ID) が確定していた場合のみ、
 	// 送信者へのエラー通知 (journalledSend) をスキップする。tool_use のみ観測 (未確定) の
 	// 場合はスキップせず通常通り通知する (詳細は上記ループ内コメント参照)。
-	if lastUsage.SentMessageConfirmed {
+	if lastUsage.repliedTo(msg.ID) {
 		return lastErr
 	}
 
@@ -612,6 +629,29 @@ func handleOne(
 	errMsg := fmt.Sprintf("%s %v", autoErrorPrefix, lastErr)
 	_ = journalledSend(ctx, client, journal, msg.Sender, errMsg, msg.ID)
 	return lastErr
+}
+
+// recordInnerHandled は runner.query が観測した InnerHandledIDs を runner.innerHandled に
+// 積む (issue #264)。現在処理中の inbound (currentID) 自身への返信 caused_by は正規の
+// 応答なので除外する (既に MarkAsRead + cursor 済みで、集合に入れる意味がない)。
+func recordInnerHandled(runner *claudeRunner, currentID string, ids []string) {
+	if runner == nil || runner.innerHandled == nil || len(ids) == 0 {
+		return
+	}
+	var others []string
+	for _, id := range ids {
+		if id != currentID {
+			others = append(others, id)
+		}
+	}
+	if len(others) == 0 {
+		return
+	}
+	runner.innerHandled.add(others...)
+	slog.Warn("handleOne: inner session replied to / marked as read other inbound messages — "+
+		"they will be skipped on next get_messages (issue #264)",
+		"current_msg_id", currentID, "inner_handled_ids", others,
+		"set_size", runner.innerHandled.size())
 }
 
 // journalledSend は journal write → hub.SendMessage → journal delete の順で送信を永続化する。
@@ -738,6 +778,13 @@ func runGracefulDrain(
 			continue
 		}
 		if cursor != "" && m.Timestamp <= cursor {
+			_ = client.MarkAsRead(drainCtx, m.ID)
+			continue
+		}
+		// issue #264: 内側セッションが返信/既読化済みの inbound は skip
+		if runner.innerHandled.has(m.ID) {
+			slog.Warn("[drain] skipping already-replied-by-inner-session message (issue #264)",
+				"msg_id", m.ID, "from", m.Sender)
 			_ = client.MarkAsRead(drainCtx, m.ID)
 			continue
 		}
