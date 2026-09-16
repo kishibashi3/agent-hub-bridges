@@ -25,19 +25,19 @@ type cursorData struct {
 	LastProcessedAt string `json:"last_processed_at"`
 }
 
-// cursorPath は cursor ファイルのパスを返す。
+// cursorPath は key (config.stateKey()) の cursor ファイルのパスを返す。
 // AGENT_HUB_CURSOR_FILE 環境変数が設定されていればそれを優先する。
-func cursorPath(user string) string {
+func cursorPath(key string) string {
 	if v := os.Getenv(cursorFileEnv); v != "" {
 		return v
 	}
-	return fmt.Sprintf(cursorFileTemplate, bridgeType, user)
+	return fmt.Sprintf(cursorFileTemplate, bridgeType, key)
 }
 
 // loadCursor は永続化された cursor timestamp を読む。
 // ファイルが存在しない / 読み込み失敗時は "" を返す (fresh start)。
-func loadCursor(user string) string {
-	path := cursorPath(user)
+func loadCursor(key string) string {
+	path := cursorPath(key)
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if !os.IsNotExist(err) {
@@ -59,8 +59,8 @@ func loadCursor(user string) string {
 
 // saveCursor は cursor timestamp を永続化する。
 // 書き込み失敗は WARNING ログのみ (= bridge を落とさない)。
-func saveCursor(user, timestamp string) {
-	path := cursorPath(user)
+func saveCursor(key, timestamp string) {
+	path := cursorPath(key)
 	data, err := json.Marshal(cursorData{LastProcessedAt: timestamp})
 	if err != nil {
 		slog.Warn("cursor: failed to marshal", "err", err)

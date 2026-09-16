@@ -143,7 +143,6 @@ func newTestEnv(t *testing.T, claudeScript string) (*agenthub.Client, *config, *
 	t.Helper()
 	hub := newMockHub(t)
 	dir := t.TempDir()
-	t.Setenv(journalDirEnv, filepath.Join(dir, "journals"))
 	t.Setenv("AGENT_HUB_CURSOR_FILE", filepath.Join(dir, "cursor"))
 
 	cfg := &config{
@@ -155,6 +154,7 @@ func newTestEnv(t *testing.T, claudeScript string) (*agenthub.Client, *config, *
 		SubprocessTimeout: 10 * time.Second,
 		MaxQueryRetries:   0,
 		ScannerBufferSize: 64 * 1024,
+		JournalDir:        filepath.Join(dir, "journals"),
 	}
 	client, err := agenthub.New(hub.srv.URL, "ghp_test", cfg.Participant, "")
 	if err != nil {
@@ -164,7 +164,7 @@ func newTestEnv(t *testing.T, claudeScript string) (*agenthub.Client, *config, *
 		t.Fatalf("Initialize: %v", err)
 	}
 	runner := &claudeRunner{cfg: cfg, mcpConfigPath: filepath.Join(dir, "mcp.json")}
-	return client, cfg, runner, hub, newJournal(cfg.Participant)
+	return client, cfg, runner, hub, newJournal(cfg.JournalDir, cfg.stateKey())
 }
 
 func inbound(body string) agenthub.Message {
