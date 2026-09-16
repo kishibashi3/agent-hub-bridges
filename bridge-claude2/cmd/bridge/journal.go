@@ -44,15 +44,20 @@ type Journal struct {
 
 // newJournal は指定 user の Journal を生成する。
 func newJournal(user string) *Journal {
-	dir := os.Getenv(journalDirEnv)
-	if dir == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			home = "/tmp"
-		}
-		dir = filepath.Join(home, ".agent-hub", "journals")
+	return &Journal{path: filepath.Join(journalDir(), user+".journal")}
+}
+
+// journalDir は journal の保存先ディレクトリを返す (env AGENT_HUB_JOURNAL_DIR で上書き可)。
+// limit 休眠の deferred 記録 (deferred.go) も同じディレクトリに置く。
+func journalDir() string {
+	if dir := os.Getenv(journalDirEnv); dir != "" {
+		return dir
 	}
-	return &Journal{path: filepath.Join(dir, user+".journal")}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		home = "/tmp"
+	}
+	return filepath.Join(home, ".agent-hub", "journals")
 }
 
 // makeEntry は新規 journalEntry を生成する (書き込みは行わない)。
