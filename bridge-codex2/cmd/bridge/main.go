@@ -13,21 +13,22 @@
 //  5. SIGTERM/Ctrl+C → runGracefulDrain() で未処理メッセージ処理 → exit
 //
 // 環境変数:
-//   AGENT_HUB_URL               required    agent-hub MCP エンドポイント
-//   GITHUB_PAT                  required    GitHub Personal Access Token
-//   AGENT_HUB_TENANT            optional    テナント ID (--tenant フラグが優先)
-//   CODEX_CLI_PATH              optional    codex CLI のパス (省略 = PATH 上の "codex")
-//   CODEX_HOME_DIR              optional    永続 CODEX_HOME ディレクトリ (省略 = ~/.agent-hub/codex-home/<user>)
-//   AGENT_HUB_MODEL             optional    codex model (-m フラグ相当)
-//   AGENT_HUB_CURSOR_FILE       optional    cursor ファイルパス
-//   AGENT_HUB_JOURNAL_DIR       optional    journal ディレクトリ
-//   AGENT_HUB_BUSY_WINDOW_S     optional    /status busy 判定ウィンドウ秒数 (default: 60)
-//   AGENT_HUB_PUSH_SILENT_THRESHOLD_S optional gap 警告閾値秒数 (default: 25)
-//   BRIDGE_INVENTORY            optional    bridge inventory ファイルパス
-//   AGENT_HUB_BRIDGE_MAX_RETRIES optional   circuit breaker 連続失敗上限 (default: 10, 0=無限)
-//   AGENT_HUB_TELEMETRY_URL     optional    OTLP endpoint
-//   BRIDGE_LOG_DIR              optional    ログディレクトリ (省略 = ~/.agent-hub/logs/; --log-file が優先)
-//   BRIDGE_LOG_FILE             optional    ログファイルパス (省略 = BRIDGE_LOG_DIR/bridge-<user>.log)
+//
+//	AGENT_HUB_URL               required    agent-hub MCP エンドポイント
+//	GITHUB_PAT                  required    GitHub Personal Access Token
+//	AGENT_HUB_TENANT            optional    テナント ID (--tenant フラグが優先)
+//	CODEX_CLI_PATH              optional    codex CLI のパス (省略 = PATH 上の "codex")
+//	CODEX_HOME_DIR              optional    永続 CODEX_HOME ディレクトリ (省略 = ~/.agent-hub/codex-home/<user>)
+//	AGENT_HUB_MODEL             optional    codex model (-m フラグ相当)
+//	AGENT_HUB_CURSOR_FILE       optional    cursor ファイルパス
+//	AGENT_HUB_JOURNAL_DIR       optional    journal ディレクトリ
+//	AGENT_HUB_BUSY_WINDOW_S     optional    /status busy 判定ウィンドウ秒数 (default: 60)
+//	AGENT_HUB_PUSH_SILENT_THRESHOLD_S optional gap 警告閾値秒数 (default: 25)
+//	BRIDGE_INVENTORY            optional    bridge inventory ファイルパス
+//	AGENT_HUB_BRIDGE_MAX_RETRIES optional   circuit breaker 連続失敗上限 (default: 10, 0=無限)
+//	AGENT_HUB_TELEMETRY_URL     optional    OTLP endpoint
+//	BRIDGE_LOG_DIR              optional    ログディレクトリ (省略 = ~/.agent-hub/logs/; --log-file が優先)
+//	BRIDGE_LOG_FILE             optional    ログファイルパス (省略 = BRIDGE_LOG_DIR/bridge-<user>.log)
 //
 // Issue: #186
 package main
@@ -67,18 +68,18 @@ func (s *stringSlice) Set(v string) error {
 }
 
 type config struct {
-	User        string
-	DisplayName string
-	AgentHubURL string
-	GitHubPAT   string
-	Tenant      string
-	Workdir     string
-	CodexCLI    string
-	Model       string
-	Mode        string   // stateful | stateless | global (default: stateful)
-	AddDirs     []string // --add-dir で指定した追加ディレクトリ (繰り返し可)
-	LogLevel    string
-	LogFile     string // ログファイルパス ("" = stderr のみ)
+	User         string
+	DisplayName  string
+	AgentHubURL  string
+	GitHubPAT    string
+	Tenant       string
+	Workdir      string
+	CodexCLI     string
+	Model        string
+	Mode         string   // stateful | stateless | global (default: stateful)
+	AddDirs      []string // --add-dir で指定した追加ディレクトリ (繰り返し可)
+	LogLevel     string
+	LogFile      string // ログファイルパス ("" = stderr のみ)
 	CodexHomeDir string // 永続 CODEX_HOME ディレクトリ
 	// PollInterval は get_messages のポーリング間隔。
 	PollInterval time.Duration

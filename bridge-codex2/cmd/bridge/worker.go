@@ -5,26 +5,30 @@
 // compact をスキップして未処理メッセージの drain のみ実施する。
 //
 // runWorker: bridge のメインエントリポイント。cursor / journal / tracker / gap_tracker を
-//   初期化して runHubSession を reconnect ループで回す。
-//   codexRunner は状態を持つ (hasSession) ため、reconnect をまたいで単一インスタンスを共有する。
+//
+//	初期化して runHubSession を reconnect ループで回す。
+//	codexRunner は状態を持つ (hasSession) ため、reconnect をまたいで単一インスタンスを共有する。
 //
 // runHubSession: 1 回ぶんの hub session を最後まで走らせる。
-//   journal replay → startup catchup → polling loop (CommandRouter + handleOne)
-//   SSE SubscribeInbox で is_online=true に更新し、push 受信時は即時 GetMessages を発火する (issue #198)。
-//   push が来なくても PollInterval ごとにフォールバックポーリングを行う。
-//   SIGTERM 受信時は polling loop 内で runGracefulDrain() を呼んでから exit する。
+//
+//	journal replay → startup catchup → polling loop (CommandRouter + handleOne)
+//	SSE SubscribeInbox で is_online=true に更新し、push 受信時は即時 GetMessages を発火する (issue #198)。
+//	push が来なくても PollInterval ごとにフォールバックポーリングを行う。
+//	SIGTERM 受信時は polling loop 内で runGracefulDrain() を呼んでから exit する。
 //
 // startupCatchup: bridge 起動時に未読メッセージを処理する。
 //
 // handleOne: message 1 件を codex に流して応答を待つ。
-//   codex subprocess は on-demand で spawn/exit する。
+//
+//	codex subprocess は on-demand で spawn/exit する。
 //
 // journalledSend: journal write → hub.SendMessage → journal delete の順で送信を永続化する。
 //
 // replayJournal: 起動時に pending journal entries を replay する。
 //
 // runGracefulDrain: SIGTERM 時の graceful drain。
-//   compact なし → 未処理メッセージ確認 → メッセージがあれば処理 → exit。
+//
+//	compact なし → 未処理メッセージ確認 → メッセージがあれば処理 → exit。
 package main
 
 import (
