@@ -324,7 +324,7 @@ func handleOne(
 	if _, err := os.Stat(cfg.Workdir); err != nil {
 		slog.Error("handleOne: workdir gone",
 			"workdir", cfg.Workdir, "msg_id", msg.ID)
-		errMsg := fmt.Sprintf("(自動応答) bridge の workdir が存在しません: %s", cfg.Workdir)
+		errMsg := fmt.Sprintf("(auto) bridge-codex2 error: bridge の workdir が存在しません: %s", cfg.Workdir)
 		_ = journalledSend(ctx, client, journal, msg.Sender, errMsg, msg.ID)
 		return nil
 	}
