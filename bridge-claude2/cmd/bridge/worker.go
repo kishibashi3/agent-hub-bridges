@@ -1,29 +1,38 @@
 // worker.go — Bridge worker main loop (Python: worker.py の直訳)
 //
 // runWorker: bridge のメインエントリポイント。cursor / journal / tracker / gap_tracker を
-//   初期化して runHubSession を reconnect ループで回す。
-//   claudeRunner は状態を持たない (on-demand) ため reconnect をまたいで単一インスタンスを共有する。
+//
+//	初期化して runHubSession を reconnect ループで回す。
+//	claudeRunner は状態を持たない (on-demand) ため reconnect をまたいで単一インスタンスを共有する。
 //
 // runHubSession: 1 回ぶんの hub session を最後まで走らせる。
-//   journal replay → startup catchup → SSE push 駆動ループ (CommandRouter + handleOne)
-//   SSE SubscribeInbox で is_online=true を維持し、push 受信時のみ GetMessages を発火する (issue #218)。
-//   SIGTERM 受信時は SSE ループ内で runGracefulDrain() を呼んでから exit する (issue #178)。
-//   safety-net poll / heartbeat: SSE が silently dead の場合も定期的に GetMessages を呼ぶ (issue #234)。
-//   poll が失敗 → get_messages エラー → runWorker の reconnect ループが起動する。
+//
+//	journal replay → startup catchup → SSE push 駆動ループ (CommandRouter + handleOne)
+//	SSE SubscribeInbox で is_online=true を維持し、push 受信時のみ GetMessages を発火する (issue #218)。
+//	SIGTERM 受信時は SSE ループ内で runGracefulDrain() を呼んでから exit する (issue #178)。
+//	safety-net poll / heartbeat: SSE が silently dead の場合も定期的に GetMessages を呼ぶ (issue #234)。
+//	poll が失敗 → get_messages エラー → runWorker の reconnect ループが起動する。
 //
 // startupCatchup: bridge 起動時に未読メッセージを処理する (issue #98)。
 //
 // handleOne: message 1 件を Claude に流して応答を待つ。
-//   claude subprocess は on-demand で spawn/exit する。
+//
+//	claude subprocess は on-demand で spawn/exit する。
 //
 // journalledSend: journal write → hub.SendMessage → journal delete の順で送信を永続化する。
 //
 // replayJournal: 起動時に pending journal entries を replay する (issue #183)。
 //
 // runGracefulDrain: SIGTERM 時の graceful drain (issue #178)。
-//   compact → 未処理メッセージ確認 → メッセージがあれば処理 → exit。
-//   active session (client が生きている) 内で呼ぶことで final poll が可能になる。
-//   idle compact watchdog は on-demand bridge では不要なため削除済み (issue #179)。
+//
+//	compact → 未処理メッセージ確認 → メッセージがあれば処理 → exit。
+//	active session (client が生きている) 内で呼ぶことで final poll が可能になる。
+//	idle compact watchdog は on-demand bridge では不要なため削除済み (issue #179)。
+//
+// limit 休眠 (issue #268): handleOne が limitReachedError を返したら processMessages が
+//
+//	limitSleeper に状態を入れ、SSE ループは reset 時刻まで GetMessages を呼ばずに待つ
+//	(limit.go 参照)。復帰後は deferred → hub 未読の順に処理する。
 package main
 
 import (
@@ -67,6 +76,8 @@ func runWorker(ctx context.Context, cfg *config, mcpConfigPath string) {
 	journal := newJournal(cfg.Participant)
 	tracker := &activityTracker{}
 	gapTracker := &messageGapTracker{}
+	// issue #268: limit 休眠状態。reconnect をまたいで休眠と deferred を引き継ぐ。
+	sleeper := &limitSleeper{}
 
 	// on-demand モード: runner は状態を持たないため単一インスタンスを使い回す。
 	// Python の ClaudeSDKClient と違い、subprocess はフィールドに保持しない。
@@ -88,7 +99,7 @@ func runWorker(ctx context.Context, cfg *config, mcpConfigPath string) {
 		// hub セッション開始
 		newCursor, established, err := runHubSession(
 			ctx, cfg, mcpConfigPath,
-			runner, cursor, tracker, gapTracker, journal,
+			runner, cursor, tracker, gapTracker, journal, sleeper,
 		)
 		cursor = newCursor // セッション終了時点の cursor を引き継ぐ
 
@@ -149,6 +160,7 @@ func runHubSession(
 	tracker *activityTracker,
 	gapTracker *messageGapTracker,
 	journal *Journal,
+	sleeper *limitSleeper,
 ) (string, bool, error) {
 	// --- hub client 初期化 ---
 	client, err := agenthub.New(
@@ -161,7 +173,13 @@ func runHubSession(
 	if err := client.Initialize(ctx); err != nil {
 		return cursor, false, fmt.Errorf("initialize: %w", err)
 	}
-	if _, err := client.Register(ctx, cfg.DisplayName, cfg.Mode); err != nil {
+	// issue #268: 休眠中に reconnect した場合は休眠中の display_name で登録し直す
+	// (get_participants から休眠状態が見え続けるようにする)。
+	registerName := cfg.DisplayName
+	if sleeping, until, kind := sleeper.state(); sleeping {
+		registerName = sleepingDisplayName(cfg.DisplayName, until, kind)
+	}
+	if _, err := client.Register(ctx, registerName, cfg.Mode); err != nil {
 		return cursor, false, fmt.Errorf("register: %w", err)
 	}
 	// SSE keepalive: claude subprocess 実行中の MCP セッション expire を防ぐ (issue #41)
@@ -187,7 +205,7 @@ func runHubSession(
 	slog.Info("runHubSession: registered and listening",
 		"handle", "@"+cfg.Participant,
 		"mode", cfg.Mode,
-		"display_name", cfg.DisplayName,
+		"display_name", registerName,
 	)
 
 	// safety-net poll / heartbeat: SSE が silently dead になった場合も定期的に
@@ -214,17 +232,20 @@ func runHubSession(
 	// journal replay: 前回クラッシュ時の pending entries を再送 (issue #183)
 	replayJournal(ctx, client, journal)
 
-	// startup catchup: bridge 起動時に未読メッセージを処理する (issue #98)
-	cursor, err = startupCatchup(
-		ctx, cfg, client,
-		runner, cursor,
-		tracker, gapTracker, journal,
-	)
-	if err != nil {
-		slog.Warn("runHubSession: startup catchup error (continuing)", "err", err)
-	}
-
 	selfHandle := "@" + cfg.Participant
+
+	// startup catchup: bridge 起動時に未読メッセージを処理する (issue #98)
+	// issue #268: 休眠中 (reconnect 後) は inbox を読まない。
+	if sleeping, _, _ := sleeper.state(); !sleeping {
+		cursor, err = startupCatchup(
+			ctx, cfg, client,
+			runner, cursor,
+			tracker, gapTracker, journal, sleeper,
+		)
+		if err != nil {
+			slog.Warn("runHubSession: startup catchup error (continuing)", "err", err)
+		}
+	}
 
 	// --- SSE push 駆動ループ (issue #218, #234) ---
 	// 通常は inbox push 通知を受信したときのみ GetMessages を呼ぶ。
@@ -232,18 +253,60 @@ func runHubSession(
 	// GetMessages を呼ぶ (safety-net poll / heartbeat)。
 	// GetMessages 失敗時は runWorker の reconnect ループが起動する。
 	// is_online=true は SSE 接続 (StartSSE + SubscribeInbox) が維持する。
+	//
+	// issue #268: limit 休眠中は push / poll を無視して reset 時刻まで待つ
+	// (GetMessages を呼ばない = hub の queue に未読を残す)。SSE は維持するので
+	// is_online=true のまま、display_name で休眠状態を示す。
 	for {
-		// push / safety-net poll / SIGTERM を待つ
-		select {
-		case <-ctx.Done():
-			// issue #178: graceful drain — compact → 未処理メッセージ確認 → 処理 → exit
-			// client が生きているこのタイミングで drain を実施する。
-			runGracefulDrain(client, runner, cfg, cursor, tracker, journal, selfHandle)
-			return cursor, true, ctx.Err()
-		case <-pushCh:
-			slog.Debug("runHubSession: inbox push — calling GetMessages")
-		case <-pollTicker.C:
-			slog.Debug("runHubSession: safety-net poll / heartbeat — calling GetMessages")
+		if sleeping, until, kind := sleeper.state(); sleeping {
+			slog.Info("[limit] sleeping — inbox fetch suspended",
+				"kind", kind, "until", until.Format(time.RFC3339),
+				"remaining_s", fmt.Sprintf("%.0f", time.Until(until).Seconds()),
+				"deferred", sleeper.deferredCount(),
+			)
+			wakeTimer := time.NewTimer(time.Until(until))
+			select {
+			case <-ctx.Done():
+				wakeTimer.Stop()
+				runGracefulDrain(client, runner, cfg, cursor, tracker, journal, selfHandle, sleeper)
+				return cursor, true, ctx.Err()
+			case <-wakeTimer.C:
+			}
+			// 復帰: display_name を通常に戻す。失敗したら session を張り直す
+			// (reconnect 時の Register は sleeper.state() を見るので、wake() より前に行う)。
+			if _, err := client.Register(ctx, cfg.DisplayName, cfg.Mode); err != nil {
+				return cursor, true, fmt.Errorf("register after limit sleep: %w", err)
+			}
+			deferred := sleeper.wake()
+			slog.Info("[limit] woke up — resuming inbox fetch",
+				"kind", kind, "deferred", len(deferred))
+			// 休眠中に積まれた push シグナルは捨てる (この直後に GetMessages を呼ぶ)
+			select {
+			case <-pushCh:
+			default:
+			}
+			// deferred (limit 到達時点で MarkAsRead 済み・未処理) を hub 未読より先に処理。
+			// batch 途中で limit に当たった場合、残りはまだ router を通っていないので
+			// 復帰時も router を渡してスラッシュコマンドを claude に流さない (PR #269 review M3)
+			cursor = processMessages(ctx, cfg, client, runner, router, cursor,
+				tracker, gapTracker, journal, sleeper, deferred, "[limit-resume]")
+			if sleeping, _, _ := sleeper.state(); sleeping {
+				continue // deferred 処理中に再度 limit → もう一度休眠
+			}
+			// fall through: hub の未読を取りに行く
+		} else {
+			// push / safety-net poll / SIGTERM を待つ
+			select {
+			case <-ctx.Done():
+				// issue #178: graceful drain — compact → 未処理メッセージ確認 → 処理 → exit
+				// client が生きているこのタイミングで drain を実施する。
+				runGracefulDrain(client, runner, cfg, cursor, tracker, journal, selfHandle, sleeper)
+				return cursor, true, ctx.Err()
+			case <-pushCh:
+				slog.Debug("runHubSession: inbox push — calling GetMessages")
+			case <-pollTicker.C:
+				slog.Debug("runHubSession: safety-net poll / heartbeat — calling GetMessages")
+			}
 		}
 
 		msgs, err := client.GetMessages(ctx)
@@ -252,51 +315,97 @@ func runHubSession(
 			return cursor, true, fmt.Errorf("get_messages: %w", err)
 		}
 
-		for _, msg := range msgs {
-			// 自己ループ防止
-			if msg.Sender == selfHandle {
-				slog.Debug("runHubSession: skip self-sent message", "msg_id", msg.ID)
-				_ = client.MarkAsRead(ctx, msg.ID)
-				continue
-			}
-
-			// スラッシュコマンドを CommandRouter で処理 (MarkAsRead は Handle 内部で呼ばれる)
-			if router.Handle(ctx, client, msg) {
-				continue
-			}
-
-			// issue #26: safety-net 発火推定 (gap 計測)
-			gapTracker.onMessageReceived(msg.ID)
-
-			// issue #37: cursor skip — 再起動後の重複 dispatch 防止
-			if cursor != "" && msg.Timestamp <= cursor {
-				slog.Info("runHubSession: skipping already-seen message",
-					"msg_id", msg.ID, "ts", msg.Timestamp, "cursor", cursor)
-				_ = client.MarkAsRead(ctx, msg.ID)
-				continue
-			}
-
-			// issue #176: MarkAsRead を handleOne 前に呼ぶ。
-			// SSE 駆動でも処理前に MarkAsRead しないと次回 GetMessages で
-			// 同一メッセージが返ってきて二重 dispatch が発生する。
-			// cursor check が secondary guard として機能するが、in-memory cursor は
-			// reconnect でリセットされるため、server-side の既読状態を先に確定させる。
-			if err := client.MarkAsRead(ctx, msg.ID); err != nil {
-				slog.Warn("runHubSession: pre-process mark_as_read failed; cursor will guard on retry",
-					"msg_id", msg.ID, "err", err)
-			}
-
-			handleErr := handleOne(ctx, client, runner, msg, cfg, tracker, journal)
-			if handleErr != nil {
-				slog.Error("runHubSession: handleOne error", "msg_id", msg.ID, "err", handleErr)
-			}
-
-			// issue #37, #176: process → save_cursor の順 (crash-safe secondary guard)。
-			// MarkAsRead は上記で処理前に呼び済み。
-			saveCursor(cfg.Participant, msg.Timestamp)
-			cursor = msg.Timestamp
-		}
+		cursor = processMessages(ctx, cfg, client, runner, router, cursor,
+			tracker, gapTracker, journal, sleeper, msgs, "runHubSession")
 	}
+}
+
+// processMessages は GetMessages で得たメッセージ列を順に処理し、更新後の cursor を返す。
+// runHubSession の SSE ループ・startupCatchup・limit 復帰時の deferred 処理で共通に使う。
+//
+// router が非 nil ならスラッシュコマンドを CommandRouter で処理する (MarkAsRead は Handle 内部)。
+// nil の場合はコマンドの分離を呼び出し側が済ませている前提。
+//
+// issue #268: handleOne が limitReachedError を返した場合、そのメッセージと残りを
+// sleeper に deferred として預けて休眠に入り、即 return する。limit に当たったメッセージの
+// cursor は保存しない (復帰後に再処理するため)。
+func processMessages(
+	ctx context.Context,
+	cfg *config,
+	client *agenthub.Client,
+	runner *claudeRunner,
+	router *agenthub.CommandRouter,
+	cursor string,
+	tracker *activityTracker,
+	gapTracker *messageGapTracker,
+	journal *Journal,
+	sleeper *limitSleeper,
+	msgs []agenthub.Message,
+	logPrefix string,
+) string {
+	selfHandle := "@" + cfg.Participant
+
+	for i, msg := range msgs {
+		// 自己ループ防止
+		if msg.Sender == selfHandle {
+			slog.Debug(logPrefix+": skip self-sent message", "msg_id", msg.ID)
+			_ = client.MarkAsRead(ctx, msg.ID)
+			continue
+		}
+
+		// スラッシュコマンドを CommandRouter で処理 (MarkAsRead は Handle 内部で呼ばれる)
+		if router != nil && router.Handle(ctx, client, msg) {
+			continue
+		}
+
+		// issue #26: safety-net 発火推定 (gap 計測)
+		gapTracker.onMessageReceived(msg.ID)
+
+		// issue #37: cursor skip — 再起動後の重複 dispatch 防止
+		if cursor != "" && msg.Timestamp <= cursor {
+			slog.Info(logPrefix+": skipping already-seen message",
+				"msg_id", msg.ID, "ts", msg.Timestamp, "cursor", cursor)
+			_ = client.MarkAsRead(ctx, msg.ID)
+			continue
+		}
+
+		// issue #176: MarkAsRead を handleOne 前に呼ぶ。
+		// SSE 駆動でも処理前に MarkAsRead しないと次回 GetMessages で
+		// 同一メッセージが返ってきて二重 dispatch が発生する。
+		// cursor check が secondary guard として機能するが、in-memory cursor は
+		// reconnect でリセットされるため、server-side の既読状態を先に確定させる。
+		if err := client.MarkAsRead(ctx, msg.ID); err != nil {
+			slog.Warn(logPrefix+": pre-process mark_as_read failed; cursor will guard on retry",
+				"msg_id", msg.ID, "err", err)
+		}
+
+		handleErr := handleOne(ctx, client, runner, msg, cfg, tracker, journal)
+		if lim := asLimitError(handleErr); lim != nil {
+			// issue #268: limit 到達 → このメッセージと残りを deferred にして休眠する。
+			deferred := append([]agenthub.Message{msg}, msgs[i+1:]...)
+			sleeper.enter(lim, deferred)
+			slog.Info("[limit] entering sleep — no auto-reply sent, inbox fetch suspended",
+				"kind", lim.Kind, "until", lim.Until.Format(time.RFC3339),
+				"reset_parsed", lim.Parsed, "trigger_msg_id", msg.ID,
+				"deferred", len(deferred), "cause", truncate(lim.Cause.Error(), 200),
+			)
+			name := sleepingDisplayName(cfg.DisplayName, lim.Until, lim.Kind)
+			if _, err := client.Register(ctx, name, cfg.Mode); err != nil {
+				slog.Warn("[limit] failed to update display_name for sleep (continuing)",
+					"display_name", name, "err", err)
+			}
+			return cursor
+		}
+		if handleErr != nil {
+			slog.Error(logPrefix+": handleOne error", "msg_id", msg.ID, "err", handleErr)
+		}
+
+		// issue #37, #176: process → save_cursor の順 (crash-safe secondary guard)。
+		// MarkAsRead は上記で処理前に呼び済み。
+		saveCursor(cfg.Participant, msg.Timestamp)
+		cursor = msg.Timestamp
+	}
+	return cursor
 }
 
 // startupCatchup は bridge 起動時に未読メッセージを処理する (issue #98)。
@@ -311,6 +420,7 @@ func startupCatchup(
 	tracker *activityTracker,
 	gapTracker *messageGapTracker,
 	journal *Journal,
+	sleeper *limitSleeper,
 ) (string, error) {
 	msgs, err := client.GetMessages(ctx)
 	if err != nil {
@@ -342,46 +452,8 @@ func startupCatchup(
 	slog.Info("[startup-catchup] processing unread messages",
 		"nl_count", len(nlMsgs), "cmd_count", cmdCount)
 
-	selfHandle := "@" + cfg.Participant
-
-	for _, msg := range nlMsgs {
-		// 自己ループ防止
-		if msg.Sender == selfHandle {
-			_ = client.MarkAsRead(ctx, msg.ID)
-			continue
-		}
-
-		// cursor skip (issue #37)
-		if cursor != "" && msg.Timestamp <= cursor {
-			slog.Info("[startup-catchup] skipping seen message",
-				"msg_id", msg.ID, "ts", msg.Timestamp, "cursor", cursor)
-			_ = client.MarkAsRead(ctx, msg.ID)
-			continue
-		}
-
-		gapTracker.onMessageReceived(msg.ID)
-
-		// issue #176: MarkAsRead を handleOne 前に呼ぶ。
-		// polling bridge では処理前に MarkAsRead しないと次回 GetMessages で
-		// 同一メッセージが返ってきて二重 dispatch が発生する。
-		// cursor check が secondary guard として機能するが、in-memory cursor は
-		// reconnect でリセットされるため、server-side の既読状態を先に確定させる。
-		if err := client.MarkAsRead(ctx, msg.ID); err != nil {
-			slog.Warn("[startup-catchup] pre-process mark_as_read failed; cursor will guard on retry",
-				"msg_id", msg.ID, "err", err)
-		}
-
-		handleErr := handleOne(ctx, client, runner, msg, cfg, tracker, journal)
-		if handleErr != nil {
-			slog.Error("[startup-catchup] handleOne error", "msg_id", msg.ID, "err", handleErr)
-		}
-
-		// issue #37, #176: process → save_cursor の順 (crash-safe secondary guard)。
-		// MarkAsRead は上記で処理前に呼び済み。
-		saveCursor(cfg.Participant, msg.Timestamp)
-		cursor = msg.Timestamp
-	}
-
+	cursor = processMessages(ctx, cfg, client, runner, nil, cursor,
+		tracker, gapTracker, journal, sleeper, nlMsgs, "[startup-catchup]")
 	return cursor, nil
 }
 
@@ -509,7 +581,24 @@ func handleOne(
 	}
 
 	slog.Error("handleOne: claude query error", "msg_id", msg.ID, "err", lastErr)
-	errMsg := fmt.Sprintf("(auto) %s error: %v", bridgeType, lastErr)
+
+	// issue #268: spend/session limit 到達は送信元へ auto 返信せず、呼び出し側に
+	// 休眠を指示する (limitReachedError)。auto 返信すると受信側 (scheduler の bounce /
+	// 同じく limit 中の bridge) との間でピンポンが増幅する (issue #267 の 3 変種)。
+	if lim := detectLimit(lastErr, time.Now()); lim != nil {
+		return lim
+	}
+
+	// issue #268 / #267: inbound 自体が他 bridge の auto エラー返信なら、これに auto
+	// エラー返信を返すと bridge ⇄ bridge で相互反射する。limit 以外の失敗でも返さない
+	// (二重防御)。
+	if isAutoErrorEcho(msg.Body) {
+		slog.Warn("handleOne: inbound is an auto error echo — suppressing auto error reply (issue #268)",
+			"msg_id", msg.ID, "from", msg.Sender)
+		return lastErr
+	}
+
+	errMsg := fmt.Sprintf("%s %v", autoErrorPrefix, lastErr)
 	_ = journalledSend(ctx, client, journal, msg.Sender, errMsg, msg.ID)
 	return lastErr
 }
@@ -583,7 +672,24 @@ func runGracefulDrain(
 	tracker *activityTracker,
 	journal *Journal,
 	selfHandle string,
+	sleeper *limitSleeper,
 ) {
+	// issue #268: limit 休眠中は compact も message 処理も limit で失敗するだけなので
+	// 何もせず exit する。deferred (MarkAsRead 済み・未処理) はプロセス終了で失われる
+	// ため ID を WARN で残す (次回起動時に operator が追えるように)。
+	if sleeping, until, kind := sleeper.state(); sleeping {
+		deferred := sleeper.wake()
+		ids := make([]string, 0, len(deferred))
+		for _, m := range deferred {
+			ids = append(ids, m.ID)
+		}
+		slog.Warn("[drain] shutdown during limit sleep — skipping compact/drain; deferred messages are dropped",
+			"kind", kind, "until", until.Format(time.RFC3339),
+			"deferred_count", len(deferred), "deferred_ids", ids,
+		)
+		return
+	}
+
 	const compactTimeout = 5 * time.Minute
 	drainTimeout := compactTimeout + cfg.SubprocessTimeout + time.Minute
 	drainCtx, cancel := context.WithTimeout(context.Background(), drainTimeout)
@@ -646,7 +752,14 @@ func runGracefulDrain(
 		if err := client.MarkAsRead(drainCtx, msg.ID); err != nil {
 			slog.Warn("[drain] mark_as_read failed", "msg_id", msg.ID, "err", err)
 		}
-		if err := handleOne(drainCtx, client, runner, msg, cfg, tracker, journal); err != nil {
+		err := handleOne(drainCtx, client, runner, msg, cfg, tracker, journal)
+		if lim := asLimitError(err); lim != nil {
+			// issue #268: drain 中に limit 到達 — 残りも同じく失敗するので打ち切る (auto 返信なし)
+			slog.Warn("[drain] limit reached during drain — stopping (no auto-reply)",
+				"kind", lim.Kind, "msg_id", msg.ID)
+			return
+		}
+		if err != nil {
 			slog.Error("[drain] handleOne error", "msg_id", msg.ID, "err", err)
 		}
 		saveCursor(cfg.Participant, msg.Timestamp)

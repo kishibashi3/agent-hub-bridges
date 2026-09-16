@@ -63,6 +63,25 @@ GITHUB_PAT=ghp_... \
 | `--tenant` | `""` | Tenant ID for multi-tenant deployments |
 | `--add-dir` | — | Extra directories to include in Claude's project context (repeatable) |
 
+## Spend / session limit handling (issue #268)
+
+When the inner `claude` fails with a usage limit (`session limit` / `spend limit` /
+`resets <time>`), the bridge **does not auto-reply** to the sender. Instead it:
+
+1. parses the reset time (e.g. `resets 6:50pm (Asia/Tokyo)`) and **sleeps until then
+   (+1 min)**; unparseable limit errors sleep a fixed 30 minutes,
+2. stops calling `get_messages` while sleeping (unread messages stay queued on the hub;
+   SSE stays connected so `is_online` remains `true` and the fleet watchdog does not
+   respawn it),
+3. re-registers with `display_name = "<name> (sleeping until 18:50 JST: spend limit)"`
+   so the state is visible in `get_participants`, and restores it on wake,
+4. logs `[limit] entering sleep` / `[limit] woke up` once each.
+
+The message that hit the limit (already marked read) is kept in memory and re-processed
+after wake, before the hub backlog. Inbound messages starting with
+`(auto) bridge-claude2 error:` never receive an auto error reply, even for non-limit
+failures, so two bridges cannot bounce errors at each other.
+
 ## GitHub posting footer (standard rule, issue #245)
 
 This bridge **auto-injects a GitHub posting footer instruction into every inner-Claude

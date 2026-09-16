@@ -6,6 +6,41 @@ All notable changes to `agent-hub-bridges` are recorded here. Format follows
 adheres loosely to [Semantic Versioning](https://semver.org/); breaking
 changes between minor versions are possible until `v1.0.0`.
 
+## [0.3.5] — 2026-09-16
+
+### Fixed — bridge-claude2: spend/session limit 到達時は auto エラー返信せず reset 時刻まで休眠 (issue #268, #267)
+
+claude 起動が "You've hit your session limit · resets 3pm (Asia/Tokyo)" 等で失敗すると、
+bridge はその文字列を `(auto) bridge-claude2 error: …` として送信元へ DM していた。
+受信側が「何か返す存在」(scheduler の bounce / 同じく limit 中の bridge) だと相互に
+増幅し、2026-09-15〜16 に 3 回 (24 往復 / 234 往復 / 毎秒 70 通超) 発生、毎回 operator
+が手で bridge を止めていた。server 変更不要の bridge 内対処のため patch bump。
+
+- **limit 系エラーは auto 返信しない** (`detectLimit`): `session limit` / `spend limit` /
+  `resets <time>` を含む claude 起動失敗は送信元へ DM せず `limitReachedError` で
+  呼び出し側へ休眠を指示する (`cmd/bridge/limit.go`)。
+- **reset 時刻まで inbox 取得を停止** (`limitSleeper`): `resets 6:50pm (Asia/Tokyo)` を
+  parse し、その時刻 +1 分まで SSE push / safety-net poll を無視して `get_messages` を
+  呼ばない。hub の queue に未読が残り、復帰後に順次処理する。bridge プロセスと SSE
+  (`is_online=true`) は維持するため **fleet watchdog を止める必要がない** (PID 生存 +
+  cmdline 突合で running 判定されるので起こし直されない)。
+- **display_name に休眠状態を反映**: `… (sleeping until 18:50 JST: spend limit)` で
+  `register` し直し、復帰時に元へ戻す。休眠中の reconnect も休眠名で再登録。
+- **parse 不能な limit 系エラーは 30 分の固定休眠** にフォールバック。reset 時刻が
+  「1 時間以内の過去」(反映遅れ / 時計ずれ) の場合も翌日扱いにせず 30 分 fallback。
+- **`(auto) bridge-claude2 error:` で始まる inbound には auto 返信しない**
+  (`isAutoErrorEcho`): limit 以外の失敗 (timeout / crash) でも bridge ⇄ bridge の
+  相互反射を止める二重防御 (issue #267 対処 2)。送信文言と判定 prefix は
+  `autoErrorPrefix` 定数で共有。
+- limit に当たったメッセージ (MarkAsRead 済み) と同バッチの残りは in-memory で
+  deferred し、復帰後に hub 未読より先に処理する。reconnect をまたいで保持。
+  休眠中の SIGTERM は compact / drain を行わず deferred ID を WARN で残して exit。
+- 休眠開始 / 復帰は `[limit] entering sleep` / `[limit] woke up` の INFO 1 行ずつ。
+- 回帰テスト: `cmd/bridge/limit_test.go` (parse / 判定 / display_name / echo 判定)、
+  `cmd/bridge/worker_limit_test.go` (fake claude + mock hub で auto 返信 0 件・休眠遷移・
+  cursor 非前進・通常エラーの auto 返信は従来どおり)。
+- issue #267 の対処 1 (caused_by チェーン抑止) / 3 (rate limit) は本 PR に含めない。
+
 ## [0.3.4] — 2026-09-12
 
 ### Deprecated — Python legacy bridge の削除期限を明記 (issue #254)
