@@ -599,10 +599,9 @@ func resolveMaxQueryRetries(flagVal int) (int, error) {
 // 優先順位: AGENT_HUB_SCANNER_BUFFER_SIZE env > 4MB (default)
 // 受け付けるフォーマット: "<n>MB" または "<n>KB" (大文字小文字不問)。例: "4MB", "8MB", "512KB"。
 func resolveScannerBufferSize() (int, error) {
-	const defaultSize = 4 * 1024 * 1024 // 4MB
 	envVal := os.Getenv("AGENT_HUB_SCANNER_BUFFER_SIZE")
 	if envVal == "" {
-		return defaultSize, nil
+		return defaultScannerBufferSize, nil
 	}
 	n, err := parseByteSize(envVal)
 	if err != nil {
