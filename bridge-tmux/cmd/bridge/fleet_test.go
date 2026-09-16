@@ -32,7 +32,7 @@ func TestPersonaToConfig_OverridesApplied(t *testing.T) {
 		Workdir:           "/roles/reviewer",
 		Model:             "claude-opus-4-7",
 		BypassPermissions: true,
-		IdleTimeout:       yamlDuration{15 * time.Minute},
+		IdleTimeout:       yamlDuration{Duration: 15 * time.Minute},
 	}
 	got := personaToConfig(p, global)
 
@@ -76,7 +76,7 @@ func TestPersonaToConfig_IdleTimeoutFallback(t *testing.T) {
 func TestPersonaToConfig_GlobalNotMutated(t *testing.T) {
 	// personaToConfig は global をコピーするため元の config が変わらないこと
 	global := &config{User: "original", IdleTimeout: 10 * time.Minute}
-	p := PersonaConfig{Handle: "reviewer", Workdir: "/tmp", IdleTimeout: yamlDuration{5 * time.Minute}}
+	p := PersonaConfig{Handle: "reviewer", Workdir: "/tmp", IdleTimeout: yamlDuration{Duration: 5 * time.Minute}}
 	_ = personaToConfig(p, global)
 	if global.User != "original" {
 		t.Errorf("global.User was mutated: %q", global.User)
