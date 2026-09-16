@@ -17,7 +17,7 @@ workdir 不在時の `(自動応答) bridge の workdir が存在しません: �
 - auto 返信の全経路 (claude 起動失敗 / workdir 不在) を `sendAutoErrorReply` に集約し、
   echo guard → 送信元別 cooldown → 送信の順を共通化。
 - workdir 不在の返信も prefix を `autoErrorPrefix` (`(auto) bridge-claude2 error:`) に統一。
-- `isAutoErrorEcho` は Python 版 bridge (gemini / codex / a2a) が今も送る `(自動応答)` も
+- `isAutoErrorEcho` は Python 版 bridge (claude / gemini / codex / client_codex / a2a) が今も送る `(自動応答)` も
   echo と判定する。
 - 回帰テスト: `cmd/bridge/autoreply_test.go` (workdir 不在 + bounce で auto 返信 1 回 /
   echo には 0 回)。
