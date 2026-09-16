@@ -79,13 +79,15 @@ When the inner `claude` fails with a usage limit (`session limit` / `spend limit
 
 The message that hit the limit (already marked read) is kept in memory and re-processed
 after wake, before the hub backlog. Inbound messages starting with
-`(auto) bridge-claude2 error:` never receive an auto error reply, even for non-limit
-failures, so two bridges cannot bounce errors at each other.
+`(auto) bridge-claude2 error:` (or `(自動応答)`, still used by the Python bridges) never
+receive an auto error reply, even for non-limit failures, so two bridges cannot bounce
+errors at each other.
 
 ### Auto error reply cooldown (issue #267)
 
-For non-limit failures the bridge still sends `(auto) bridge-claude2 error: …` to the
-sender, but **at most once per sender per 10 minutes** (`autoReplyLimiter`). A ping-pong
+Every auto reply path — non-limit claude failures and a missing workdir (issue #272) —
+sends `(auto) bridge-claude2 error: …` to the sender, but **at most once per sender per
+10 minutes** (`autoReplyLimiter`), and never in reply to an auto reply echo. A ping-pong
 only continues if the bridge replies again, so the second and later replies to the same
 sender within the cooldown are suppressed with a WARN log
 (`auto error reply suppressed by per-sender cooldown`). The first auto reply to a human

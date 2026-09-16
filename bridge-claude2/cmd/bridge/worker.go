@@ -487,8 +487,9 @@ func handleOne(
 	if _, err := os.Stat(cfg.Workdir); err != nil {
 		slog.Error("handleOne: workdir gone",
 			"workdir", cfg.Workdir, "msg_id", msg.ID)
-		errMsg := fmt.Sprintf("(自動応答) bridge の workdir が存在しません: %s", cfg.Workdir)
-		_ = journalledSend(ctx, client, journal, msg.Sender, errMsg, msg.ID)
+		// issue #272: この返信も echo guard / 送信元別 cooldown を通す (#267 と同型の往復防止)
+		sendAutoErrorReply(ctx, client, runner, journal, msg,
+			fmt.Sprintf("bridge の workdir が存在しません: %s", cfg.Workdir))
 		return nil // caller が MarkAsRead する
 	}
 
@@ -606,29 +607,41 @@ func handleOne(
 		return lim
 	}
 
-	// issue #268 / #267: inbound 自体が他 bridge の auto エラー返信なら、これに auto
-	// エラー返信を返すと bridge ⇄ bridge で相互反射する。limit 以外の失敗でも返さない
-	// (二重防御)。
+	sendAutoErrorReply(ctx, client, runner, journal, msg, fmt.Sprint(lastErr))
+	return lastErr
+}
+
+// sendAutoErrorReply は送信元へ `autoErrorPrefix + " " + detail` の auto 返信を送る。
+// auto 返信の全経路 (claude 起動失敗 / workdir 不在) はここを通し、以下の抑止を共通に掛ける。
+//
+//   - issue #268 / #267: inbound 自体が auto 返信 (自分・他 bridge の echo) なら返さない。
+//     返すと bridge ⇄ bridge で相互反射する。
+//   - issue #267: 同一送信元への auto 返信は cooldown 内 1 回まで。往復は bridge が
+//     返信することで次の周回が始まるので、2 回目以降を抑止すれば相手が何を返そうと
+//     (scheduler の bounce / 他 bridge の auto 返信) 1 往復で止まる (autoreply.go 参照)。
+//   - issue #272: workdir 不在経路も同じ抑止に掛ける。
+func sendAutoErrorReply(
+	ctx context.Context,
+	client *agenthub.Client,
+	runner *claudeRunner,
+	journal *Journal,
+	msg agenthub.Message,
+	detail string,
+) {
 	if isAutoErrorEcho(msg.Body) {
 		slog.Warn("handleOne: inbound is an auto error echo — suppressing auto error reply (issue #268)",
 			"msg_id", msg.ID, "from", msg.Sender)
-		return lastErr
+		return
 	}
-
-	// issue #267: 同一送信元への auto エラー返信は cooldown 内 1 回まで。往復は bridge が
-	// 返信することで次の周回が始まるので、2 回目以降を抑止すれば相手が何を返そうと
-	// (scheduler の bounce / 他 bridge の auto 返信) 1 往復で止まる (autoreply.go 参照)。
 	if ok, wait := runner.autoReply.allow(msg.Sender, time.Now()); !ok {
 		slog.Warn("handleOne: auto error reply suppressed by per-sender cooldown (issue #267)",
 			"msg_id", msg.ID, "from", msg.Sender,
 			"cooldown_s", fmt.Sprintf("%.0f", autoReplyCooldown.Seconds()),
 			"retry_after_s", fmt.Sprintf("%.0f", wait.Seconds()))
-		return lastErr
+		return
 	}
-
-	errMsg := fmt.Sprintf("%s %v", autoErrorPrefix, lastErr)
+	errMsg := fmt.Sprintf("%s %s", autoErrorPrefix, detail)
 	_ = journalledSend(ctx, client, journal, msg.Sender, errMsg, msg.ID)
-	return lastErr
 }
 
 // recordInnerHandled は runner.query が観測した InnerHandledIDs を runner.innerHandled に

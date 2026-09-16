@@ -6,6 +6,22 @@ All notable changes to `agent-hub-bridges` are recorded here. Format follows
 adheres loosely to [Semantic Versioning](https://semver.org/); breaking
 changes between minor versions are possible until `v1.0.0`.
 
+## [Unreleased]
+
+### Fixed — bridge-claude2: workdir 不在時の auto 返信にも echo guard / 送信元別 cooldown を掛ける (issue #272)
+
+workdir 不在時の `(自動応答) bridge の workdir が存在しません: …` は `handleOne` 冒頭で
+早期 return しており、#267 の cooldown にも `isAutoErrorEcho` にも掛からなかった。
+@scheduler の bounce 等と #267 と同型で往復しうる。
+
+- auto 返信の全経路 (claude 起動失敗 / workdir 不在) を `sendAutoErrorReply` に集約し、
+  echo guard → 送信元別 cooldown → 送信の順を共通化。
+- workdir 不在の返信も prefix を `autoErrorPrefix` (`(auto) bridge-claude2 error:`) に統一。
+- `isAutoErrorEcho` は Python 版 bridge (claude / gemini / codex / client_codex / a2a) が今も送る `(自動応答)` も
+  echo と判定する。
+- 回帰テスト: `cmd/bridge/autoreply_test.go` (workdir 不在 + bounce で auto 返信 1 回 /
+  echo には 0 回)。
+
 ## [0.3.5] — 2026-09-16
 
 ### Fixed — bridge-claude2: spend/session limit 到達時は auto エラー返信せず reset 時刻まで休眠 (issue #268, #267)
