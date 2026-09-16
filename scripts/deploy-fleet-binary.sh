@@ -12,6 +12,8 @@
 #   3. 配置先と同じディレクトリの一時ファイルに build する。
 #   4. vcs.revision が main の HEAD と一致し、vcs.modified=false であることを確認する。
 #   5. rename で置き換え、配置先・sha256・vcs.revision を出力する。
+#   6. fleet.env の AGENT_HUB_BRIDGE_CLAUDE2_BIN が配置先を指しているかを確認する。
+#      指していなければ WARNING を出す (配置は済んでいるので exit status は 0)。
 #
 # env (fleet.env / ~/.bashrc) の変更と bridge の restart は行わない (operator が行う)。
 #
@@ -20,6 +22,7 @@
 #   FLEET_BUILD_ROOT   build 用 clone の置き場所 (既定: ~/.agent-hub/build)
 #   BRIDGES_REPO_URL   agent-hub-bridges の clone 元 (既定: GitHub の https URL)
 #   SDK_REPO_URL       agent-hub-sdk の clone 元 (既定: GitHub の https URL)
+#   FLEET_ENV_FILE     確認する fleet.env (既定: ~/.agent-hub/fleet.env)。読むだけで書き換えない。
 
 set -euo pipefail
 
@@ -28,6 +31,8 @@ FLEET_BIN_DIR="${FLEET_BIN_DIR:-$HOME/.agent-hub/bin}"
 FLEET_BUILD_ROOT="${FLEET_BUILD_ROOT:-$HOME/.agent-hub/build}"
 BRIDGES_REPO_URL="${BRIDGES_REPO_URL:-https://github.com/kishibashi3/agent-hub-bridges.git}"
 SDK_REPO_URL="${SDK_REPO_URL:-https://github.com/kishibashi3/agent-hub-sdk.git}"
+FLEET_ENV_FILE="${FLEET_ENV_FILE:-$HOME/.agent-hub/fleet.env}"
+BIN_ENV_KEY=AGENT_HUB_BRIDGE_CLAUDE2_BIN
 
 bridges_dir="$FLEET_BUILD_ROOT/agent-hub-bridges"
 sdk_dir="$FLEET_BUILD_ROOT/agent-hub-sdk"
@@ -100,6 +105,32 @@ mv -f -T "$tmp" "$dest"
 trap - EXIT
 
 log "配置しました。env の変更と restart は operator が行います。"
+
+# ---------------------------------------------------------------------------
+# 6. fleet.env の *_BIN が配置先を指しているかを確認する (書き換えはしない)
+# ---------------------------------------------------------------------------
+# 指していない場合、fleet は別の binary (作業ディレクトリや PATH 上のもの) を起動し続ける。
+# 配置は済んでいるので失敗にはせず、WARNING と出力の fleet.env 行で知らせる。
+fleet_env_status="OK"
+if [[ ! -f "$FLEET_ENV_FILE" ]]; then
+    fleet_env_status="NG ($FLEET_ENV_FILE がありません)"
+else
+    # 最後の定義を採り、値を囲む引用符を外す (systemd の EnvironmentFile と同じ扱い)。
+    env_value=$(sed -n "s/^[[:space:]]*\(export[[:space:]]\{1,\}\)\{0,1\}$BIN_ENV_KEY=//p" "$FLEET_ENV_FILE" | tail -n 1)
+    if [[ "$env_value" =~ ^\"(.*)\"$ || "$env_value" =~ ^\'(.*)\'$ ]]; then
+        env_value="${BASH_REMATCH[1]}"
+    fi
+    if [[ -z "$env_value" ]]; then
+        fleet_env_status="NG ($BIN_ENV_KEY が $FLEET_ENV_FILE にありません)"
+    elif [[ "$(realpath -m -- "$env_value")" != "$(realpath -m -- "$dest")" ]]; then
+        fleet_env_status="NG ($BIN_ENV_KEY=$env_value は配置先ではありません)"
+    fi
+fi
+if [[ "$fleet_env_status" != "OK" ]]; then
+    log "WARNING: fleet.env: $fleet_env_status"
+    log "WARNING: fleet は今回配置した binary を起動しません。$BIN_ENV_KEY=$dest への変更を operator に依頼してください。"
+fi
+
 cat <<EOF
 path:           $dest
 sha256:         $sha256
@@ -107,4 +138,5 @@ vcs.revision:   $vcs_revision
 vcs.modified:   $vcs_modified
 sdk ref:        $sdk_ref
 prev sha256:    $prev_sha256
+fleet.env:      $fleet_env_status
 EOF
