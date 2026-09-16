@@ -164,10 +164,10 @@ func TestFormatPrompt(t *testing.T) {
 	got := formatPrompt("@reviewer", msg)
 
 	checks := []string{
-		"@reviewer",            // self handle in prompt
-		"@planner",             // sender
-		"please review PR #42", // body
-		"msg-abc",              // caused_by
+		"@reviewer",                    // self handle in prompt
+		"@planner",                     // sender
+		"please review PR #42",         // body
+		"msg-abc",                      // caused_by
 		"mcp__agent-hub__send_message", // instruction to use tool
 	}
 	for _, want := range checks {
