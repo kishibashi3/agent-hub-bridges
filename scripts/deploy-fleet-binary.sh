@@ -13,7 +13,8 @@
 #   4. vcs.revision が main の HEAD と一致し、vcs.modified=false であることを確認する。
 #   5. rename で置き換え、配置先・sha256・vcs.revision を出力する。
 #   6. fleet.env の AGENT_HUB_BRIDGE_CLAUDE2_BIN が配置先を指しているかを確認する。
-#      指していなければ WARNING を出す (配置は済んでいるので exit status は 0)。
+#      指していなければ WARNING を出し、結果を出力したあと exit 1 で終了する
+#      (配置は済んでいるが、fleet が起動しない binary なので deploy としては失敗)。
 #
 # env (fleet.env / ~/.bashrc) の変更と bridge の restart は行わない (operator が行う)。
 #
@@ -110,7 +111,7 @@ log "配置しました。env の変更と restart は operator が行います�
 # 6. fleet.env の *_BIN が配置先を指しているかを確認する (書き換えはしない)
 # ---------------------------------------------------------------------------
 # 指していない場合、fleet は別の binary (作業ディレクトリや PATH 上のもの) を起動し続ける。
-# 配置は済んでいるので失敗にはせず、WARNING と出力の fleet.env 行で知らせる。
+# 配置 (rename) は済ませたうえで、WARNING と出力の fleet.env 行で知らせ、exit 1 で終了する。
 fleet_env_status="OK"
 if [[ ! -f "$FLEET_ENV_FILE" ]]; then
     fleet_env_status="NG ($FLEET_ENV_FILE がありません)"
@@ -140,3 +141,8 @@ sdk ref:        $sdk_ref
 prev sha256:    $prev_sha256
 fleet.env:      $fleet_env_status
 EOF
+
+if [[ "$fleet_env_status" != "OK" ]]; then
+    log "ERROR: fleet.env の確認が NG のため失敗として終了します (binary は配置済み)"
+    exit 1
+fi
