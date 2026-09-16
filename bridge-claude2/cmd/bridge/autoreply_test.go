@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -74,5 +76,66 @@ func TestHandleOne_BouncingSender_AutoReplyOnce(t *testing.T) {
 	_ = handleOne(context.Background(), client, runner, human, cfg, &activityTracker{}, journal)
 	if n := len(hub.callsNamed("send_message")); n != 2 {
 		t.Errorf("send_message total = %d; want 2 (first auto-reply to a different sender is unaffected)", n)
+	}
+}
+
+// TestHandleOne_WorkdirGone_BouncingSender_AutoReplyOnce (issue #272 回帰テスト):
+// workdir 不在の auto 返信も送信元別 cooldown に掛かり、bounce が連続しても 1 回だけ送られる。
+func TestHandleOne_WorkdirGone_BouncingSender_AutoReplyOnce(t *testing.T) {
+	script := writeFakeClaude(t, t.TempDir(), genericErrorResultLine(), 1)
+	client, cfg, runner, hub, journal := newTestEnv(t, script)
+	runner.autoReply = newAutoReplyLimiter(autoReplyCooldown)
+	cfg.Workdir = filepath.Join(t.TempDir(), "removed")
+
+	const bounce = "@scheduler は自由メッセージは受け付けません。コマンドは /help で確認してください。"
+	bodies := []string{"ntv-pr-watch: PR を確認してください", bounce, bounce, bounce}
+	for i, body := range bodies {
+		msg := inbound(body)
+		msg.ID = "sched-" + string(rune('a'+i))
+		msg.Sender = "@scheduler"
+		if err := handleOne(context.Background(), client, runner, msg, cfg, &activityTracker{}, journal); err != nil {
+			t.Fatalf("round %d: workdir-gone path must return nil (caller marks as read), got %v", i+1, err)
+		}
+	}
+	sends := hub.callsNamed("send_message")
+	if len(sends) != 1 {
+		t.Fatalf("send_message called %d times; want exactly 1 (bounce loop must stop after one auto-reply)", len(sends))
+	}
+	body, _ := sends[0].Args["message"].(string)
+	if !strings.HasPrefix(body, autoErrorPrefix) || !strings.Contains(body, cfg.Workdir) {
+		t.Errorf("auto reply = %q; want prefix %q and the workdir path", body, autoErrorPrefix)
+	}
+
+	// 別の送信元への 1 回目は従来どおり送られる
+	human := inbound("hello")
+	human.ID = "human-1"
+	human.Sender = "@kishibashi3"
+	_ = handleOne(context.Background(), client, runner, human, cfg, &activityTracker{}, journal)
+	if n := len(hub.callsNamed("send_message")); n != 2 {
+		t.Errorf("send_message total = %d; want 2 (first auto-reply to a different sender is unaffected)", n)
+	}
+}
+
+// TestHandleOne_WorkdirGone_EchoNoAutoReply (issue #272): workdir 不在でも、inbound が
+// auto 返信 (自分の echo / Python 版 bridge の `(自動応答)`) なら返さない。cooldown が
+// 無効 (nil limiter) でも echo guard 単独で止まることを見る。
+func TestHandleOne_WorkdirGone_EchoNoAutoReply(t *testing.T) {
+	script := writeFakeClaude(t, t.TempDir(), genericErrorResultLine(), 1)
+	client, cfg, runner, hub, journal := newTestEnv(t, script)
+	runner.autoReply = nil
+	cfg.Workdir = filepath.Join(t.TempDir(), "removed")
+
+	echoes := []string{
+		autoErrorPrefix + " bridge の workdir が存在しません: " + cfg.Workdir,
+		"(自動応答) bridge の workdir が存在しません: /tmp/other",
+		"(自動応答) gemini CLI engine でエラー: boom",
+	}
+	for i, body := range echoes {
+		msg := inbound(body)
+		msg.ID = "echo-" + string(rune('a'+i))
+		_ = handleOne(context.Background(), client, runner, msg, cfg, &activityTracker{}, journal)
+	}
+	if n := len(hub.callsNamed("send_message")); n != 0 {
+		t.Errorf("send_message called %d times; want 0 (no auto-reply to auto reply echo)", n)
 	}
 }

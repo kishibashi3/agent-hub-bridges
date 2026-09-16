@@ -43,16 +43,21 @@ const (
 	limitStaleResetGrace = time.Hour
 )
 
-// autoErrorPrefix は bridge が claude 起動失敗を送信元へ通知する auto 返信の先頭文字列。
-// 送信 (handleOne) と受信判定 (isAutoErrorEcho) の両方でこの定数を使い、文言のずれで
-// 判定が壊れないようにする (issue #268 対処 5)。
+// autoErrorPrefix は bridge が送信元へ返す auto 返信 (claude 起動失敗 / workdir 不在) の
+// 先頭文字列。送信 (sendAutoErrorReply) と受信判定 (isAutoErrorEcho) の両方でこの定数を
+// 使い、文言のずれで判定が壊れないようにする (issue #268 対処 5 / issue #272)。
 const autoErrorPrefix = "(auto) " + bridgeType + " error:"
 
-// isAutoErrorEcho は inbound message が他 bridge (または自分) の auto エラー返信かどうかを返す。
+// legacyAutoReplyPrefix は Python 版 bridge (gemini / codex / a2a 等) が今も使う auto 返信の
+// 先頭文字列。bridge-claude2 自身はもう送らないが、fleet 内の他 bridge からの echo を
+// 判定するために残す (issue #272)。
+const legacyAutoReplyPrefix = "(自動応答)"
+
+// isAutoErrorEcho は inbound message が他 bridge (または自分) の auto 返信かどうかを返す。
 // これに対して auto エラー返信を返すと bridge ⇄ bridge で相互反射するため、呼び出し側は
 // この場合 auto 返信を抑止する (issue #267 変種 3)。
 func isAutoErrorEcho(body string) bool {
-	return strings.HasPrefix(body, autoErrorPrefix)
+	return strings.HasPrefix(body, autoErrorPrefix) || strings.HasPrefix(body, legacyAutoReplyPrefix)
 }
 
 // limitReachedError は claude 起動失敗が spend/session limit によるものであることを示す。

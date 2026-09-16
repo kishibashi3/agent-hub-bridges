@@ -206,6 +206,9 @@ func TestIsAutoErrorEcho(t *testing.T) {
 	if isAutoErrorEcho("(auto) bridge-claude2 error") {
 		t.Error("prefix without colon is not an auto error")
 	}
+	if !isAutoErrorEcho("(自動応答) gemini CLI engine でエラー: boom") {
+		t.Error("legacy `(自動応答)` auto reply from Python bridges must be detected as echo (issue #272)")
+	}
 	if isAutoErrorEcho("please review PR #268") {
 		t.Error("normal message must not be treated as echo")
 	}
