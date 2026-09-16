@@ -12,6 +12,12 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# go-test の sibling clone で使う agent-hub-sdk の ref (issue #280)。
+# SDK 側の変更で bridges の CI が赤くならないよう commit SHA で固定する。
+# SDK を上げるときはここを書き換える。
+env:
+  AGENT_HUB_SDK_REF: 5854dc6bc3559f78431a0e97343c4186409bef48
+
 jobs:
   lint-test:
     name: lint + test (py${{ matrix.python-version }})
@@ -54,14 +60,21 @@ jobs:
         include:
           - dir: bridge-claude2
             strict: true
+            needs_sdk: true
     steps:
       - uses: actions/checkout@v4
 
       # bridge-claude2 の go.mod は replace で ../../agent-hub-sdk/go を参照する
-      # (README の Prerequisites 参照)。CI でも sibling の位置に SDK main を置く。
-      - name: Checkout agent-hub-sdk (sibling)
-        if: matrix.dir == 'bridge-claude2'
-        run: git clone --depth 1 https://github.com/kishibashi3/agent-hub-sdk.git "$GITHUB_WORKSPACE/../agent-hub-sdk"
+      # (README の Prerequisites 参照)。CI でも sibling の位置に SDK を置く。
+      # SDK が要る dir は matrix の needs_sdk で指定する (issue #280)。
+      - name: Checkout agent-hub-sdk (sibling, ${{ env.AGENT_HUB_SDK_REF }})
+        if: matrix.needs_sdk
+        run: |
+          sdk="$GITHUB_WORKSPACE/../agent-hub-sdk"
+          git init -q "$sdk"
+          git -C "$sdk" fetch --depth 1 https://github.com/kishibashi3/agent-hub-sdk.git "$AGENT_HUB_SDK_REF"
+          git -C "$sdk" checkout -q FETCH_HEAD
+          echo "agent-hub-sdk checked out at $(git -C "$sdk" rev-parse HEAD)"
 
       - name: Set up Go
         uses: actions/setup-go@v5
