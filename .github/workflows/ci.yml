@@ -55,8 +55,8 @@ jobs:
       fail-fast: false
       matrix:
         dir: [bridge-tmux, bridge-codex2]
-        # bridge-claude2 は goroutine を多用するので -race と go vet も回す
-        # (issue #276)。既存 2 dir の設定は変えない。
+        # bridge-claude2 は goroutine を多用するので -race も回す
+        # (issue #276)。go vet は全 dir で回す (issue #297)。
         include:
           - dir: bridge-claude2
             strict: true
@@ -87,6 +87,5 @@ jobs:
         run: go test ${{ matrix.strict && '-race' || '' }} ./...
 
       - name: go vet
-        if: matrix.strict
         working-directory: ${{ matrix.dir }}
         run: go vet ./...
