@@ -629,12 +629,12 @@ func sendAutoErrorReply(
 	detail string,
 ) {
 	if isAutoErrorEcho(msg.Body) {
-		slog.Warn("handleOne: inbound is an auto error echo — suppressing auto error reply (issue #268)",
+		slog.Warn("sendAutoErrorReply: inbound is an auto error echo — suppressing auto error reply (issue #268)",
 			"msg_id", msg.ID, "from", msg.Sender)
 		return
 	}
 	if ok, wait := runner.autoReply.allow(msg.Sender, time.Now()); !ok {
-		slog.Warn("handleOne: auto error reply suppressed by per-sender cooldown (issue #267)",
+		slog.Warn("sendAutoErrorReply: auto error reply suppressed by per-sender cooldown (issue #267)",
 			"msg_id", msg.ID, "from", msg.Sender,
 			"cooldown_s", fmt.Sprintf("%.0f", autoReplyCooldown.Seconds()),
 			"retry_after_s", fmt.Sprintf("%.0f", wait.Seconds()))
@@ -661,7 +661,7 @@ func recordInnerHandled(runner *claudeRunner, currentID string, ids []string) {
 		return
 	}
 	runner.innerHandled.add(others...)
-	slog.Warn("handleOne: inner session replied to / marked as read other inbound messages — "+
+	slog.Warn("recordInnerHandled: inner session replied to / marked as read other inbound messages — "+
 		"they will be skipped on next get_messages (issue #264)",
 		"current_msg_id", currentID, "inner_handled_ids", others,
 		"set_size", runner.innerHandled.size())
