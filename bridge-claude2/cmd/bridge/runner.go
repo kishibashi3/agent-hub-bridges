@@ -103,12 +103,72 @@ type queryUsage struct {
 	// is_error=true だった場合は false のままになる (= 未確定/失敗 として通常の
 	// リトライ・エラー通知フローに進ませる)。
 	SentMessageConfirmed bool
+	// InnerHandledIDs は内側 Claude セッションが先回りで処理した inbound message ID 群
+	// (issue #264 方針 A)。以下を tool_result が is_error=false で確認できた場合のみ含める:
+	//   - `mcp__agent-hub__send_message` の input.caused_by (= 返信済みの inbound)
+	//   - `mcp__agent-hub__mark_as_read` の input.message_id / message_ids (= 既読化済み)
+	// handleOne がこれを runner.innerHandled に積み、processMessages が次の GetMessages
+	// で同じ ID を skip する (innerhandled.go 参照)。
+	InnerHandledIDs []string
 }
 
 // sendMessageToolName は Claude が agent-hub へ返信する際に呼ぶ MCP tool の完全名。
 // 部分一致だと将来追加されるツールで誤検知するリスクがあるため完全一致のみを見る
 // (Python bridge の issue #92 と同じ方針)。
 const sendMessageToolName = "mcp__agent-hub__send_message"
+
+// markAsReadToolName は Claude が agent-hub の inbound を既読化する MCP tool の完全名 (issue #264)。
+const markAsReadToolName = "mcp__agent-hub__mark_as_read"
+
+// bridgeSpawnedEnv は bridge が spawn した子プロセスに付与する識別 env (issue #264 方針 B)。
+// agent-hub plugin の session-start.sh (agent-hub-plugins-claude#44) はこれが非空かつ "0"
+// 以外なら SessionStart オープニング (Monitor 起動 + get_messages 先読み) を発火しない。
+const bridgeSpawnedEnv = "AGENT_HUB_BRIDGE=1"
+
+// pendingToolUse は send_message / mark_as_read の tool_use を観測してから tool_result で
+// 成否が確定するまでの間、input から抜き出した inbound ID を保持する (issue #264)。
+type pendingToolUse struct {
+	name string   // sendMessageToolName / markAsReadToolName
+	ids  []string // send_message: [caused_by] / mark_as_read: message_id + message_ids
+}
+
+// extractInboundIDs は tool_use input から inbound message ID 群を抜き出す。
+// send_message: caused_by (空なら nil)。mark_as_read: message_id + message_ids
+// (all=true は ID を特定できないため空。hub 側で既読になるので GetMessages には返らない)。
+func extractInboundIDs(name string, raw json.RawMessage) []string {
+	if len(raw) == 0 {
+		return nil
+	}
+	switch name {
+	case sendMessageToolName:
+		var in struct {
+			CausedBy string `json:"caused_by"`
+		}
+		if err := json.Unmarshal(raw, &in); err != nil || in.CausedBy == "" {
+			return nil
+		}
+		return []string{in.CausedBy}
+	case markAsReadToolName:
+		var in struct {
+			MessageID  string   `json:"message_id"`
+			MessageIDs []string `json:"message_ids"`
+		}
+		if err := json.Unmarshal(raw, &in); err != nil {
+			return nil
+		}
+		var ids []string
+		if in.MessageID != "" {
+			ids = append(ids, in.MessageID)
+		}
+		for _, id := range in.MessageIDs {
+			if id != "" {
+				ids = append(ids, id)
+			}
+		}
+		return ids
+	}
+	return nil
+}
 
 // claudeRunner は Claude CLI subprocess の設定を保持する。
 // on-demand モードでは subprocess はフィールドとして保持せず、
@@ -121,6 +181,9 @@ type claudeRunner struct {
 	iatMgr *githubclient.IATManager
 	// autoReply は auto エラー返信の送信元別 cooldown (issue #267)。nil = 制限なし。
 	autoReply *autoReplyLimiter
+	// innerHandled は内側 Claude セッションが先回りで返信/既読化した inbound ID 集合 (issue #264)。
+	// nil = guard なし (テスト)。reconnect をまたいで共有する。
+	innerHandled *innerHandledSet
 }
 
 // newClaudeRunner は claudeRunner を生成する。
@@ -140,6 +203,7 @@ func newClaudeRunner(cfg *config, mcpConfigPath string) *claudeRunner {
 		mcpConfigPath: mcpConfigPath,
 		iatMgr:        mgr,
 		autoReply:     newAutoReplyLimiter(autoReplyCooldown),
+		innerHandled:  newInnerHandledSet(),
 	}
 }
 
@@ -279,14 +343,19 @@ func (r *claudeRunner) spawnSubprocess(ctx context.Context) (*exec.Cmd, io.Write
 	// GitHub App IAT モード (issue #73): IAT manager が設定されていれば GH_TOKEN を注入する。
 	// gh CLI は GH_TOKEN を GITHUB_TOKEN より優先して使うため、これで bot identity になる。
 	// GITHUB_APP_* は子プロセスに渡さない（秘密鍵漏洩防止）。
+	env := os.Environ()
 	if r.iatMgr != nil {
 		tok, err := r.iatMgr.GetToken(ctx)
 		if err != nil {
 			slog.Warn("runner: IAT fetch failed, falling back to default gh auth", "err", err)
 		} else {
-			cmd.Env = append(filteredEnv(), "GH_TOKEN="+tok)
+			env = append(filteredEnv(), "GH_TOKEN="+tok)
 		}
 	}
+	// issue #264 方針 B: IAT あり/なし両経路で AGENT_HUB_BRIDGE=1 を付与し、plugin の
+	// SessionStart オープニング (get_messages 先読み) を bridge 配下では発火させない。
+	// 末尾に append するので、親環境に同名の値があっても子プロセスではこちらが優先される。
+	cmd.Env = append(env, bridgeSpawnedEnv)
 
 	stdinPipe, err := cmd.StdinPipe()
 	if err != nil {
@@ -339,10 +408,11 @@ func readUntilResult(ctx context.Context, scanner *bufio.Scanner, stdinWriter io
 	var usage queryUsage
 	var resultErr error
 	resultReceived := false
-	// sendMessageToolUseID は send_message tool_use を観測した際の tool_use_id (issue #266)。
-	// 後続の "user" イベントに含まれる対応する tool_result (is_error) を突き合わせて
-	// usage.SentMessageConfirmed を確定させるために保持する。
-	var sendMessageToolUseID string
+	// pending は send_message / mark_as_read の tool_use を観測した際の tool_use_id →
+	// 抜き出した inbound ID 群 (issue #266 / #264)。後続の "user" イベントに含まれる
+	// 対応する tool_result (is_error) を突き合わせて usage.SentMessageConfirmed と
+	// usage.InnerHandledIDs を確定させるために保持する。
+	pending := map[string]pendingToolUse{}
 
 	for scanner.Scan() {
 		select {
@@ -386,7 +456,12 @@ func readUntilResult(ctx context.Context, scanner *bufio.Scanner, stdinWriter io
 					}
 					if block.Name == sendMessageToolName {
 						usage.SentMessageObserved = true
-						sendMessageToolUseID = block.ID
+					}
+					if block.Name == sendMessageToolName || block.Name == markAsReadToolName {
+						pending[block.ID] = pendingToolUse{
+							name: block.Name,
+							ids:  extractInboundIDs(block.Name, block.Input),
+						}
 					}
 					if block.Name == "Bash" {
 						var input struct {
@@ -420,18 +495,32 @@ func readUntilResult(ctx context.Context, scanner *bufio.Scanner, stdinWriter io
 		// "user" role のイベントとして stdout に折り返す。tool_use が観測できても
 		// hub 側が reject/失敗していれば is_error=true の tool_result が返るため、
 		// tool_use の観測だけで「送信済み」とみなすのは不十分 (レビュー指摘)。
-		if ev.Type == "user" && sendMessageToolUseID != "" && !usage.SentMessageConfirmed && ev.Message != nil {
+		//
+		// issue #264: mark_as_read も同様に tool_result 成功時のみ、input から抜き出した
+		// inbound ID を usage.InnerHandledIDs に積む (失敗した呼び出しは hub 側に効いて
+		// いないので skip 対象にしない)。
+		if ev.Type == "user" && len(pending) > 0 && ev.Message != nil {
 			for _, block := range ev.Message.Content {
-				if block.Type != "tool_result" || block.ToolUseID != sendMessageToolUseID {
+				if block.Type != "tool_result" {
 					continue
 				}
+				p, ok := pending[block.ToolUseID]
+				if !ok {
+					continue
+				}
+				delete(pending, block.ToolUseID)
 				if block.IsError {
-					slog.Warn("runner: send_message tool_result reported failure — "+
-						"not treating as sent (issue #266)",
-						"tool_use_id", block.ToolUseID)
-				} else {
+					if p.name == sendMessageToolName {
+						slog.Warn("runner: send_message tool_result reported failure — "+
+							"not treating as sent (issue #266)",
+							"tool_use_id", block.ToolUseID)
+					}
+					continue
+				}
+				if p.name == sendMessageToolName {
 					usage.SentMessageConfirmed = true
 				}
+				usage.InnerHandledIDs = append(usage.InnerHandledIDs, p.ids...)
 			}
 		}
 

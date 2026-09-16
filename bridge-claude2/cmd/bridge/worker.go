@@ -369,6 +369,15 @@ func processMessages(
 			continue
 		}
 
+		// issue #264: 直前までの内側セッションが先回りで返信/既読化済みの inbound は
+		// 再 dispatch しない (二重応答防止)。
+		if runner.innerHandled.has(msg.ID) {
+			slog.Info(logPrefix+": skipping already-replied-by-inner-session message (issue #264)",
+				"msg_id", msg.ID, "from", msg.Sender)
+			_ = client.MarkAsRead(ctx, msg.ID)
+			continue
+		}
+
 		// issue #176: MarkAsRead を handleOne 前に呼ぶ。
 		// SSE 駆動でも処理前に MarkAsRead しないと次回 GetMessages で
 		// 同一メッセージが返ってきて二重 dispatch が発生する。
@@ -511,6 +520,10 @@ func handleOne(
 		emitSpan(msg.ID, cfg.Model, usage)
 		lastUsage = usage
 		lastErr = err
+		// issue #264 方針 A: 内側セッションが自分で返信/既読化した他の inbound を記録し、
+		// 次の GetMessages で再 dispatch されないようにする (query の成否に関わらず、
+		// tool_result で確認済みの分は hub に効いているので記録する)。
+		recordInnerHandled(runner, msg.ID, usage.InnerHandledIDs)
 
 		if err == nil {
 			slog.Info("→ message processed", "msg_id", msg.ID, "from", msg.Sender)
@@ -612,6 +625,29 @@ func handleOne(
 	errMsg := fmt.Sprintf("%s %v", autoErrorPrefix, lastErr)
 	_ = journalledSend(ctx, client, journal, msg.Sender, errMsg, msg.ID)
 	return lastErr
+}
+
+// recordInnerHandled は runner.query が観測した InnerHandledIDs を runner.innerHandled に
+// 積む (issue #264)。現在処理中の inbound (currentID) 自身への返信 caused_by は正規の
+// 応答なので除外する (既に MarkAsRead + cursor 済みで、集合に入れる意味がない)。
+func recordInnerHandled(runner *claudeRunner, currentID string, ids []string) {
+	if runner == nil || runner.innerHandled == nil || len(ids) == 0 {
+		return
+	}
+	var others []string
+	for _, id := range ids {
+		if id != currentID {
+			others = append(others, id)
+		}
+	}
+	if len(others) == 0 {
+		return
+	}
+	runner.innerHandled.add(others...)
+	slog.Warn("handleOne: inner session replied to / marked as read other inbound messages — "+
+		"they will be skipped on next get_messages (issue #264)",
+		"current_msg_id", currentID, "inner_handled_ids", others,
+		"set_size", runner.innerHandled.size())
 }
 
 // journalledSend は journal write → hub.SendMessage → journal delete の順で送信を永続化する。
@@ -738,6 +774,12 @@ func runGracefulDrain(
 			continue
 		}
 		if cursor != "" && m.Timestamp <= cursor {
+			_ = client.MarkAsRead(drainCtx, m.ID)
+			continue
+		}
+		// issue #264: 内側セッションが返信/既読化済みの inbound は skip
+		if runner.innerHandled.has(m.ID) {
+			slog.Info("[drain] skipping already-replied-by-inner-session message (issue #264)", "msg_id", m.ID)
 			_ = client.MarkAsRead(drainCtx, m.ID)
 			continue
 		}
