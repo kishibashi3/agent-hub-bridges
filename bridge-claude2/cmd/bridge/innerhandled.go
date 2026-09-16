@@ -14,6 +14,15 @@
 // この集合に積む。processMessages / runGracefulDrain は GetMessages 結果の ID が集合に
 // あれば MarkAsRead + skip する。cursor (issue #37) と同じ「secondary guard」の位置づけ。
 //
+// 位置づけ: 方針 A は方針 B (AGENT_HUB_BRIDGE=1 で plugin の SessionStart 先読みを止める、
+// agent-hub-plugins-claude#44/#45) が実機で効いていることを確認するまでの暫定の二重防御である。
+// caused_by (本来は因果追跡用、#162) を「処理済み」と読み替えているため、モデルが誤った ID を
+// caused_by に入れるとその inbound は送信者に通知なく捨てられる。
+// 削除条件: 方針 B の実機確認 (bridges#264 に記録する 2 ケース: env 付き spawn で非発火 /
+// env 未設定で発火) が済み、その後も issue #264 型の二重応答および skip ログ
+// (`skipping already-replied-by-inner-session`) が観測されなければ、本ファイルと
+// processMessages / runGracefulDrain の guard・recordInnerHandled を削除する。
+//
 // 集合は claudeRunner に 1 つ持たせ、reconnect をまたいで共有する (hub 側で未読のまま
 // 残っている限り再配信されうるため、session 単位でリセットしてはいけない)。
 // nil receiver は何も記録せず常に「未処理」を返す (テスト・後方互換)。

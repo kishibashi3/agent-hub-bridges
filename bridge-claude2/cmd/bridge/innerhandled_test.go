@@ -49,6 +49,7 @@ func TestReadUntilResult_InnerHandledIDs(t *testing.T) {
 		lines         []string
 		want          []string
 		wantConfirmed bool
+		wantCausedBy  []string
 	}{
 		{
 			name: "send_message + mark_as_read success",
@@ -59,6 +60,7 @@ func TestReadUntilResult_InnerHandledIDs(t *testing.T) {
 			},
 			want:          []string{"m2", "m3", "m2"},
 			wantConfirmed: true,
+			wantCausedBy:  []string{"m2"},
 		},
 		{
 			name: "failed tool_result is not recorded",
@@ -91,6 +93,7 @@ func TestReadUntilResult_InnerHandledIDs(t *testing.T) {
 			},
 			want:          []string{"m1"},
 			wantConfirmed: true,
+			wantCausedBy:  []string{"m1"},
 		},
 	}
 	for _, tt := range tests {
@@ -102,6 +105,9 @@ func TestReadUntilResult_InnerHandledIDs(t *testing.T) {
 			}
 			if usage.SentMessageConfirmed != tt.wantConfirmed {
 				t.Errorf("usage.SentMessageConfirmed = %v, want %v", usage.SentMessageConfirmed, tt.wantConfirmed)
+			}
+			if !reflect.DeepEqual(usage.ConfirmedReplyCausedBy, tt.wantCausedBy) {
+				t.Errorf("usage.ConfirmedReplyCausedBy = %v, want %v", usage.ConfirmedReplyCausedBy, tt.wantCausedBy)
 			}
 		})
 	}
@@ -220,4 +226,49 @@ func TestProcessMessages_SkipsInnerHandled(t *testing.T) {
 	if n := len(hub.callsNamed("send_message")); n != 0 {
 		t.Errorf("bridge send_message called %d times; want 0", n)
 	}
+}
+
+// earlyReplyLines は send_message (caused_by=causedBy) の成功を流した後に resultLine で終わる
+// stream-json を返す (PR #273 レビュー M1 の経路用)。
+func earlyReplyLines(causedBy, resultLine string) string {
+	return strings.Join([]string{
+		`{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"mcp__agent-hub__send_message","input":{"to":"@x","message":"reply","caused_by":"` + causedBy + `"}}]}}`,
+		`{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","is_error":false}]}}`,
+		resultLine,
+	}, "\n")
+}
+
+// TestHandleOne_EarlyReplyToOtherInbound_DoesNotSuppress: 処理中 inbound (msg-1) の失敗時、
+// 別 inbound (m2) への返信成功だけではエラー通知 / limit 休眠を抑止しない (PR #273 レビュー M1)。
+func TestHandleOne_EarlyReplyToOtherInbound_DoesNotSuppress(t *testing.T) {
+	t.Run("generic error still auto-replies", func(t *testing.T) {
+		script := writeFakeClaude(t, t.TempDir(), earlyReplyLines("m2", genericErrorResultLine()), 1)
+		client, cfg, runner, hub, journal := newTestEnv(t, script)
+		err := handleOne(context.Background(), client, runner, inbound("hello"), cfg, &activityTracker{}, journal)
+		if err == nil {
+			t.Fatal("want error")
+		}
+		if n := len(hub.callsNamed("send_message")); n != 1 {
+			t.Errorf("send_message called %d times; want 1 (auto error reply to msg-1)", n)
+		}
+	})
+	t.Run("limit still enters sleep", func(t *testing.T) {
+		script := writeFakeClaude(t, t.TempDir(), earlyReplyLines("m2", limitResultLine()), 1)
+		client, cfg, runner, _, journal := newTestEnv(t, script)
+		err := handleOne(context.Background(), client, runner, inbound("hello"), cfg, &activityTracker{}, journal)
+		if asLimitError(err) == nil {
+			t.Fatalf("want limitReachedError, got %v", err)
+		}
+	})
+	t.Run("reply to current inbound suppresses auto-reply", func(t *testing.T) {
+		script := writeFakeClaude(t, t.TempDir(), earlyReplyLines("msg-1", genericErrorResultLine()), 1)
+		client, cfg, runner, hub, journal := newTestEnv(t, script)
+		err := handleOne(context.Background(), client, runner, inbound("hello"), cfg, &activityTracker{}, journal)
+		if err == nil {
+			t.Fatal("want error")
+		}
+		if n := len(hub.callsNamed("send_message")); n != 0 {
+			t.Errorf("send_message called %d times; want 0 (already replied to msg-1)", n)
+		}
+	})
 }

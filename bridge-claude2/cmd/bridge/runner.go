@@ -103,6 +103,11 @@ type queryUsage struct {
 	// is_error=true だった場合は false のままになる (= 未確定/失敗 として通常の
 	// リトライ・エラー通知フローに進ませる)。
 	SentMessageConfirmed bool
+	// ConfirmedReplyCausedBy は tool_result が is_error=false で確認できた send_message の
+	// input.caused_by 一覧 (caused_by 省略時は "")。SentMessageConfirmed は宛先の inbound を
+	// 問わず立つため、リトライ/エラー通知の抑止は repliedTo(処理中の msg.ID) で判定すること
+	// (PR #273 レビュー M1: 別 inbound への先回り返信で処理中 inbound の通知が消えるのを防ぐ)。
+	ConfirmedReplyCausedBy []string
 	// InnerHandledIDs は内側 Claude セッションが先回りで処理した inbound message ID 群
 	// (issue #264 方針 A)。以下を tool_result が is_error=false で確認できた場合のみ含める:
 	//   - `mcp__agent-hub__send_message` の input.caused_by (= 返信済みの inbound)
@@ -110,6 +115,17 @@ type queryUsage struct {
 	// handleOne がこれを runner.innerHandled に積み、processMessages が次の GetMessages
 	// で同じ ID を skip する (innerhandled.go 参照)。
 	InnerHandledIDs []string
+}
+
+// repliedTo は処理中の inbound msgID を caused_by に持つ send_message が
+// 成功確認済みかどうかを返す (PR #273 レビュー M1)。
+func (u queryUsage) repliedTo(msgID string) bool {
+	for _, id := range u.ConfirmedReplyCausedBy {
+		if id == msgID {
+			return true
+		}
+	}
+	return false
 }
 
 // sendMessageToolName は Claude が agent-hub へ返信する際に呼ぶ MCP tool の完全名。
@@ -132,9 +148,29 @@ type pendingToolUse struct {
 	ids  []string // send_message: [caused_by] / mark_as_read: message_id + message_ids
 }
 
+// warnUnexpectedAgentHubTool は、末尾が send_message / mark_as_read なのに期待する完全名と
+// 異なる tool (例: plugin 同梱サーバー経由の `mcp__plugin_agent-hub-plugin_agent-hub__send_message`)
+// を観測したら warn を出す。これらは #266 / #264 の判定に掛からず素通りするため、
+// 少なくとも観測可能にしておく (PR #273 レビュー M2)。
+func warnUnexpectedAgentHubTool(name string) {
+	if name == sendMessageToolName || name == markAsReadToolName {
+		return
+	}
+	if strings.HasPrefix(name, "mcp__") &&
+		(strings.HasSuffix(name, "__send_message") || strings.HasSuffix(name, "__mark_as_read")) {
+		slog.Warn("runner: agent-hub-like tool called under unexpected name — "+
+			"not tracked by send confirmation (#266) / inner-handled guard (#264)",
+			"tool", name)
+	}
+}
+
 // extractInboundIDs は tool_use input から inbound message ID 群を抜き出す。
-// send_message: caused_by (空なら nil)。mark_as_read: message_id + message_ids
-// (all=true は ID を特定できないため空。hub 側で既読になるので GetMessages には返らない)。
+// send_message: caused_by (空なら nil)。mark_as_read: message_id + message_ids。
+// all=true は ID を特定できないため空。hub 側で既読になるので以後の GetMessages には
+// 返らないが、processMessages が取得済みのバッチ残り (msgs[i+1:]) と limit 復帰時の
+// deferred は既に手元にあるため guard に掛からず dispatch される (PR #273 レビュー M3)。
+// 内側が caused_by 付きで返信していればそちらで skip されるので、二重応答になるのは
+// caused_by なしで返信した場合に限られる。
 func extractInboundIDs(name string, raw json.RawMessage) []string {
 	if len(raw) == 0 {
 		return nil
@@ -457,6 +493,7 @@ func readUntilResult(ctx context.Context, scanner *bufio.Scanner, stdinWriter io
 					if block.Name == sendMessageToolName {
 						usage.SentMessageObserved = true
 					}
+					warnUnexpectedAgentHubTool(block.Name)
 					if block.Name == sendMessageToolName || block.Name == markAsReadToolName {
 						pending[block.ID] = pendingToolUse{
 							name: block.Name,
@@ -519,6 +556,11 @@ func readUntilResult(ctx context.Context, scanner *bufio.Scanner, stdinWriter io
 				}
 				if p.name == sendMessageToolName {
 					usage.SentMessageConfirmed = true
+					causedBy := ""
+					if len(p.ids) > 0 {
+						causedBy = p.ids[0]
+					}
+					usage.ConfirmedReplyCausedBy = append(usage.ConfirmedReplyCausedBy, causedBy)
 				}
 				usage.InnerHandledIDs = append(usage.InnerHandledIDs, p.ids...)
 			}

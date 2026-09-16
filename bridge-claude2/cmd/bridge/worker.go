@@ -372,7 +372,7 @@ func processMessages(
 		// issue #264: 直前までの内側セッションが先回りで返信/既読化済みの inbound は
 		// 再 dispatch しない (二重応答防止)。
 		if runner.innerHandled.has(msg.ID) {
-			slog.Info(logPrefix+": skipping already-replied-by-inner-session message (issue #264)",
+			slog.Warn(logPrefix+": skipping already-replied-by-inner-session message (issue #264)",
 				"msg_id", msg.ID, "from", msg.Sender)
 			_ = client.MarkAsRead(ctx, msg.ID)
 			continue
@@ -544,13 +544,16 @@ func handleOne(
 		// と決めつけて通知を握りつぶすと二重送信より悪いサイレント消失になりうる
 		// (issue #266 レビュー指摘)。この場合は抑止せず通常のリトライ/エラー報告に
 		// 進める。ログにも状態を残し、別チャネル (slog) から観測可能にする。
-		if usage.SentMessageObserved && !usage.SentMessageConfirmed {
+		// PR #273 レビュー M1: 抑止は「処理中の msg.ID への返信」が成功確認できた場合に限る。
+		// 別 inbound への先回り返信 (issue #264) だけでは X の応答にならないので、通常の
+		// リトライ/エラー通知/limit 休眠に進める。
+		if usage.SentMessageObserved && !usage.repliedTo(msg.ID) {
 			slog.Warn("handleOne: send_message tool_use observed but not confirmed sent "+
 				"(no successful tool_result seen) — treating as unsent, not suppressing retry/notification (issue #266)",
 				"msg_id", msg.ID, "attempt", attempt, "err", err,
 			)
 		}
-		if usage.SentMessageConfirmed {
+		if usage.repliedTo(msg.ID) {
 			slog.Warn("handleOne: subprocess failed after send_message already confirmed sent — "+
 				"skipping retry to avoid duplicate/contradictory reply (issue #264)",
 				"msg_id", msg.ID, "attempt", attempt, "err", err,
@@ -566,10 +569,11 @@ func handleOne(
 
 	_ = lastUsage // usage は既に emitSpan 済み
 
-	// issue #264/#266: 直前の attempt で send_message の送信成功が確定していた場合のみ、
+	// issue #264/#266: 直前の attempt で処理中 inbound への send_message の送信成功
+	// (caused_by == msg.ID) が確定していた場合のみ、
 	// 送信者へのエラー通知 (journalledSend) をスキップする。tool_use のみ観測 (未確定) の
 	// 場合はスキップせず通常通り通知する (詳細は上記ループ内コメント参照)。
-	if lastUsage.SentMessageConfirmed {
+	if lastUsage.repliedTo(msg.ID) {
 		return lastErr
 	}
 
@@ -779,7 +783,8 @@ func runGracefulDrain(
 		}
 		// issue #264: 内側セッションが返信/既読化済みの inbound は skip
 		if runner.innerHandled.has(m.ID) {
-			slog.Info("[drain] skipping already-replied-by-inner-session message (issue #264)", "msg_id", m.ID)
+			slog.Warn("[drain] skipping already-replied-by-inner-session message (issue #264)",
+				"msg_id", m.ID, "from", m.Sender)
 			_ = client.MarkAsRead(drainCtx, m.ID)
 			continue
 		}
