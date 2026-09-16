@@ -13,36 +13,38 @@
 //  4. SIGTERM/Ctrl+C → runGracefulDrain() で compact + 未処理メッセージ処理 → exit (issue #178)
 //
 // Python bridge との主な対応:
-//   worker.py:               → worker.go
-//   claude_runner.py:        → runner.go
-//   cursor.py:               → cursor.go
-//   _common/journal.py:      → journal.go
-//   _common/inventory.py:    → inventory.go
-//   _common/reconnect.py:    → worker.go (runWorker の reconnect loop)
-//   blocking_commands.py:    → blocking.go
-//   CommandRouter (SDK):     → commands.go
-//   _ActivityTracker:        → tracker.go (activityTracker)
-//   _MessageGapTracker:      → tracker.go (messageGapTracker)
-//   _IdleCompactWatchdog:    → compact.go
+//
+//	worker.py:               → worker.go
+//	claude_runner.py:        → runner.go
+//	cursor.py:               → cursor.go
+//	_common/journal.py:      → journal.go
+//	_common/inventory.py:    → inventory.go
+//	_common/reconnect.py:    → worker.go (runWorker の reconnect loop)
+//	blocking_commands.py:    → blocking.go
+//	CommandRouter (SDK):     → commands.go
+//	_ActivityTracker:        → tracker.go (activityTracker)
+//	_MessageGapTracker:      → tracker.go (messageGapTracker)
+//	_IdleCompactWatchdog:    → compact.go
 //
 // 環境変数:
-//   AGENT_HUB_URL               required    agent-hub MCP エンドポイント
-//   GITHUB_PAT                  required    GitHub Personal Access Token
-//   AGENT_HUB_TENANT            optional    テナント ID (--tenant フラグが優先)
-//   CLAUDE_CLI_PATH             optional    claude CLI のパス (省略 = PATH 上の "claude")
-//   AGENT_HUB_MODEL             optional    Claude model
-//   AGENT_HUB_CURSOR_FILE       optional    cursor ファイルパス
-//   AGENT_HUB_JOURNAL_DIR       optional    journal ディレクトリ
-//   AGENT_HUB_BUSY_WINDOW_S     optional    /status busy 判定ウィンドウ秒数 (default: 60)
-//   AGENT_HUB_PUSH_SILENT_THRESHOLD_S optional gap 警告閾値秒数 (default: 25)
-//   AGENT_HUB_SUBPROCESS_TIMEOUT optional   claude subprocess 最大実行時間 (Go duration: "30m", "1h", "0" = 無制限; --subprocess-timeout フラグが優先)
-//   AGENT_HUB_MAX_QUERY_RETRIES optional    subprocess timeout 時のリトライ上限 (default: 2; --max-query-retries フラグが優先)
-//   BRIDGE_COMPACT_ARCHIVE_DIR  optional    compact archive ディレクトリ (SIGTERM compact 時に使用)
-//   BRIDGE_INVENTORY            optional    bridge inventory ファイルパス
-//   AGENT_HUB_BRIDGE_MAX_RETRIES optional   circuit breaker 連続失敗上限 (default: 10, 0=無限)
-//   AGENT_HUB_INBOX_POLL_INTERVAL_S optional safety-net poll / heartbeat 間隔秒数 (default: 30; issue #234)
-//   BRIDGE_LOG_DIR              optional    ログディレクトリ (省略 = ~/.agent-hub/logs/; --log-file が優先)
-//   BRIDGE_LOG_FILE             optional    ログファイルパス (省略 = BRIDGE_LOG_DIR/bridge-<participant>.log)
+//
+//	AGENT_HUB_URL               required    agent-hub MCP エンドポイント
+//	GITHUB_PAT                  required    GitHub Personal Access Token
+//	AGENT_HUB_TENANT            optional    テナント ID (--tenant フラグが優先)
+//	CLAUDE_CLI_PATH             optional    claude CLI のパス (省略 = PATH 上の "claude")
+//	AGENT_HUB_MODEL             optional    Claude model
+//	AGENT_HUB_CURSOR_FILE       optional    cursor ファイルパス
+//	AGENT_HUB_JOURNAL_DIR       optional    journal ディレクトリ
+//	AGENT_HUB_BUSY_WINDOW_S     optional    /status busy 判定ウィンドウ秒数 (default: 60)
+//	AGENT_HUB_PUSH_SILENT_THRESHOLD_S optional gap 警告閾値秒数 (default: 25)
+//	AGENT_HUB_SUBPROCESS_TIMEOUT optional   claude subprocess 最大実行時間 (Go duration: "30m", "1h", "0" = 無制限; --subprocess-timeout フラグが優先)
+//	AGENT_HUB_MAX_QUERY_RETRIES optional    subprocess timeout 時のリトライ上限 (default: 2; --max-query-retries フラグが優先)
+//	BRIDGE_COMPACT_ARCHIVE_DIR  optional    compact archive ディレクトリ (SIGTERM compact 時に使用)
+//	BRIDGE_INVENTORY            optional    bridge inventory ファイルパス
+//	AGENT_HUB_BRIDGE_MAX_RETRIES optional   circuit breaker 連続失敗上限 (default: 10, 0=無限)
+//	AGENT_HUB_INBOX_POLL_INTERVAL_S optional safety-net poll / heartbeat 間隔秒数 (default: 30; issue #234)
+//	BRIDGE_LOG_DIR              optional    ログディレクトリ (省略 = ~/.agent-hub/logs/; --log-file が優先)
+//	BRIDGE_LOG_FILE             optional    ログファイルパス (省略 = BRIDGE_LOG_DIR/bridge-<participant>.log)
 //
 // Issue: #155 (original), features: #162-#170
 package main
@@ -338,7 +340,7 @@ func setupLogger(level, logFile string) (close func()) {
 // PAT をコマンドライン引数 (ps で見える) に渡さないためファイル経由にする。
 func writeMCPConfig(cfg *config) (string, error) {
 	headers := map[string]string{
-		"Authorization":  "Bearer " + cfg.GitHubPAT,
+		"Authorization":    "Bearer " + cfg.GitHubPAT,
 		"X-Participant-Id": cfg.Participant,
 	}
 	if cfg.Tenant != "" {
