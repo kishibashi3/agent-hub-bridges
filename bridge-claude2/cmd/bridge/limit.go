@@ -90,8 +90,9 @@ var (
 	// resetTimePattern は "resets 6:50pm (Asia/Tokyo)" / "resets 3pm (Asia/Tokyo)" / "resets 9pm"
 	// にマッチする。group: 1=hour 2=minute(省略可) 3=am|pm 4=tz(省略可)
 	resetTimePattern = regexp.MustCompile(`(?i)\bresets?\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b(?:\s*\(([^)]+)\))?`)
-	// resetKeywordPattern は Kind 不明でも "resets <time>" があれば limit 系とみなすための判定。
-	resetKeywordPattern = regexp.MustCompile(`(?i)\bresets?\s+\d`)
+	// limitHintPattern は limit 判定に落ちなかったエラーのうち「limit 文言の変種かもしれない」
+	// ものを WARN で拾うための緩い判定 (PR #269 review M1)。判定そのものには使わない。
+	limitHintPattern = regexp.MustCompile(`(?i)\blimit\b|\bresets?\b`)
 )
 
 // detectLimit は claude 起動失敗 err が limit 系かどうかを判定し、limit 系なら
@@ -109,13 +110,21 @@ func detectLimit(err error, now time.Time) *limitReachedError {
 			break
 		}
 	}
+	until, parsed := parseResetTime(text, now)
 	if kind == "" {
-		if !resetKeywordPattern.MatchString(text) {
+		// 種別語がない場合は am/pm 付きの reset 時刻 (resetTimePattern) の一致を要求する。
+		// `\bresets?\s+\d` のような緩い判定だと "connection reset 3 times" 等の一般エラーを
+		// limit と誤判定して 30 分休眠してしまう (PR #269 review M1)。
+		if !parsed {
+			if limitHintPattern.MatchString(text) {
+				slog.Warn("[limit] error mentions limit/reset but did not match a known limit wording — treating as generic error",
+					"cause", truncate(text, 200))
+			}
 			return nil
 		}
 		kind = "limit"
 	}
-	if until, ok := parseResetTime(text, now); ok {
+	if parsed {
 		return &limitReachedError{Kind: kind, Until: until, Parsed: true, Cause: err}
 	}
 	return &limitReachedError{Kind: kind, Until: now.Add(limitSleepFallback), Parsed: false, Cause: err}
@@ -156,6 +165,11 @@ func parseResetTime(text string, now time.Time) (time.Time, bool) {
 			slog.Warn("[limit] unknown timezone in reset time; using bridge local time",
 				"tz", m[4], "err", err)
 		}
+	} else {
+		// tz 省略時も無言でローカル解釈せず一行残す (host が UTC で "resets 9pm" だと
+		// 寝過ごしうる、PR #269 review S2)
+		slog.Warn("[limit] reset time has no timezone; interpreting as bridge local time",
+			"reset", m[0], "local_tz", loc.String())
 	}
 	local := now.In(loc)
 	target := time.Date(local.Year(), local.Month(), local.Day(), hour, minute, 0, 0, loc)

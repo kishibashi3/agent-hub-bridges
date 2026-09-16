@@ -145,11 +145,22 @@ func TestDetectLimit(t *testing.T) {
 			t.Fatalf("got %+v", lim)
 		}
 	})
+	t.Run("kind keyword without am/pm reset time → fallback (date-form reset is not parsed)", func(t *testing.T) {
+		lim := detectLimit(errors.New("You've hit your session limit · resets Sep 20"), now)
+		if lim == nil || lim.Kind != "session limit" || lim.Parsed {
+			t.Fatalf("got %+v", lim)
+		}
+	})
 	t.Run("non-limit errors are not limits", func(t *testing.T) {
 		for _, msg := range []string{
 			"claude subprocess exited without result event (EOF — crash or premature exit)",
 			"claude subprocess killed (SubprocessTimeout=30m0s): subprocess timeout",
 			"claude result error (subtype=error): Something went wrong",
+			// PR #269 review M1: 種別語なし + 数字が続くだけの "reset" は limit ではない
+			"claude result error (subtype=error): connection reset 3 times, giving up",
+			"claude result error (subtype=error): retry budget reset 10 seconds ago",
+			// 種別語なし + 日付形 reset は判定材料不足 → 一般エラー扱い (WARN のみ)
+			"usage cap · resets Sep 20",
 		} {
 			if lim := detectLimit(errors.New(msg), now); lim != nil {
 				t.Errorf("%q: unexpected limit %+v", msg, lim)

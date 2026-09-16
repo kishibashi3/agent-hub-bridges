@@ -285,8 +285,10 @@ func runHubSession(
 			case <-pushCh:
 			default:
 			}
-			// deferred (limit 到達時点で MarkAsRead 済み・未処理) を hub 未読より先に処理
-			cursor = processMessages(ctx, cfg, client, runner, nil, cursor,
+			// deferred (limit 到達時点で MarkAsRead 済み・未処理) を hub 未読より先に処理。
+			// batch 途中で limit に当たった場合、残りはまだ router を通っていないので
+			// 復帰時も router を渡してスラッシュコマンドを claude に流さない (PR #269 review M3)
+			cursor = processMessages(ctx, cfg, client, runner, router, cursor,
 				tracker, gapTracker, journal, sleeper, deferred, "[limit-resume]")
 			if sleeping, _, _ := sleeper.state(); sleeping {
 				continue // deferred 処理中に再度 limit → もう一度休眠
