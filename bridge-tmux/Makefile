@@ -26,7 +26,6 @@ clean:
 install: build
 	install -d $(INSTALL_DIR)
 	install -m 755 $(BRIDGE) $(INSTALL_DIR)/$(BRIDGE)
-	install -m 755 $(CTL)    $(INSTALL_DIR)/$(CTL)
 
 # 使用例:
 #   make build
@@ -37,5 +36,6 @@ install: build
 #   ./agenthubctl --fleet fleet.yaml status
 #   ./agenthubctl --fleet fleet.yaml stop
 #
-#   make install                      # ~/.local/bin に bridge-tmux / agenthubctl を配置
+#   make install                      # ~/.local/bin に bridge-tmux だけを配置
+#   agenthubctl は配置しない。agent-hub-control の make install で入れる (#287)
 #   PATH に ~/.local/bin が入っていれば agenthubctl bridge spawn は basename 解決で動く
