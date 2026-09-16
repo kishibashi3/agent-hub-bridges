@@ -57,6 +57,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # bridge-claude2 の go.mod は replace で ../../agent-hub-sdk/go を参照する
+      # (README の Prerequisites 参照)。CI でも sibling の位置に SDK main を置く。
+      - name: Checkout agent-hub-sdk (sibling)
+        if: matrix.dir == 'bridge-claude2'
+        run: git clone --depth 1 https://github.com/kishibashi3/agent-hub-sdk.git "$GITHUB_WORKSPACE/../agent-hub-sdk"
+
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
