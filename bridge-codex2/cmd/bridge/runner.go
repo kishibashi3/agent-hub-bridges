@@ -18,7 +18,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -230,6 +229,7 @@ func (r *codexRunner) buildEnv() []string {
 
 // readOutput は codex --json JSONL 出力を読み取り、activity tracking を行う。
 // subprocess が exit するまでブロックする。
+// 1 行がバッファ上限を超えても読み取りは止めない (読み捨てて続ける。scanner.go、issue #302)。
 //
 // ctx キャンセル時は scanner.Scan() を即抜けするが、stdout の残データを drain しない。
 // subprocess 側はパイプバッファが詰まると write ブロックまたは SIGPIPE で hang する恐れがある。
@@ -237,8 +237,7 @@ func (r *codexRunner) buildEnv() []string {
 // SubprocessTimeout (WithTimeout) による強制終了に委ねる設計。
 func (r *codexRunner) readOutput(ctx context.Context, stdout io.Reader, tracker *activityTracker) queryUsage {
 	var usage queryUsage
-	scanner := bufio.NewScanner(stdout)
-	scanner.Buffer(make([]byte, r.cfg.ScannerBufferSize), r.cfg.ScannerBufferSize)
+	scanner := newStreamScanner(stdout, r.cfg.ScannerBufferSize)
 
 	for scanner.Scan() {
 		select {
