@@ -42,8 +42,8 @@ func fileExists(t *testing.T, path string) bool {
 // TestLimitSleeper_DeferredStore: enter で記録され、再休眠中は finishResume で消えず、
 // 処理し終えたら消える。前回プロセスの記録は loadAndClear で読めてファイルが消える。
 func TestLimitSleeper_DeferredStore(t *testing.T) {
-	t.Setenv(journalDirEnv, t.TempDir())
-	store := newDeferredStore("limit-test")
+	dir := t.TempDir()
+	store := newDeferredStore(dir, "limit-test")
 	s := &limitSleeper{store: store}
 	until := time.Now().Add(time.Hour)
 
@@ -61,7 +61,7 @@ func TestLimitSleeper_DeferredStore(t *testing.T) {
 	}
 
 	// 別プロセスとして読み直す: 再休眠時の残り 1 件だけが記録されている
-	recs := newDeferredStore("limit-test").loadAndClear()
+	recs := newDeferredStore(dir, "limit-test").loadAndClear()
 	if len(recs) != 1 || recs[0].ID != "d2" || recs[0].From != "@b" || recs[0].Kind != "spend limit" {
 		t.Fatalf("records = %+v; want only d2", recs)
 	}
@@ -86,8 +86,8 @@ func TestLimitSleeper_DeferredStore(t *testing.T) {
 // TestRunGracefulDrain_SleepingKeepsDeferredRecord: 休眠中の SIGTERM では記録を消さない
 // (次回起動時に WARN を出すため)。
 func TestRunGracefulDrain_SleepingKeepsDeferredRecord(t *testing.T) {
-	t.Setenv(journalDirEnv, t.TempDir())
-	store := newDeferredStore("limit-test")
+	dir := t.TempDir()
+	store := newDeferredStore(dir, "limit-test")
 	s := &limitSleeper{store: store}
 	s.enter(&limitReachedError{Kind: "spend limit", Until: time.Now().Add(time.Hour)}, deferredMsgs())
 
@@ -119,7 +119,7 @@ func TestRunHubSession_LimitWake(t *testing.T) {
 		`[{"id":"u1","from":"@c","to":"@limit-test","message":"unread-body","timestamp":"2026-09-16T09:00:03.000Z"}]`,
 	}
 
-	sleeper := &limitSleeper{store: newDeferredStore(cfg.Participant)}
+	sleeper := &limitSleeper{store: newDeferredStore(cfg.JournalDir, cfg.stateKey())}
 	sleeper.enter(&limitReachedError{Kind: "spend limit", Until: time.Now().Add(300 * time.Millisecond)}, deferredMsgs())
 
 	ctx, cancel := context.WithCancel(context.Background())
