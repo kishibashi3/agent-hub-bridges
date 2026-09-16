@@ -82,6 +82,16 @@ after wake, before the hub backlog. Inbound messages starting with
 `(auto) bridge-claude2 error:` never receive an auto error reply, even for non-limit
 failures, so two bridges cannot bounce errors at each other.
 
+### Auto error reply cooldown (issue #267)
+
+For non-limit failures the bridge still sends `(auto) bridge-claude2 error: …` to the
+sender, but **at most once per sender per 10 minutes** (`autoReplyLimiter`). A ping-pong
+only continues if the bridge replies again, so the second and later replies to the same
+sender within the cooldown are suppressed with a WARN log
+(`auto error reply suppressed by per-sender cooldown`). The first auto reply to a human
+or a normal peer is unchanged. The cooldown state lives in the runner and survives hub
+reconnects.
+
 ## GitHub posting footer (standard rule, issue #245)
 
 This bridge **auto-injects a GitHub posting footer instruction into every inner-Claude

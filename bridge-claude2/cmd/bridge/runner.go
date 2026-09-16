@@ -119,6 +119,8 @@ type claudeRunner struct {
 	mcpConfigPath string
 	// iatMgr は GitHub App IAT manager。GITHUB_APP_* が未設定の場合は nil (PAT fallback)。
 	iatMgr *githubclient.IATManager
+	// autoReply は auto エラー返信の送信元別 cooldown (issue #267)。nil = 制限なし。
+	autoReply *autoReplyLimiter
 }
 
 // newClaudeRunner は claudeRunner を生成する。
@@ -137,6 +139,7 @@ func newClaudeRunner(cfg *config, mcpConfigPath string) *claudeRunner {
 		cfg:           cfg,
 		mcpConfigPath: mcpConfigPath,
 		iatMgr:        mgr,
+		autoReply:     newAutoReplyLimiter(autoReplyCooldown),
 	}
 }
 

@@ -39,7 +39,19 @@ bridge はその文字列を `(auto) bridge-claude2 error: …` として送信�
 - 回帰テスト: `cmd/bridge/limit_test.go` (parse / 判定 / display_name / echo 判定)、
   `cmd/bridge/worker_limit_test.go` (fake claude + mock hub で auto 返信 0 件・休眠遷移・
   cursor 非前進・通常エラーの auto 返信は従来どおり)。
-- issue #267 の対処 1 (caused_by チェーン抑止) / 3 (rate limit) は本 PR に含めない。
+- **auto エラー返信を送信元ごとに 10 分に 1 回へ制限** (`autoReplyLimiter`, issue #267):
+  limit 以外の失敗 (MCP config 破損 / claude CLI 不在 / 恒常的な crash 等) でも、送信元が
+  「受け取ったら必ず何か返す存在」(@scheduler の自由文 bounce / 他 bridge の auto 返信 /
+  自動応答 peer) だと同じ構造で往復する。往復は bridge が返信して初めて次の周回が始まる
+  ので、同一送信元への 2 回目以降を cooldown 内で抑止すれば相手の挙動に依存せず
+  1 往復で止まる。人間 / 通常 peer への 1 回目の auto 返信は従来どおり。抑止時は
+  `auto error reply suppressed by per-sender cooldown` を WARN で残す。cooldown は
+  reconnect をまたいで保持 (`claudeRunner` に保持)。
+- issue #267 対処 1 (caused_by チェーン抑止) は不採用: Go SDK の `SendMessage` が送信した
+  message ID を返さないため、bridge 側で「自分の auto 返信への返信」を特定できない
+  (SDK + server の変更が必要)。cooldown は相手が caused_by を伝播するかに依存しない。
+- 回帰テスト追加: `cmd/bridge/autoreply_test.go` (limiter 単体 / bounce を返す fake sender
+  に対して auto 返信が 1 回のみ・別送信元は影響なし)。
 
 ## [0.3.4] — 2026-09-12
 
