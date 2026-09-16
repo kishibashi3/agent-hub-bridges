@@ -15,8 +15,8 @@
 //  3. display_name を `… (sleeping until 18:50 JST: spend limit)` に更新して
 //     get_participants で休眠状態が見えるようにする
 //  4. reset 時刻を parse できない limit 系エラーは固定 30 分の休眠にフォールバック
-//  5. inbound が `(auto) bridge-claude2 error:` で始まる場合は (limit 以外の失敗でも)
-//     auto 返信しない (二重防御、issue #267 対処 2)
+//  5. inbound が auto 返信 (`(auto) ` または legacy の `(自動応答)` で始まる) の場合は
+//     (limit 以外の失敗でも) auto 返信しない (二重防御、issue #267 対処 2 / issue #275)
 package main
 
 import (
@@ -44,8 +44,8 @@ const (
 )
 
 // autoErrorPrefix は bridge が送信元へ返す auto 返信 (claude 起動失敗 / workdir 不在) の
-// 先頭文字列。送信 (sendAutoErrorReply) と受信判定 (isAutoErrorEcho) の両方でこの定数を
-// 使い、文言のずれで判定が壊れないようにする (issue #268 対処 5 / issue #272)。
+// 先頭文字列。送信 (sendAutoErrorReply) 専用。受信判定 (isAutoErrorEcho) は他 bridge の
+// auto 返信も拾うため、autoReplyCommonPrefix の前方一致で行う (issue #272 / issue #275)。
 const autoErrorPrefix = "(auto) " + bridgeType + " error:"
 
 // legacyAutoReplyPrefix は Python 版 bridge (gemini / codex / a2a 等) が今も使う auto 返信の
