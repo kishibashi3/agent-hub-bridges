@@ -3,6 +3,7 @@
 - 作成: 2026-07-06
 - 作者: @bridges-impl
 - ステータス: Draft — operator L1 GO 取得前の設計リサーチ（実装はレビュー後）
+- 再確認: 2026-09-16（§10 参照）
 - 依存: なし（既存 on-demand runner.go / worker.go の拡張）
 - 関連: [stateful-mode-design.md](./stateful-mode-design.md)（session_id ハンドリングの前提知識）
 
@@ -12,7 +13,7 @@
 
 ### 1.1 現在の動作（issue #252 が問題視する挙動）
 
-`runner.query()`（runner.go L133-201）は呼び出しごとに:
+`runner.query()`（runner.go L156-228、2026-09-16 時点の main）は呼び出しごとに:
 
 1. `spawnSubprocess` で `claude` CLI を新規 spawn
 2. `control_request(initialize)` → `user` message を stdin に書き込み
@@ -23,7 +24,7 @@
 
 ### 1.2 呼び出し元の並行性
 
-`runHubSession`（worker.go L235-299）の push 駆動ループは **単一 goroutine の for-select**。同時に処理中の `handleOne` は常に高々 1 件であり、複数メッセージが来ても順番に処理される。つまり「同時実行の並列度」を上げる話ではなく、「**逐次実行される呼び出しの間の cold start を消す**」話である。
+`runHubSession`（worker.go L143〜、2026-09-16 時点の main）の push 駆動ループは **単一 goroutine の for-select**。同時に処理中の `handleOne` は常に高々 1 件であり、複数メッセージが来ても順番に処理される。つまり「同時実行の並列度」を上げる話ではなく、「**逐次実行される呼び出しの間の cold start を消す**」話である。
 
 ### 1.3 session_id の役割（再掲）
 
@@ -176,6 +177,40 @@ issue #252 の完了条件に対する設計上の対応:
 ## 9. operator L1 GO が必要な理由
 
 `runner.go` の中核 (`query()`) と `worker.go` の shutdown 経路 (`runGracefulDrain`) を変更するため、breaking ではないが挙動変更を伴う（デフォルト無効の opt-in ではあるが）。CLAUDE.md の「変更着手前の依存性確認」に従い、本ドキュメントを設計レビュー対象として提出し、GO 後に実装へ進む。
+
+---
+
+## 10. 2026-09-16 再確認（PR #253 放置期間中の main の変化と本設計への影響）
+
+起票（2026-07-06）から約 2 か月経過したため、main の bridge-claude2 と突き合わせて本設計が有効か再確認した。**結論: 設計の前提（1 query = 1 subprocess / `runHubSession` 単一 goroutine / warm idle 未実装 / `AGENT_HUB_WARM_IDLE_S` 未使用）は全て現状どおりで、設計は有効**。ただし以下 3 点を Phase 1 実装時の考慮事項として追記する。
+
+### 10.1 subprocess が per-query timeout ctx に束縛されている（§3.2 の補足・重要）
+
+現行 `query()` は `SubprocessTimeout` 用の `queryCtx`（`defer cancel()`）で `spawnSubprocess(queryCtx)` → `exec.CommandContext` している。つまり **query の return と同時に subprocess は kill される**。§3.2 の擬似コードのまま「stdin を閉じず warm 状態に遷移」しても、`defer cancel()` で即座に SIGKILL されて warm にならない。
+
+Phase 1 では以下のどちらかが必要:
+
+- (a) warm 有効時は subprocess を bridge 全体の長寿命 ctx で spawn し、`SubprocessTimeout` は query ごとに `time.AfterFunc` + `cmd.Process.Kill()` で別途強制する
+- (b) `spawnSubprocess` に「kill 用 cancel を呼び出し元が握る」形の ctx を渡し、warm 遷移時は cancel を warm state に移譲して idle timer 満了 / 不一致 sender / shutdown 時に呼ぶ
+
+(a) の方が `readUntilResult` の `ctx.Done()` 監視と整合しやすい（既存の timeout 判定コードをそのまま活かせる）ため (a) を推奨する。
+
+### 10.2 issue #264/#266（PR #266、merged）との整合: timeout retry と warm の関係
+
+`handleOne` は subprocess timeout 時に最大 `MaxQueryRetries` 回 `runner.query` を再実行し、`send_message` の tool_result 成功が確認できた場合はリトライを打ち切る（`SentMessageConfirmed`）。本設計との関係:
+
+- warm 遷移は **`err == nil` の場合のみ**（§3.2 どおり）。timeout / kill / limit 系エラーの場合は現行どおり close + Wait し、warm は作らない → retry は常に cold spawn になる。retry 中に前回の壊れた subprocess を再利用する経路は存在しないため、#266 のロジックに変更は不要
+- `SentMessageObserved` / `SentMessageConfirmed` は `readUntilResult` が per-query に返す `queryUsage` の値であり、warm 再利用時は 2 回目以降の query でも `readUntilResult` を呼び直すため、**フラグは query ごとにリセットされる**（warm state に持ち越さない）ことを実装時に確認する
+
+### 10.3 issue #268（PR #269、review 中）との整合: limit 休眠中の warm subprocess
+
+spend / session limit 到達時、bridge は reset 時刻まで `GetMessages` を呼ばず休眠する（`limitSleeper`）。limit 到達は `query()` のエラーとして返るため 10.2 と同じ理由で warm は作られない。ただし **休眠に入る直前の query が成功して warm 化していた subprocess** が残るケースは理論上ありうる（limit 検知は次の query で起きる）。休眠は数十分〜数時間になるため、`limitSleeper.enter()` 時点で warm subprocess を close する経路を §3.3 の shutdown 経路と同列に追加する。
+
+### 10.4 影響なしと確認した変更
+
+- PR #257（make install 追加）: ビルド手順のみ、runner / worker に影響なし
+- PR #258（github-client push 漏れ修正）: `iatMgr` 初期化のみ、query ライフサイクルに影響なし
+- `/restart` は依然 no-op（§3.3 の「warm 破棄に意味づけ直す」方針はそのまま有効）
 
 ---
 
