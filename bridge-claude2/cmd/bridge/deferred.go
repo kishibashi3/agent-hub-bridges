@@ -23,8 +23,7 @@ import (
 	agenthub "github.com/kishibashi3/agent-hub-sdk/go"
 )
 
-// deferredBodyPreviewLen は記録する本文の先頭バイト数 (WARN で内容を推測できる程度)。
-// truncate はバイト単位で切るため、日本語では約 40 文字になる。
+// deferredBodyPreviewLen は記録する本文の先頭文字数 (WARN で内容を推測できる程度)。
 const deferredBodyPreviewLen = 120
 
 // deferredRecord は `<user>.deferred` の 1 行。

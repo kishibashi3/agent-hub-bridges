@@ -529,11 +529,20 @@ func sleepWithContext(ctx context.Context, d time.Duration) {
 	}
 }
 
+// truncate は s を先頭 n 文字 (rune) に切り、切った場合は "..." を付ける。
+// バイト単位で切るとマルチバイト文字の途中で切れて不正な UTF-8 になるため rune 単位にする (issue #288)。
 func truncate(s string, n int) string {
 	if len(s) <= n {
 		return s
 	}
-	return s[:n] + "..."
+	i := 0
+	for pos := range s {
+		if i == n {
+			return s[:pos] + "..."
+		}
+		i++
+	}
+	return s
 }
 
 func orDefault(s, fallback string) string {

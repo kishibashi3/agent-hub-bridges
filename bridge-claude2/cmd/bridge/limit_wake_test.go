@@ -115,9 +115,9 @@ func TestRunHubSession_LimitWake(t *testing.T) {
 	_, cfg, runner, hub, journal := newTestEnv(t, script)
 	cfg.AgentHubURL = hub.srv.URL
 	cfg.GitHubPAT = "ghp_test"
-	hub.inbox = []string{
+	hub.setInbox(
 		`[{"id":"u1","from":"@c","to":"@limit-test","message":"unread-body","timestamp":"2026-09-16T09:00:03.000Z"}]`,
-	}
+	)
 
 	sleeper := &limitSleeper{store: newDeferredStore(cfg.Participant)}
 	sleeper.enter(&limitReachedError{Kind: "spend limit", Until: time.Now().Add(300 * time.Millisecond)}, deferredMsgs())

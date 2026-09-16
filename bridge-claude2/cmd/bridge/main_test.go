@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	agenthub "github.com/kishibashi3/agent-hub-sdk/go"
 )
@@ -281,5 +282,31 @@ func TestFormatPrompt_FooterInjection(t *testing.T) {
 	withoutFooter := formatPrompt("@bob", msg, "")
 	if strings.Contains(withoutFooter, "GitHub 投稿ルール") {
 		t.Error("formatPrompt() with empty footer should not inject the footer instruction")
+	}
+}
+
+// TestTruncate_RuneBoundary: truncate はマルチバイト文字の途中で切らない (issue #288)。
+func TestTruncate_RuneBoundary(t *testing.T) {
+	cases := []struct {
+		s    string
+		n    int
+		want string
+	}{
+		{"abc", 5, "abc"},
+		{"abcdef", 3, "abc..."},
+		{"あいう", 3, "あいう"},
+		{"あいうえ", 2, "あい..."},
+		{"aあbい", 3, "aあb..."},
+		{"", 0, ""},
+		{"abc", 0, "..."},
+	}
+	for _, c := range cases {
+		got := truncate(c.s, c.n)
+		if got != c.want {
+			t.Errorf("truncate(%q, %d) = %q, want %q", c.s, c.n, got, c.want)
+		}
+		if !utf8.ValidString(got) {
+			t.Errorf("truncate(%q, %d) = %q is not valid UTF-8", c.s, c.n, got)
+		}
 	}
 }
