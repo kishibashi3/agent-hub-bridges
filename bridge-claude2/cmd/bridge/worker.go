@@ -71,15 +71,18 @@ const (
 // SIGTERM 受信時の graceful drain は runHubSession 内の polling loop で実施する (issue #178)。
 // idle compact watchdog は on-demand bridge では不要なため削除済み (issue #179)。
 func runWorker(ctx context.Context, cfg *config, mcpConfigPath string) {
+	// issue #288: tenant 指定時は記録ファイル名に tenant を入れる。旧ファイルがあれば引き継ぐ。
+	migrateStateFiles(cfg)
+
 	// reconnect をまたいで共有する state
-	cursor := loadCursor(cfg.Participant)
-	journal := newJournal(cfg.Participant)
+	cursor := loadCursor(cfg.stateKey())
+	journal := newJournal(cfg.JournalDir, cfg.stateKey())
 	tracker := &activityTracker{}
 	gapTracker := &messageGapTracker{}
 	// issue #268: limit 休眠状態。reconnect をまたいで休眠と deferred を引き継ぐ。
 	// issue #271: deferred はファイルにも記録する。前回プロセスが休眠中に落ちていれば
 	// その deferred (MarkAsRead 済み・未処理) を WARN で出す。
-	sleeper := &limitSleeper{store: newDeferredStore(cfg.Participant)}
+	sleeper := &limitSleeper{store: newDeferredStore(cfg.JournalDir, cfg.stateKey())}
 	warnLostDeferred(sleeper.store)
 
 	// on-demand モード: runner は状態を持たないため単一インスタンスを使い回す。
@@ -419,7 +422,7 @@ func processMessages(
 
 		// issue #37, #176: process → save_cursor の順 (crash-safe secondary guard)。
 		// MarkAsRead は上記で処理前に呼び済み。
-		saveCursor(cfg.Participant, msg.Timestamp)
+		saveCursor(cfg.stateKey(), msg.Timestamp)
 		cursor = msg.Timestamp
 	}
 	return cursor
@@ -841,7 +844,7 @@ func runGracefulDrain(
 		if err != nil {
 			slog.Error("[drain] handleOne error", "msg_id", msg.ID, "err", err)
 		}
-		saveCursor(cfg.Participant, msg.Timestamp)
+		saveCursor(cfg.stateKey(), msg.Timestamp)
 	}
 	slog.Info("[drain] graceful drain completed")
 }
