@@ -598,6 +598,17 @@ func handleOne(
 		return lastErr
 	}
 
+	// issue #267: 同一送信元への auto エラー返信は cooldown 内 1 回まで。往復は bridge が
+	// 返信することで次の周回が始まるので、2 回目以降を抑止すれば相手が何を返そうと
+	// (scheduler の bounce / 他 bridge の auto 返信) 1 往復で止まる (autoreply.go 参照)。
+	if ok, wait := runner.autoReply.allow(msg.Sender, time.Now()); !ok {
+		slog.Warn("handleOne: auto error reply suppressed by per-sender cooldown (issue #267)",
+			"msg_id", msg.ID, "from", msg.Sender,
+			"cooldown_s", fmt.Sprintf("%.0f", autoReplyCooldown.Seconds()),
+			"retry_after_s", fmt.Sprintf("%.0f", wait.Seconds()))
+		return lastErr
+	}
+
 	errMsg := fmt.Sprintf("%s %v", autoErrorPrefix, lastErr)
 	_ = journalledSend(ctx, client, journal, msg.Sender, errMsg, msg.ID)
 	return lastErr
