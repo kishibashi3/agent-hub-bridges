@@ -21,9 +21,12 @@ const defaultScannerBufferSize = 4 * 1024 * 1024
 
 // newStreamScanner は maxLine bytes を 1 行の上限とする Scanner を返す。
 // 上限を超えた行は ErrTooLong にせず読み捨てる (oversizeSkippingSplit 参照)。
-// maxLine <= 0 (config 未設定のテスト等) の場合は defaultScannerBufferSize を使う。
+// maxLine <= 0 (config 未設定のテスト等) の場合は defaultScannerBufferSize を使い、
+// 設定が効いていないことに気付けるよう Warn ログを出す (issue #310)。
 func newStreamScanner(r io.Reader, maxLine int) *bufio.Scanner {
 	if maxLine <= 0 {
+		slog.Warn("runner: scanner buffer size is not positive, using default (issue #310)",
+			"scanner_buffer_size", maxLine, "default", defaultScannerBufferSize)
 		maxLine = defaultScannerBufferSize
 	}
 	scanner := bufio.NewScanner(r)
