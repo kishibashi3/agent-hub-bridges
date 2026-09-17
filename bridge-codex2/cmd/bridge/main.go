@@ -428,6 +428,7 @@ func main() {
 		"model", orDefault(cfg.Model, "(codex default)"),
 		"poll_interval_s", cfg.PollInterval.Seconds(),
 		"subprocess_timeout_s", cfg.SubprocessTimeout.Seconds(),
+		"scanner_buffer_size", cfg.ScannerBufferSize,
 		"codex_home", cfg.CodexHomeDir,
 		"log_file", orDefault(cfg.LogFile, "(stderr only)"),
 	)
