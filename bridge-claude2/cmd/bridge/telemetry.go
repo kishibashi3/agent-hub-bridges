@@ -16,9 +16,10 @@
 //   - gen_ai.usage.cost_usd:            推定コスト (USD)、nil なら omit
 //
 // span 文脈 (Python #92 相当):
-//   caused_by_id (受信メッセージ UUID) を parent span context として設定する。
-//   trace_id = UUID 全 128 bit、parent_span_id = UUID 高位 64 bit。
-//   これにより caused_by の連鎖が otelite 上で親子関係として辿れる。
+//
+//	caused_by_id (受信メッセージ UUID) を parent span context として設定する。
+//	trace_id = UUID 全 128 bit、parent_span_id = UUID 高位 64 bit。
+//	これにより caused_by の連鎖が otelite 上で親子関係として辿れる。
 package main
 
 import (

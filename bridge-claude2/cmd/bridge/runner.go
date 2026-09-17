@@ -4,8 +4,9 @@
 // subprocess の寿命は 1 query/compact に限定する (on-demand)。
 //
 // Python bridge との構造的な違いはここだけ:
-//   Python: ClaudeSDKClient が subprocess を alive に保ち複数 query を流す (persistent)
-//   Go:     query()/compact() ごとに spawn して完了後に exit させる (on-demand)
+//
+//	Python: ClaudeSDKClient が subprocess を alive に保ち複数 query を流す (persistent)
+//	Go:     query()/compact() ごとに spawn して完了後に exit させる (on-demand)
 //
 // それ以外 (agent-hub 接続 / reconnect / journal / cursor / commands / compact watchdog) は
 // worker.py と同じ構造を worker.go で維持する。
