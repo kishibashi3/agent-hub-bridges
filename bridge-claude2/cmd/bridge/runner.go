@@ -407,8 +407,8 @@ func (r *claudeRunner) spawnSubprocess(ctx context.Context) (*exec.Cmd, io.Write
 		stdinPipe.Close()
 		return nil, nil, nil, fmt.Errorf("runner: start subprocess: %w", err)
 	}
-	scanner := bufio.NewScanner(stdoutPipe)
-	scanner.Buffer(make([]byte, 512*1024), 512*1024) // 512 KB
+	// issue #299: AGENT_HUB_SCANNER_BUFFER_SIZE (#231) を使う。上限を超えた行は読み捨てて続行する。
+	scanner := newStreamScanner(stdoutPipe, r.cfg.ScannerBufferSize)
 	return cmd, stdinPipe, scanner, nil
 }
 
