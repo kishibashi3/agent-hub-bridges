@@ -16,7 +16,7 @@ concurrency:
 # SDK 側の変更で bridges の CI が赤くならないよう commit SHA で固定する。
 # SDK を上げるときはここを書き換える。
 env:
-  AGENT_HUB_SDK_REF: 70b84873ee7f85b140f555f2cb2337242d3efa6e
+  AGENT_HUB_SDK_REF: 6bdf19dd4c84bb2d70ac953a0980c4cc06b268b5
 
 jobs:
   lint-test:
