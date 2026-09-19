@@ -6,7 +6,7 @@
 // 休眠が最長 24h 続くため、露出窓は subprocess 1 回分より大幅に長い。
 //
 // 対処: 休眠に入るたびに deferred 一覧を journal と同じディレクトリの
-// `<user>.deferred` (JSONL) に書き、正常に復帰して処理し終えたら消す。次回起動時に
+// `<state key>.deferred` (JSONL) に書き、正常に復帰して処理し終えたら消す。次回起動時に
 // ファイルが残っていれば ID ごとに WARN を出して operator が追えるようにする。
 // 再処理はしない (crash 直前に返信済みだったメッセージへの二重応答を避けるため)。
 package main
@@ -26,7 +26,7 @@ import (
 // deferredBodyPreviewLen は記録する本文の先頭文字数 (WARN で内容を推測できる程度)。
 const deferredBodyPreviewLen = 120
 
-// deferredRecord は `<user>.deferred` の 1 行。
+// deferredRecord は `<state key>.deferred` の 1 行。
 type deferredRecord struct {
 	ID          string `json:"id"`
 	From        string `json:"from"`
@@ -43,8 +43,9 @@ type deferredStore struct {
 	path string
 }
 
-func newDeferredStore(user string) *deferredStore {
-	return &deferredStore{path: filepath.Join(journalDir(), user+".deferred")}
+// newDeferredStore は dir 配下に key (config.stateKey()) の deferredStore を生成する。
+func newDeferredStore(dir, key string) *deferredStore {
+	return &deferredStore{path: filepath.Join(dir, key+".deferred")}
 }
 
 // save は deferred 一覧でファイルを上書きする (tmpfile + fsync + atomic rename)。

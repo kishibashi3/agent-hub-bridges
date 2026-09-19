@@ -8,7 +8,8 @@
 // クラッシュ後に再送されると重複する可能性がある (idempotency は TODO)。
 //
 // フォーマット: JSONL (1 行 1 エントリ)。
-// 保存先: ~/.agent-hub/journals/<user>.journal (env AGENT_HUB_JOURNAL_DIR で上書き可)。
+// 保存先: ~/.agent-hub/journals/<state key>.journal (env AGENT_HUB_JOURNAL_DIR で上書き可)。
+// state key は config.stateKey() (tenant 指定時は `<tenant>__<participant>`)。
 package main
 
 import (
@@ -42,22 +43,23 @@ type Journal struct {
 	path string
 }
 
-// newJournal は指定 user の Journal を生成する。
-func newJournal(user string) *Journal {
-	return &Journal{path: filepath.Join(journalDir(), user+".journal")}
+// newJournal は dir 配下に key (config.stateKey()) の Journal を生成する。
+func newJournal(dir, key string) *Journal {
+	return &Journal{path: filepath.Join(dir, key+".journal")}
 }
 
 // journalDir は journal の保存先ディレクトリを返す (env AGENT_HUB_JOURNAL_DIR で上書き可)。
 // limit 休眠の deferred 記録 (deferred.go) も同じディレクトリに置く。
-func journalDir() string {
+// HOME が取れないときはエラーを返す (起動時に終了させる。issue #288 項目 4)。
+func journalDir() (string, error) {
 	if dir := os.Getenv(journalDirEnv); dir != "" {
-		return dir
+		return dir, nil
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
-		home = "/tmp"
+		return "", fmt.Errorf("get home dir for journal dir (set HOME or %s): %w", journalDirEnv, err)
 	}
-	return filepath.Join(home, ".agent-hub", "journals")
+	return filepath.Join(home, ".agent-hub", "journals"), nil
 }
 
 // makeEntry は新規 journalEntry を生成する (書き込みは行わない)。

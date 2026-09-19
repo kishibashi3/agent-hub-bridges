@@ -34,7 +34,7 @@
 //	CLAUDE_CLI_PATH             optional    claude CLI のパス (省略 = PATH 上の "claude")
 //	AGENT_HUB_MODEL             optional    Claude model
 //	AGENT_HUB_CURSOR_FILE       optional    cursor ファイルパス
-//	AGENT_HUB_JOURNAL_DIR       optional    journal ディレクトリ
+//	AGENT_HUB_JOURNAL_DIR       optional    journal ディレクトリ (default: ~/.agent-hub/journals。HOME もなければ起動エラー)
 //	AGENT_HUB_BUSY_WINDOW_S     optional    /status busy 判定ウィンドウ秒数 (default: 60)
 //	AGENT_HUB_PUSH_SILENT_THRESHOLD_S optional gap 警告閾値秒数 (default: 25)
 //	AGENT_HUB_SUBPROCESS_TIMEOUT optional   claude subprocess 最大実行時間 (Go duration: "30m", "1h", "0" = 無制限; --subprocess-timeout フラグが優先)
@@ -110,6 +110,8 @@ type config struct {
 	SubprocessTimeout time.Duration
 	// MaxQueryRetries は subprocess timeout 時のリトライ上限 (0 = リトライなし)。
 	MaxQueryRetries int
+	// JournalDir は journal / deferred 記録の保存先ディレクトリ (起動時に解決する)。
+	JournalDir string
 	// ScannerBufferSize は stream-json bufio.Scanner のバッファサイズ (bytes)。
 	// AGENT_HUB_SCANNER_BUFFER_SIZE env で設定可能 (例: "4MB", "8MB")。デフォルト 4MB。
 	ScannerBufferSize int
@@ -233,6 +235,18 @@ func parseConfig() (*config, error) {
 		return nil, err
 	}
 
+	// journal dir: AGENT_HUB_JOURNAL_DIR env > ~/.agent-hub/journals (HOME がなければ起動エラー)
+	resolvedJournalDir, err := journalDir()
+	if err != nil {
+		return nil, err
+	}
+
+	// tenant は記録ファイル名に入るため、パス区切りを含む値は受け付けない (issue #288)
+	resolvedTenant := tenantValue(*tenant)
+	if err := validateTenantForFileName(resolvedTenant); err != nil {
+		return nil, err
+	}
+
 	// display_name: --display-name フラグ > "{participant} — go bridge"
 	resolvedDisplayName := *displayName
 	if resolvedDisplayName == "" {
@@ -261,7 +275,7 @@ func parseConfig() (*config, error) {
 		DisplayName:       resolvedDisplayName,
 		AgentHubURL:       url,
 		GitHubPAT:         pat,
-		Tenant:            tenantValue(*tenant),
+		Tenant:            resolvedTenant,
 		Workdir:           wd,
 		ClaudeCLI:         claudeCLI,
 		Model:             resolvedModel,
@@ -274,6 +288,7 @@ func parseConfig() (*config, error) {
 		SubprocessTimeout: resolvedSubprocessTimeout,
 		MaxQueryRetries:   resolvedMaxQueryRetries,
 		ScannerBufferSize: resolvedScannerBufferSize,
+		JournalDir:        resolvedJournalDir,
 	}, nil
 }
 
