@@ -197,9 +197,9 @@ func (r *codexRunner) buildEnv() []string {
 	env := os.Environ()
 	// 既存の CODEX_HOME / identity 変数を上書きするためマップを作る
 	overrides := map[string]string{
-		"CODEX_HOME":   r.cfg.CodexHomeDir,
-		envUserID:      r.cfg.User,
-		"GITHUB_PAT":   r.cfg.GitHubPAT,
+		"CODEX_HOME": r.cfg.CodexHomeDir,
+		envUserID:    r.cfg.User,
+		"GITHUB_PAT": r.cfg.GitHubPAT,
 	}
 	if r.cfg.Tenant != "" {
 		overrides[envTenantID] = r.cfg.Tenant
