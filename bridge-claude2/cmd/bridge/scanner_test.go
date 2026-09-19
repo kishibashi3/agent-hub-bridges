@@ -1,8 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"fmt"
 	"io"
+	"log/slog"
 	"strings"
 	"testing"
 )
@@ -108,10 +111,25 @@ func TestReadUntilResult_OversizeResultEvent(t *testing.T) {
 	}
 }
 
-func TestNewStreamScanner_ZeroMaxUsesDefault(t *testing.T) {
-	scanner := newStreamScanner(strings.NewReader("hello\n"), 0)
-	if !scanner.Scan() || scanner.Text() != "hello" {
-		t.Fatalf("Scan/Text = %q, err=%v", scanner.Text(), scanner.Err())
+func TestNewStreamScanner_NonPositiveMaxUsesDefaultAndWarns(t *testing.T) {
+	for _, maxLine := range []int{0, -1} {
+		var logBuf bytes.Buffer
+		prev := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, nil)))
+		// 4MB 未満の上限だと読み捨てられる長さの行で、既定値 (4MB) が使われていることを確かめる
+		line := strings.Repeat("x", 1024*1024)
+		scanner := newStreamScanner(strings.NewReader(line+"\n"), maxLine)
+		ok := scanner.Scan()
+		slog.SetDefault(prev)
+		if !ok || scanner.Text() != line {
+			t.Fatalf("maxLine=%d: Scan=%v len=%d err=%v", maxLine, ok, len(scanner.Text()), scanner.Err())
+		}
+		out := logBuf.String()
+		if !strings.Contains(out, "level=WARN") || !strings.Contains(out, "scanner buffer size is not positive") ||
+			!strings.Contains(out, fmt.Sprintf("scanner_buffer_size=%d", maxLine)) ||
+			!strings.Contains(out, fmt.Sprintf("default=%d", defaultScannerBufferSize)) {
+			t.Fatalf("maxLine=%d: log = %q, want WARN with scanner_buffer_size and default", maxLine, out)
+		}
 	}
 }
 
