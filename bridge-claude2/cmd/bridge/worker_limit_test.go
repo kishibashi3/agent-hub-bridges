@@ -88,6 +88,13 @@ func newMockHub(t *testing.T) *mockHub {
 	return h
 }
 
+// setInbox は get_messages が返す inbox を hub.mu の下で差し替える。
+func (h *mockHub) setInbox(inbox ...string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.inbox = inbox
+}
+
 func (h *mockHub) callsNamed(name string) []toolCall {
 	h.mu.Lock()
 	defer h.mu.Unlock()
