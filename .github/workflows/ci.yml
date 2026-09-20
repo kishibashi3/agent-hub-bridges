@@ -14,7 +14,8 @@ concurrency:
 
 # go-test の sibling clone で使う agent-hub-sdk の ref (issue #280)。
 # SDK 側の変更で bridges の CI が赤くならないよう commit SHA で固定する。
-# SDK を上げるときはここを書き換える。
+# SDK の release のたびに、ここを新しい SHA に上げる PR を出す。
+# 手順は agent-hub-sdk の CONTRIBUTING.md「Releases」を参照 (#283)。
 env:
   AGENT_HUB_SDK_REF: 5854dc6bc3559f78431a0e97343c4186409bef48
 
