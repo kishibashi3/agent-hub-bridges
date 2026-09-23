@@ -112,6 +112,9 @@ func loadCursor(key string) cursorPos {
 
 // saveCursor は cursor を永続化する。
 // 書き込み失敗は WARNING ログのみ (= bridge を落とさない)。
+//
+// issue #326: journal / deferred と同じく 0o600 で書く。os.WriteFile は既存ファイルの
+// パーミッションを変えないので、以前の版が 0o644 で作ったファイルも Chmod で 0o600 に直す。
 func saveCursor(key string, c cursorPos) {
 	path := cursorPath(key)
 	data, err := json.Marshal(cursorData{LastProcessedAt: c.TS, IDsAtLastProcessedAt: c.IDs})
@@ -119,9 +122,12 @@ func saveCursor(key string, c cursorPos) {
 		slog.Warn("cursor: failed to marshal", "err", err)
 		return
 	}
-	if err := os.WriteFile(path, data, 0o644); err != nil {
+	if err := os.WriteFile(path, data, 0o600); err != nil {
 		slog.Warn("cursor: failed to save", "path", path, "err", err)
 		return
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		slog.Warn("cursor: failed to chmod", "path", path, "err", err)
 	}
 	slog.Debug("cursor: saved", "last_processed_at", c.TS, "ids_at_last_processed_at", len(c.IDs), "path", path)
 }
