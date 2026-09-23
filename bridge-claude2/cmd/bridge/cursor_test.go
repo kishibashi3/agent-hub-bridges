@@ -130,3 +130,70 @@ func countLines(t *testing.T, path string) int {
 	}
 	return strings.Count(string(data), "\n")
 }
+
+// TestRunGracefulDrain_SameMillisecondAllDispatched は、drain 中に同じ ms のメッセージが
+// 複数届いたとき、処理済みでないものが全件 dispatch され、保存された cursor にその ID が
+// 全部入ることを検証する (issue #326)。
+func TestRunGracefulDrain_SameMillisecondAllDispatched(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "dispatched.log")
+	script := writeRecordingFakeClaude(t, dir, logPath, okResultLine(), 0)
+	client, cfg, runner, hub, journal := newTestEnv(t, script)
+
+	// m1 は処理済み。m2 / m3 は m1 と同じ ms に届いた未処理のメッセージ
+	const ts = "2026-09-16T09:00:01.000Z"
+	cursor := cursorPos{TS: ts, IDs: []string{"m1"}}
+	hub.setInbox(`[` +
+		`{"id":"m1","from":"@a","to":"@limit-test","message":"body m1","timestamp":"` + ts + `"},` +
+		`{"id":"m2","from":"@a","to":"@limit-test","message":"body m2","timestamp":"` + ts + `"},` +
+		`{"id":"m3","from":"@a","to":"@limit-test","message":"body m3","timestamp":"` + ts + `"}]`)
+
+	runGracefulDrain(client, runner, cfg, cursor, &activityTracker{}, journal, "@limit-test", &limitSleeper{})
+
+	// 1 行目は /compact。その後に dispatch されたメッセージが並ぶ
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := string(data)
+	for _, id := range []string{"m2", "m3"} {
+		if !strings.Contains(log, "body "+id) {
+			t.Errorf("%s was not dispatched during drain (same-ms messages must not be skipped)", id)
+		}
+	}
+	if strings.Contains(log, "body m1") {
+		t.Error("m1 is already processed; must not be dispatched again")
+	}
+	want := cursorPos{TS: ts, IDs: []string{"m1", "m2", "m3"}}
+	if got := loadCursor(cfg.stateKey()); !reflect.DeepEqual(got, want) {
+		t.Errorf("saved cursor = %+v, want %+v", got, want)
+	}
+}
+
+// TestSaveCursor_FileMode は、cursor ファイルが 0o600 で作られ、以前の版が 0o644 で
+// 作った既存ファイルも 0o600 に直ることを検証する (issue #326)。
+func TestSaveCursor_FileMode(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cursor")
+	t.Setenv("AGENT_HUB_CURSOR_FILE", path)
+	c := cursorPos{TS: "2026-09-16T09:00:01.000Z", IDs: []string{"m1"}}
+
+	saveCursor("key", c)
+	assertMode(t, path, 0o600)
+
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	saveCursor("key", c)
+	assertMode(t, path, 0o600)
+}
+
+func assertMode(t *testing.T, path string, want os.FileMode) {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != want {
+		t.Errorf("mode of %s = %o, want %o", path, got, want)
+	}
+}
