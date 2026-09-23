@@ -52,7 +52,13 @@ from agent_hub_bridges._common.reconnect import run_with_reconnect
 from agent_hub_bridges.claude.blocking_commands import bash_pre_tool_use_hook
 from agent_hub_bridges.claude.claude_runner import ClaudeRunner
 from agent_hub_bridges.claude.config import Config
-from agent_hub_bridges.claude.cursor import load_cursor, save_cursor
+from agent_hub_bridges.claude.cursor import (
+    Cursor,
+    advance,
+    is_seen,
+    load_cursor,
+    save_cursor,
+)
 from agent_hub_bridges.claude.telemetry import (
     ToolUseRecord,
     build_traceparent,
@@ -658,7 +664,7 @@ async def _startup_catchup(
     config: Config,
     mcp_config_path: Path,
     runner_holder: list[ClaudeRunner | None],
-    cursor: str | None,
+    cursor: Cursor | None,
     tracker: _ActivityTracker,
     gap_tracker: _MessageGapTracker,
     compact_watchdog: _IdleCompactWatchdog,
@@ -666,7 +672,7 @@ async def _startup_catchup(
     router: CommandRouter,
     *,
     telemetry_url: str | None = None,
-) -> str | None:
+) -> Cursor | None:
     """bridge 起動時に未読メッセージを処理する startup catchup (issue #98).
 
     hub 接続確立後・inbox ループ開始前に ``get_messages`` を呼んで、
@@ -722,12 +728,12 @@ async def _startup_catchup(
         # issue #37: 再起動後の重複 dispatch 防止。cursor-skip を
         # runner lazy init より先に置くことで、replay メッセージ
         # (= cursor 以前) の msg.id が trace root にならないようにする。
-        if cursor is not None and msg.timestamp <= cursor:
+        if is_seen(cursor, msg.id, msg.timestamp):
             logger.info(
                 "[startup-catchup] skipping seen message %s (ts=%s, cursor=%s)",
                 msg.id,
                 msg.timestamp,
-                cursor,
+                cursor.ts if cursor else None,
             )
             await hub.ack(msg.id)
             continue
@@ -770,8 +776,8 @@ async def _startup_catchup(
         finally:
             compact_watchdog.clear_busy()
         # process → save_cursor → ack の順 (crash-safe)。
-        save_cursor(config.user, msg.timestamp)
-        cursor = msg.timestamp
+        cursor = advance(cursor, msg.id, msg.timestamp)
+        save_cursor(config.user, cursor)
         await hub.ack(msg.id)
 
     return cursor
@@ -781,14 +787,14 @@ async def _run_hub_session(
     config: Config,
     mcp_config_path: Path,
     runner_holder: list[ClaudeRunner | None],
-    cursor: str | None,
+    cursor: Cursor | None,
     tracker: _ActivityTracker,
     gap_tracker: _MessageGapTracker,
     compact_watchdog: _IdleCompactWatchdog,
     journal: Journal,
     *,
     telemetry_url: str | None = None,
-) -> str | None:
+) -> Cursor | None:
     """1 回分の hub session を最後まで走らせる.
 
     `AgentHub.connect` → `hub.inbox(commands=router)` の async iterator を
@@ -817,10 +823,10 @@ async def _run_hub_session(
     timing varies. Server-side ``register`` is idempotent.
 
     issue #37: ``cursor`` は再起動をまたいで最後に処理した message の
-    timestamp を保持する。 ``msg.timestamp <= cursor`` のメッセージは
-    skip + ack することで重複 dispatch を防ぐ。 正常処理時の順序は:
+    timestamp と、その timestamp で処理済みの message ID を保持する (issue #323)。
+    処理済み位置以前のメッセージは skip + ack することで重複 dispatch を防ぐ。 正常処理時の順序は:
       1. ``_handle_one`` で LLM に流す (process)
-      2. ``save_cursor`` で timestamp を永続化
+      2. ``save_cursor`` で cursor を永続化
       3. ``hub.ack`` でサーバに既読通知
 
     issue #91: ``ClaudeRunner`` は最初のメッセージ受信時に lazily 初期化する
@@ -916,16 +922,17 @@ async def _run_hub_session(
                     # issue #37: 再起動後の重複 dispatch 防止。cursor-skip を
                     # runner lazy init より先に置くことで、replay メッセージ
                     # (= cursor 以前) の msg.id が trace root にならないようにする。
+                    # issue #323: 同じ ms の message は処理済み ID だけを skip する。
                     # NOTE: ISO-8601 UTC 文字列 (例: "2026-05-21T12:00:00.000Z") は
-                    # 辞書順比較 (<=) が時系列順と一致する。これは server が
+                    # 辞書順比較が時系列順と一致する。これは server が
                     # 一貫した形式を返す前提。server 実装を変えた場合は
                     # `datetime.fromisoformat()` でのパースに切り替えること。
-                    if cursor is not None and msg.timestamp <= cursor:
+                    if is_seen(cursor, msg.id, msg.timestamp):
                         logger.info(
                             "Skipping already-seen message %s (ts=%s, cursor=%s)",
                             msg.id,
                             msg.timestamp,
-                            cursor,
+                            cursor.ts if cursor else None,
                         )
                         await hub.ack(msg.id)
                         continue
@@ -973,8 +980,8 @@ async def _run_hub_session(
                     # process → save_cursor → ack の順 (crash-safe)。
                     # save_cursor 後 ack 前にクラッシュしても、 再起動後に
                     # cursor で skip されるので二重 dispatch にならない。
-                    save_cursor(config.user, msg.timestamp)
-                    cursor = msg.timestamp
+                    cursor = advance(cursor, msg.id, msg.timestamp)
+                    save_cursor(config.user, cursor)
                     await hub.ack(msg.id)
         finally:
             # issue #91: hub session 終了時に runner を tear down する。

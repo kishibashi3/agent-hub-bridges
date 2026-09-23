@@ -111,11 +111,11 @@ func runHubSession(
 	ctx context.Context,
 	cfg *config,
 	runner *codexRunner,
-	cursor string,
+	cursor cursorPos,
 	tracker *activityTracker,
 	gapTracker *messageGapTracker,
 	journal *Journal,
-) (string, bool, error) {
+) (cursorPos, bool, error) {
 	client, err := agenthub.New(
 		cfg.AgentHubURL, cfg.GitHubPAT, cfg.User, cfg.Tenant,
 		agenthub.WithClientName("bridge-codex2"),
@@ -201,9 +201,9 @@ func runHubSession(
 
 			gapTracker.onMessageReceived(msg.ID)
 
-			if cursor != "" && msg.Timestamp <= cursor {
+			if cursor.seen(msg) {
 				slog.Info("runHubSession: skipping already-seen message",
-					"msg_id", msg.ID, "ts", msg.Timestamp, "cursor", cursor)
+					"msg_id", msg.ID, "ts", msg.Timestamp, "cursor", cursor.TS)
 				// best-effort: 失敗は致命的でなく、次回 polling で再試行される
 				_ = client.MarkAsRead(ctx, msg.ID)
 				continue
@@ -220,8 +220,8 @@ func runHubSession(
 				slog.Error("runHubSession: handleOne error", "msg_id", msg.ID, "err", handleErr)
 			}
 
-			saveCursor(cfg.User, msg.Timestamp)
-			cursor = msg.Timestamp
+			cursor = cursor.advance(msg)
+			saveCursor(cfg.User, cursor)
 		}
 
 		// push を受信すれば即時ループ、なければ PollInterval 待機 (issue #198)
@@ -245,11 +245,11 @@ func startupCatchup(
 	cfg *config,
 	client *agenthub.Client,
 	runner *codexRunner,
-	cursor string,
+	cursor cursorPos,
 	tracker *activityTracker,
 	gapTracker *messageGapTracker,
 	journal *Journal,
-) (string, error) {
+) (cursorPos, error) {
 	msgs, err := client.GetMessages(ctx)
 	if err != nil {
 		slog.Warn("[startup-catchup] get_messages failed; skipping", "err", err)
@@ -288,9 +288,9 @@ func startupCatchup(
 			continue
 		}
 
-		if cursor != "" && msg.Timestamp <= cursor {
+		if cursor.seen(msg) {
 			slog.Info("[startup-catchup] skipping seen message",
-				"msg_id", msg.ID, "ts", msg.Timestamp, "cursor", cursor)
+				"msg_id", msg.ID, "ts", msg.Timestamp, "cursor", cursor.TS)
 			// best-effort: 失敗は致命的でなく、次回 polling で再試行される
 			_ = client.MarkAsRead(ctx, msg.ID)
 			continue
@@ -308,8 +308,8 @@ func startupCatchup(
 			slog.Error("[startup-catchup] handleOne error", "msg_id", msg.ID, "err", handleErr)
 		}
 
-		saveCursor(cfg.User, msg.Timestamp)
-		cursor = msg.Timestamp
+		cursor = cursor.advance(msg)
+		saveCursor(cfg.User, cursor)
 	}
 
 	return cursor, nil
@@ -408,7 +408,7 @@ func runGracefulDrain(
 	client *agenthub.Client,
 	runner *codexRunner,
 	cfg *config,
-	cursor string,
+	cursor cursorPos,
 	tracker *activityTracker,
 	journal *Journal,
 	selfHandle string,
@@ -437,7 +437,7 @@ func runGracefulDrain(
 			_ = client.MarkAsRead(drainCtx, m.ID)
 			continue
 		}
-		if cursor != "" && m.Timestamp <= cursor {
+		if cursor.seen(m) {
 			// best-effort: 失敗は致命的でなく、次回 polling で再試行される
 			_ = client.MarkAsRead(drainCtx, m.ID)
 			continue
@@ -462,7 +462,8 @@ func runGracefulDrain(
 		if err := handleOne(drainCtx, client, runner, msg, cfg, tracker, journal); err != nil {
 			slog.Error("[drain] handleOne error", "msg_id", msg.ID, "err", err)
 		}
-		saveCursor(cfg.User, msg.Timestamp)
+		cursor = cursor.advance(msg)
+		saveCursor(cfg.User, cursor)
 	}
 	slog.Info("[drain] graceful drain completed")
 }

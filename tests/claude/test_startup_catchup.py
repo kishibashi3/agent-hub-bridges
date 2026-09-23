@@ -25,6 +25,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from agent_hub_sdk import CommandRouter, IncomingMessage
 
+from agent_hub_bridges.claude.cursor import Cursor
 from agent_hub_bridges.claude.worker import (
     _ActivityTracker,
     _IdleCompactWatchdog,
@@ -108,7 +109,7 @@ class TestNoMessages:
             _make_config(tmp_path),
             tmp_path / "mcp.json",
             [None],
-            "2026-05-01T00:00:00.000Z",
+            Cursor(ts="2026-05-01T00:00:00.000Z"),
             tracker,
             gap_tracker,
             compact_watchdog,
@@ -116,7 +117,7 @@ class TestNoMessages:
             CommandRouter(),
         )
 
-        assert result == "2026-05-01T00:00:00.000Z"
+        assert result == Cursor(ts="2026-05-01T00:00:00.000Z")
         hub.ack.assert_not_called()
 
     @pytest.mark.asyncio
@@ -157,7 +158,7 @@ class TestGetUnreadFailure:
         hub = _make_hub()
         hub.get_unread = AsyncMock(side_effect=RuntimeError("hub unreachable"))
         tracker, gap_tracker, compact_watchdog = _make_trackers()
-        original = "2026-05-15T00:00:00.000Z"
+        original = Cursor(ts="2026-05-15T00:00:00.000Z")
 
         result = await _startup_catchup(
             hub,
@@ -227,7 +228,7 @@ class TestCursorFilter:
                 _make_config(tmp_path),
                 tmp_path / "mcp.json",
                 runner_holder,
-                "2026-05-01T12:00:00.000Z",  # cursor newer than msg
+                Cursor(ts="2026-05-01T12:00:00.000Z"),  # cursor newer than msg
                 tracker,
                 gap_tracker,
                 compact_watchdog,
@@ -242,7 +243,7 @@ class TestCursorFilter:
 
     @pytest.mark.asyncio
     async def test_exact_timestamp_match_is_skipped(self, tmp_path: Path) -> None:
-        """cursor と同じ timestamp のメッセージ → ack + スキップ。runner_holder は None のまま。"""
+        """cursor と同じ timestamp で処理済みの ID → ack + スキップ。runner は未初期化のまま。"""
         ts = "2026-05-01T12:00:00.000Z"
         msg = _make_msg(timestamp=ts)
         hub = _make_hub(msgs=[msg])
@@ -255,7 +256,7 @@ class TestCursorFilter:
                 _make_config(tmp_path),
                 tmp_path / "mcp.json",
                 runner_holder,
-                ts,
+                Cursor(ts=ts, ids=(msg.id,)),  # 同じ ts で処理済みの ID
                 tracker,
                 gap_tracker,
                 compact_watchdog,
@@ -265,9 +266,82 @@ class TestCursorFilter:
 
         mock_handle.assert_not_called()
         hub.ack.assert_called_once_with(msg.id)
-        assert result == ts  # cursor unchanged
+        assert result == Cursor(ts=ts, ids=(msg.id,))  # cursor unchanged
         # cursor-skip メッセージでは runner が初期化されない
         assert runner_holder[0] is None
+
+
+    @pytest.mark.asyncio
+    async def test_same_timestamp_unprocessed_id_is_handled(self, tmp_path: Path) -> None:
+        """cursor と同じ timestamp でも処理済みでない ID → 処理する (issue #323)。"""
+        ts = "2026-05-01T12:00:00.000Z"
+        msg = _make_msg(msg_id="msg-002", timestamp=ts)
+        hub = _make_hub(msgs=[msg])
+        tracker, gap_tracker, compact_watchdog = _make_trackers()
+
+        with patch(_HANDLE_PATCH, new_callable=AsyncMock) as mock_handle, \
+             patch(_SAVE_CURSOR_PATCH), \
+             patch(_BUILD_OPTIONS_PATCH, return_value=MagicMock()), \
+             patch(_RUNNER_PATCH, return_value=_mock_runner()):
+            result = await _startup_catchup(
+                hub,
+                _make_config(tmp_path),
+                tmp_path / "mcp.json",
+                [None],
+                Cursor(ts=ts, ids=("msg-001",)),
+                tracker,
+                gap_tracker,
+                compact_watchdog,
+                _make_journal(),
+                CommandRouter(),
+            )
+
+        mock_handle.assert_awaited_once()
+        assert mock_handle.call_args.args[2] is msg
+        assert result == Cursor(ts=ts, ids=("msg-001", "msg-002"))
+
+    @pytest.mark.asyncio
+    async def test_same_millisecond_all_handled_and_not_reprocessed_after_restart(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """同じ ms の N 通 → N 通とも処理。cursor を読み直した後は再処理しない (issue #323)。"""
+        from agent_hub_bridges.claude.cursor import _CURSOR_FILE_ENV, load_cursor
+
+        monkeypatch.setenv(_CURSOR_FILE_ENV, str(tmp_path / "cursor.json"))
+        ts = "2026-06-01T10:00:00.000Z"
+        msgs = [_make_msg(msg_id=f"m{i}", timestamp=ts) for i in (1, 2, 3)]
+        config = _make_config(tmp_path)
+
+        async def run(batch: list[IncomingMessage], cursor: Cursor | None) -> tuple:
+            hub = _make_hub(msgs=batch)
+            tracker, gap_tracker, compact_watchdog = _make_trackers()
+            with patch(_HANDLE_PATCH, new_callable=AsyncMock) as mock_handle, \
+                 patch(_BUILD_OPTIONS_PATCH, return_value=MagicMock()), \
+                 patch(_RUNNER_PATCH, return_value=_mock_runner()):
+                result = await _startup_catchup(
+                    hub,
+                    config,
+                    tmp_path / "mcp.json",
+                    [None],
+                    cursor,
+                    tracker,
+                    gap_tracker,
+                    compact_watchdog,
+                    _make_journal(),
+                    CommandRouter(),
+                )
+            handled = [c.args[2].id for c in mock_handle.call_args_list]
+            return result, handled
+
+        result, handled = await run(msgs, None)
+        assert handled == ["m1", "m2", "m3"]
+        assert result == Cursor(ts=ts, ids=("m1", "m2", "m3"))
+
+        # 再起動相当: 保存された cursor を読み直し、同じ 3 通 + 同じ ms の新着 1 通を流す
+        reloaded = load_cursor(config.user)
+        assert reloaded == result
+        _, handled = await run([*msgs, _make_msg(msg_id="m4", timestamp=ts)], reloaded)
+        assert handled == ["m4"]
 
 
 # ---------------------------------------------------------------------------
@@ -293,7 +367,7 @@ class TestNewMessageProcessing:
                 _make_config(tmp_path),
                 tmp_path / "mcp.json",
                 [None],
-                "2026-05-01T00:00:00.000Z",
+                Cursor(ts="2026-05-01T00:00:00.000Z"),
                 tracker,
                 gap_tracker,
                 compact_watchdog,
@@ -322,7 +396,7 @@ class TestNewMessageProcessing:
                 _make_config(tmp_path),
                 tmp_path / "mcp.json",
                 [None],
-                "2026-05-01T00:00:00.000Z",
+                Cursor(ts="2026-05-01T00:00:00.000Z"),
                 tracker,
                 gap_tracker,
                 compact_watchdog,
@@ -330,7 +404,7 @@ class TestNewMessageProcessing:
                 CommandRouter(),
             )
 
-        assert result == new_msg.timestamp
+        assert result == Cursor(ts=new_msg.timestamp, ids=(new_msg.id,))
         mock_save.assert_called_once()
 
     @pytest.mark.asyncio
@@ -350,7 +424,7 @@ class TestNewMessageProcessing:
                 _make_config(tmp_path),
                 tmp_path / "mcp.json",
                 [None],
-                "2026-05-01T00:00:00.000Z",
+                Cursor(ts="2026-05-01T00:00:00.000Z"),
                 tracker,
                 gap_tracker,
                 compact_watchdog,
@@ -397,7 +471,7 @@ class TestCommandMessages:
         cmd_msg = _make_msg(body="/status", timestamp="2026-06-01T10:00:00.000Z")
         hub = _make_hub(msgs=[cmd_msg])
         tracker, gap_tracker, compact_watchdog = _make_trackers()
-        original = "2026-05-15T00:00:00.000Z"
+        original = Cursor(ts="2026-05-15T00:00:00.000Z")
 
         result = await _startup_catchup(
             hub,
@@ -471,7 +545,7 @@ class TestMixedMessages:
                 _make_config(tmp_path),
                 tmp_path / "mcp.json",
                 [None],
-                "2026-05-01T12:00:00.000Z",  # cursor: old_msg older, cmd and new newer
+                Cursor(ts="2026-05-01T12:00:00.000Z"),  # cursor: old_msg older, cmd and new newer
                 tracker,
                 gap_tracker,
                 compact_watchdog,
@@ -490,7 +564,7 @@ class TestMixedMessages:
         assert new_msg.id in acked
 
         # cursor updated to new_msg timestamp
-        assert result == new_msg.timestamp
+        assert result == Cursor(ts=new_msg.timestamp, ids=(new_msg.id,))
 
 
 # ---------------------------------------------------------------------------
