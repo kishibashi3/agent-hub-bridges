@@ -88,8 +88,8 @@ func TestMigrateStateFiles(t *testing.T) {
 	if info, err := os.Stat(checks[0].new); err != nil || info.Mode().Perm() != 0o600 {
 		t.Errorf("journal perm = %v, %v; want 0600", info, err)
 	}
-	if got := loadCursor(cfg.stateKey()); got != "2026-09-17T00:00:00.000Z" {
-		t.Errorf("loadCursor after migration = %q", got)
+	if got := loadCursor(cfg.stateKey()); got.TS != "2026-09-17T00:00:00.000Z" {
+		t.Errorf("loadCursor after migration = %q", got.TS)
 	}
 
 	// 移行後に新しい記録が進んでから旧名のファイルが再び現れても、上書きしない

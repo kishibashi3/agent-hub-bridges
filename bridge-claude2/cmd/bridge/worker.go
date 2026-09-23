@@ -162,12 +162,12 @@ func runHubSession(
 	cfg *config,
 	mcpConfigPath string,
 	runner *claudeRunner,
-	cursor string,
+	cursor cursorPos,
 	tracker *activityTracker,
 	gapTracker *messageGapTracker,
 	journal *Journal,
 	sleeper *limitSleeper,
-) (string, bool, error) {
+) (cursorPos, bool, error) {
 	// --- hub client 初期化 ---
 	client, err := agenthub.New(
 		cfg.AgentHubURL, cfg.GitHubPAT, cfg.Participant, cfg.Tenant,
@@ -346,14 +346,14 @@ func processMessages(
 	client *agenthub.Client,
 	runner *claudeRunner,
 	router *agenthub.CommandRouter,
-	cursor string,
+	cursor cursorPos,
 	tracker *activityTracker,
 	gapTracker *messageGapTracker,
 	journal *Journal,
 	sleeper *limitSleeper,
 	msgs []agenthub.Message,
 	logPrefix string,
-) string {
+) cursorPos {
 	selfHandle := "@" + cfg.Participant
 
 	for i, msg := range msgs {
@@ -373,9 +373,9 @@ func processMessages(
 		gapTracker.onMessageReceived(msg.ID)
 
 		// issue #37: cursor skip — 再起動後の重複 dispatch 防止
-		if cursor != "" && msg.Timestamp <= cursor {
+		if cursor.seen(msg) {
 			slog.Info(logPrefix+": skipping already-seen message",
-				"msg_id", msg.ID, "ts", msg.Timestamp, "cursor", cursor)
+				"msg_id", msg.ID, "ts", msg.Timestamp, "cursor", cursor.TS)
 			_ = client.MarkAsRead(ctx, msg.ID)
 			continue
 		}
@@ -422,8 +422,8 @@ func processMessages(
 
 		// issue #37, #176: process → save_cursor の順 (crash-safe secondary guard)。
 		// MarkAsRead は上記で処理前に呼び済み。
-		saveCursor(cfg.stateKey(), msg.Timestamp)
-		cursor = msg.Timestamp
+		cursor = cursor.advance(msg)
+		saveCursor(cfg.stateKey(), cursor)
 	}
 	return cursor
 }
@@ -436,12 +436,12 @@ func startupCatchup(
 	cfg *config,
 	client *agenthub.Client,
 	runner *claudeRunner,
-	cursor string,
+	cursor cursorPos,
 	tracker *activityTracker,
 	gapTracker *messageGapTracker,
 	journal *Journal,
 	sleeper *limitSleeper,
-) (string, error) {
+) (cursorPos, error) {
 	msgs, err := client.GetMessages(ctx)
 	if err != nil {
 		slog.Warn("[startup-catchup] get_messages failed; skipping", "err", err)
@@ -743,7 +743,7 @@ func runGracefulDrain(
 	client *agenthub.Client,
 	runner *claudeRunner,
 	cfg *config,
-	cursor string,
+	cursor cursorPos,
 	tracker *activityTracker,
 	journal *Journal,
 	selfHandle string,
@@ -801,7 +801,7 @@ func runGracefulDrain(
 			_ = client.MarkAsRead(drainCtx, m.ID)
 			continue
 		}
-		if cursor != "" && m.Timestamp <= cursor {
+		if cursor.seen(m) {
 			_ = client.MarkAsRead(drainCtx, m.ID)
 			continue
 		}
@@ -844,7 +844,8 @@ func runGracefulDrain(
 		if err != nil {
 			slog.Error("[drain] handleOne error", "msg_id", msg.ID, "err", err)
 		}
-		saveCursor(cfg.stateKey(), msg.Timestamp)
+		cursor = cursor.advance(msg)
+		saveCursor(cfg.stateKey(), cursor)
 	}
 	slog.Info("[drain] graceful drain completed")
 }

@@ -92,7 +92,7 @@ func TestRunGracefulDrain_SleepingKeepsDeferredRecord(t *testing.T) {
 	s.enter(&limitReachedError{Kind: "spend limit", Until: time.Now().Add(time.Hour)}, deferredMsgs())
 
 	// 休眠中は client / runner に触れずに return する
-	runGracefulDrain(nil, nil, &config{Participant: "limit-test"}, "", nil, nil, "@limit-test", s)
+	runGracefulDrain(nil, nil, &config{Participant: "limit-test"}, cursorPos{}, nil, nil, "@limit-test", s)
 
 	if sleeping, _, _ := s.state(); sleeping {
 		t.Error("drain must clear in-memory sleep state")
@@ -126,7 +126,7 @@ func TestRunHubSession_LimitWake(t *testing.T) {
 	defer cancel()
 	done := make(chan error, 1)
 	go func() {
-		_, _, err := runHubSession(ctx, cfg, "", runner, "", &activityTracker{}, &messageGapTracker{}, journal, sleeper)
+		_, _, err := runHubSession(ctx, cfg, "", runner, cursorPos{}, &activityTracker{}, &messageGapTracker{}, journal, sleeper)
 		done <- err
 	}()
 
