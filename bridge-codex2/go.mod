@@ -3,7 +3,7 @@ module github.com/kishibashi3/agent-hub-bridges/bridge-codex2
 go 1.25.0
 
 require (
-	github.com/kishibashi3/agent-hub-sdk/go v0.0.0-20260609041437-d10b9951f633
+	github.com/kishibashi3/agent-hub-sdk/go v0.0.0-20260919213318-6bdf19dd4c84
 	go.opentelemetry.io/otel v1.44.0
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp v1.44.0
 	go.opentelemetry.io/otel/sdk v1.44.0
