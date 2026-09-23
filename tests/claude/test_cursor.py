@@ -10,7 +10,10 @@ import pytest
 from agent_hub_bridges.claude.cursor import (
     _CURSOR_FILE_ENV,
     _DEFAULT_CURSOR_TEMPLATE,
+    Cursor,
+    advance,
     cursor_path,
+    is_seen,
     load_cursor,
     save_cursor,
 )
@@ -46,14 +49,29 @@ def test_load_cursor_no_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) ->
 
 
 def test_load_cursor_valid_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """有効な cursor file から timestamp を読み込む."""
+    """有効な cursor file から timestamp と処理済み ID を読み込む."""
+    ts = "2026-05-21T12:00:00.000Z"
+    cursor_file = tmp_path / "cursor.json"
+    cursor_file.write_text(
+        json.dumps({"last_processed_at": ts, "ids_at_last_processed_at": ["m1", "m2"]})
+    )
+    monkeypatch.setenv(_CURSOR_FILE_ENV, str(cursor_file))
+
+    result = load_cursor("user1")
+    assert result == Cursor(ts=ts, ids=("m1", "m2"))
+
+
+def test_load_cursor_legacy_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """ID の無い旧形式の file は ID 空で読み、同じ timestamp の message を捨てない (issue #323)."""
     ts = "2026-05-21T12:00:00.000Z"
     cursor_file = tmp_path / "cursor.json"
     cursor_file.write_text(json.dumps({"last_processed_at": ts}))
     monkeypatch.setenv(_CURSOR_FILE_ENV, str(cursor_file))
 
     result = load_cursor("user1")
-    assert result == ts
+    assert result == Cursor(ts=ts)
+    assert is_seen(result, "old", "2026-05-21T11:59:59.999Z")
+    assert not is_seen(result, "m2", ts)
 
 
 def test_load_cursor_malformed_json(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -94,11 +112,12 @@ def test_save_cursor_creates_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
     monkeypatch.setenv(_CURSOR_FILE_ENV, str(cursor_file))
 
     ts = "2026-05-21T15:30:00.000Z"
-    save_cursor("user1", ts)
+    save_cursor("user1", Cursor(ts=ts, ids=("m1",)))
 
     assert cursor_file.exists()
     data = json.loads(cursor_file.read_text())
     assert data["last_processed_at"] == ts
+    assert data["ids_at_last_processed_at"] == ["m1"]
 
 
 def test_save_cursor_overwrites_existing(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -108,7 +127,7 @@ def test_save_cursor_overwrites_existing(monkeypatch: pytest.MonkeyPatch, tmp_pa
     monkeypatch.setenv(_CURSOR_FILE_ENV, str(cursor_file))
 
     new_ts = "2026-05-21T20:00:00.000Z"
-    save_cursor("user1", new_ts)
+    save_cursor("user1", Cursor(ts=new_ts))
 
     data = json.loads(cursor_file.read_text())
     assert data["last_processed_at"] == new_ts
@@ -124,7 +143,7 @@ def test_save_cursor_unwritable_dir_does_not_raise(
     monkeypatch.setenv(_CURSOR_FILE_ENV, str(cursor_file))
 
     # 例外が上がらないことを確認
-    save_cursor("user1", "2026-05-21T12:00:00.000Z")
+    save_cursor("user1", Cursor(ts="2026-05-21T12:00:00.000Z"))
 
 
 # ---------------------------------------------------------------------------
@@ -137,7 +156,41 @@ def test_save_then_load_roundtrip(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
     cursor_file = tmp_path / "cursor.json"
     monkeypatch.setenv(_CURSOR_FILE_ENV, str(cursor_file))
 
-    ts = "2026-05-22T08:00:00.000Z"
-    save_cursor("userA", ts)
+    cursor = Cursor(ts="2026-05-22T08:00:00.000Z", ids=("m1", "m2"))
+    save_cursor("userA", cursor)
     result = load_cursor("userA")
-    assert result == ts
+    assert result == cursor
+
+
+# ---------------------------------------------------------------------------
+# is_seen / advance (issue #323)
+# ---------------------------------------------------------------------------
+
+
+def test_is_seen_same_millisecond_only_processed_ids() -> None:
+    """同じ ms の message は処理済みの ID だけ seen になる."""
+    ts = "2026-09-16T09:00:01.000Z"
+    cursor = advance(None, "m1", ts)
+
+    assert is_seen(cursor, "m1", ts)
+    assert not is_seen(cursor, "m2", ts)
+    assert is_seen(cursor, "m0", "2026-09-16T09:00:00.999Z")
+    assert not is_seen(cursor, "m3", "2026-09-16T09:00:01.001Z")
+
+
+def test_is_seen_none_sees_nothing() -> None:
+    assert not is_seen(None, "m1", "2026-09-16T09:00:01.000Z")
+
+
+def test_advance() -> None:
+    """同じ ts は ID を積み、新しい ts で 1 件に戻り、古い ts では位置を戻さない."""
+    ts = "2026-09-16T09:00:01.000Z"
+    c1 = advance(None, "m1", ts)
+    c2 = advance(c1, "m2", ts)
+    assert c2 == Cursor(ts=ts, ids=("m1", "m2"))
+    assert c1 == Cursor(ts=ts, ids=("m1",))
+    assert advance(c2, "m1", ts) == c2
+
+    c3 = advance(c2, "m3", "2026-09-16T09:00:01.001Z")
+    assert c3 == Cursor(ts="2026-09-16T09:00:01.001Z", ids=("m3",))
+    assert advance(c3, "old", ts) == c3
