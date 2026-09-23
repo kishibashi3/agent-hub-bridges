@@ -247,15 +247,15 @@ func TestProcessMessages_LimitEntersSleep(t *testing.T) {
 		{ID: "m1", Sender: "@a", To: "@limit-test", Body: "first", Timestamp: "2026-09-16T09:00:01.000Z"},
 		{ID: "m2", Sender: "@b", To: "@limit-test", Body: "second", Timestamp: "2026-09-16T09:00:02.000Z"},
 	}
-	cursor := processMessages(context.Background(), cfg, client, runner, nil, "",
+	cursor := processMessages(context.Background(), cfg, client, runner, nil, cursorPos{},
 		&activityTracker{}, &messageGapTracker{}, journal, sleeper, msgs, "test")
 
 	sleeping, until, kind := sleeper.state()
 	if !sleeping || kind != "spend limit" || !until.After(time.Now()) {
 		t.Fatalf("sleeper state = %v %v %q", sleeping, until, kind)
 	}
-	if cursor != "" {
-		t.Errorf("cursor advanced to %q; limit-hit message must be re-processed after wake", cursor)
+	if cursor.TS != "" {
+		t.Errorf("cursor advanced to %q; limit-hit message must be re-processed after wake", cursor.TS)
 	}
 	if got := sleeper.deferredCount(); got != 2 {
 		t.Errorf("deferred = %d, want 2 (trigger + remaining)", got)

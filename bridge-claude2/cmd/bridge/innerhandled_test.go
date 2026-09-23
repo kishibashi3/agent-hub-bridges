@@ -205,7 +205,7 @@ func TestProcessMessages_SkipsInnerHandled(t *testing.T) {
 		{ID: "m1", Sender: "@a", To: "@limit-test", Body: "first", Timestamp: "2026-09-16T09:00:01.000Z"},
 		{ID: "m2", Sender: "@b", To: "@limit-test", Body: "second", Timestamp: "2026-09-16T09:00:02.000Z"},
 	}
-	processMessages(context.Background(), cfg, client, runner, nil, "",
+	processMessages(context.Background(), cfg, client, runner, nil, cursorPos{},
 		&activityTracker{}, &messageGapTracker{}, journal, &limitSleeper{}, msgs, "test")
 
 	data, _ := os.ReadFile(countFile)
