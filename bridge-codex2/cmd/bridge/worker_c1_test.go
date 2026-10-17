@@ -144,17 +144,49 @@ func TestHandleOne_TimeoutSendsOneErrorWithoutRetry(t *testing.T) {
 	}
 }
 
-// #2 (C1・C4): 作業中に停止しても送信元へ偽エラーを送らず、次回起動用の journal にも残さない。
-func TestHandleOne_ShutdownDuringQueryNoFakeError(t *testing.T) {
+// #2 (C1・C4) / #337: 作業中に停止したら、送信元へ偽エラーは送らず、中断通知をちょうど 1 通送る。
+// 送信に成功した通知は journal に残さない (次回起動時に 2 通目として replay されないように)。
+func TestHandleOne_ShutdownDuringQuerySendsOneInterruptNotice(t *testing.T) {
 	e := newC1Env(t, time.Minute, "exec sleep 30",
 		inboxJSON(t, msgAt("m1", c1TS)))
 	e.run(t, func() bool { return len(e.dispatched(t)) >= 1 })
 
-	if sent := e.hub.sentMessages(); len(sent) != 0 {
-		t.Errorf("sent = %+v, want no error reply on shutdown", sent)
+	sent := e.hub.sentMessages()
+	if len(sent) != 1 {
+		t.Fatalf("sent = %+v, want exactly 1 interrupt notice", sent)
+	}
+	if sent[0].To != "@a" || sent[0].CausedBy != "m1" {
+		t.Errorf("sent to=%q caused_by=%q, want @a / m1", sent[0].To, sent[0].CausedBy)
+	}
+	if !strings.HasPrefix(sent[0].Message, autoNoticePrefix) || strings.HasPrefix(sent[0].Message, autoErrorPrefix) {
+		t.Errorf("sent message = %q, want an interrupt notice (not an error)", sent[0].Message)
 	}
 	if j := journalEntries(t, e.dir); len(j) != 0 {
-		t.Errorf("journal entries = %v, want none (would be replayed as a fake error on next startup)", j)
+		t.Errorf("journal entries = %v, want none (would be replayed as a second reply on next startup)", j)
+	}
+}
+
+// #337: 内側 codex が処理中の依頼へ返信した後に停止した場合は、中断通知を重ねて送らない。
+// auto 返信への中断通知も送らない。
+func TestHandleOne_ShutdownNoNoticeWhenRepliedOrAutoReply(t *testing.T) {
+	cases := []struct {
+		name string
+		tail string
+		msg  agenthub.Message
+	}{
+		{"inner replied", "echo '" + mcpReplyEvent("m1", "completed") + "'\nexec sleep 30", msgAt("m1", c1TS)},
+		{"auto reply inbound", "exec sleep 30", msgFrom("m1", "@a", "(auto) bridge-claude2 error: body m1")},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newC1Env(t, time.Minute, tc.tail, inboxJSON(t, tc.msg))
+			start := time.Now()
+			// 内側の返信イベントを runner が読み終えるまで少し待ってから止める
+			e.run(t, func() bool { return len(e.dispatched(t)) >= 1 && time.Since(start) > 500*time.Millisecond })
+			if sent := e.hub.sentMessages(); len(sent) != 0 {
+				t.Errorf("sent = %+v, want no interrupt notice", sent)
+			}
+		})
 	}
 }
 

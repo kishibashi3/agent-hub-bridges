@@ -338,8 +338,9 @@ func startupCatchup(
 //     リトライすると実際に作業できる時間が上限の数倍になり、「何分まで作業できるか」が決まらなくなる
 //   - 内側 codex が処理中の inbound へ返信済み (caused_by=msg.ID が成功): エラーは返さない
 //     (返すと 1 依頼に 2 返信になる)
-//   - SIGTERM 等で ctx がキャンセル済み: エラーは返さない。キャンセル済み ctx で送ると送信に
-//     失敗して journal に残り、次回起動時に replay されて偽エラーになる (bridge-claude2 #240 / #250)
+//   - SIGTERM 等で ctx がキャンセル済み: エラーは返さず、「停止で中断した」旨の通知を 1 通返す
+//     (issue #337、interrupt.go)。エラーを返さないのは、キャンセルは失敗ではないため
+//     (bridge-claude2 #240 / #250)。通知はキャンセルを切り離した ctx で送る
 func handleOne(
 	ctx context.Context,
 	client *agenthub.Client,
@@ -378,8 +379,9 @@ func handleOne(
 		return err
 	}
 	if ctx.Err() != nil {
-		slog.Info("handleOne: query cancelled by shutdown — suppressing error report (issue #336)",
+		slog.Info("handleOne: query cancelled by shutdown — sending interrupt notice instead of error report (issue #337)",
 			"msg_id", msg.ID, "err", err)
+		sendInterruptNotice(ctx, client, journal, msg)
 		return err
 	}
 
