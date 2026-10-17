@@ -33,6 +33,21 @@ type mockHub struct {
 	mu  sync.Mutex
 	// inbox は get_messages が順に返す JSON 配列テキスト。尽きたら "[]" を返す。
 	inbox []string
+	// sent は bridge が send_message で送った内容 (issue #336)。
+	sent []sentMessage
+}
+
+// sentMessage は mock hub が受けた send_message の引数。
+type sentMessage struct {
+	To       string `json:"to"`
+	Message  string `json:"message"`
+	CausedBy string `json:"caused_by"`
+}
+
+func (h *mockHub) sentMessages() []sentMessage {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return append([]sentMessage(nil), h.sent...)
 }
 
 func newMockHub(t *testing.T, inbox ...string) *mockHub {
@@ -48,7 +63,8 @@ func newMockHub(t *testing.T, inbox ...string) *mockHub {
 			Method string `json:"method"`
 			ID     *int64 `json:"id"`
 			Params struct {
-				Name string `json:"name"`
+				Name      string      `json:"name"`
+				Arguments sentMessage `json:"arguments"`
 			} `json:"params"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&req)
@@ -64,6 +80,11 @@ func newMockHub(t *testing.T, inbox ...string) *mockHub {
 			w.WriteHeader(http.StatusAccepted)
 		case "tools/call":
 			text := "ok"
+			if req.Params.Name == "send_message" {
+				h.mu.Lock()
+				h.sent = append(h.sent, req.Params.Arguments)
+				h.mu.Unlock()
+			}
 			if req.Params.Name == "get_messages" {
 				h.mu.Lock()
 				text = "[]"

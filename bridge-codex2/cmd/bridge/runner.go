@@ -20,6 +20,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -32,10 +33,49 @@ import (
 
 const sessionMarkerFile = ".bridge_has_session"
 
+// errSubprocessTimeout は SubprocessTimeout によって subprocess が kill されたことを示す sentinel
+// (issue #336 #1)。SIGTERM による context.Canceled とは区別する。
+var errSubprocessTimeout = errors.New("subprocess timeout")
+
+// agentHubMCPServer は CODEX_HOME/config.toml の `[mcp_servers.agent-hub]` の名前。
+// `codex exec --json` の mcp_tool_call イベントの server 欄にこの名前が入る。
+const agentHubMCPServer = "agent-hub"
+
 // codexEvent は codex --json JSONL 出力の 1 イベント。
-// 全フィールドを網羅する必要はなく、activity tracking に必要な部分のみ定義する。
+// 全フィールドを網羅する必要はなく、activity tracking と返信検知に必要な部分のみ定義する。
 type codexEvent struct {
-	Type string `json:"type"`
+	Type string     `json:"type"`
+	Item *codexItem `json:"item,omitempty"`
+}
+
+// codexItem は `item.started` / `item.completed` イベントの item (codex CLI 0.163.0 で確認)。
+// MCP ツール呼び出しは type="mcp_tool_call" で、完了時の status は "completed" / "failed"。
+type codexItem struct {
+	Type      string          `json:"type"`
+	Server    string          `json:"server,omitempty"`
+	Tool      string          `json:"tool,omitempty"`
+	Arguments json.RawMessage `json:"arguments,omitempty"`
+	Status    string          `json:"status,omitempty"`
+}
+
+// repliedCausedBy は ev が agent-hub の send_message の成功完了なら arguments.caused_by を返す
+// (issue #336 #4)。成功完了でない・caused_by が無い場合は "" と false を返す。
+func repliedCausedBy(ev codexEvent) (string, bool) {
+	if ev.Type != "item.completed" || ev.Item == nil {
+		return "", false
+	}
+	it := ev.Item
+	if it.Type != "mcp_tool_call" || it.Server != agentHubMCPServer ||
+		it.Tool != "send_message" || it.Status != "completed" {
+		return "", false
+	}
+	var args struct {
+		CausedBy string `json:"caused_by"`
+	}
+	if err := json.Unmarshal(it.Arguments, &args); err != nil || args.CausedBy == "" {
+		return "", false
+	}
+	return args.CausedBy, true
 }
 
 // codexRunner は codex CLI subprocess の設定を保持する。
@@ -45,6 +85,10 @@ type codexRunner struct {
 	cfg           *config
 	hasSession    bool   // true = 継続すべき session が CODEX_HOME に存在する
 	sessionMarker string // hasSession を永続化する marker file のパス
+	// autoReply は auto エラー返信の送信元別 cooldown (issue #336 #3)。
+	autoReply *autoReplyLimiter
+	// innerReplied は内側 codex が先回りで返信した inbound ID 集合 (issue #336 #4)。
+	innerReplied *innerRepliedSet
 }
 
 // newCodexRunner は codexRunner を生成する。
@@ -54,6 +98,8 @@ func newCodexRunner(cfg *config) *codexRunner {
 	r := &codexRunner{
 		cfg:           cfg,
 		sessionMarker: marker,
+		autoReply:     newAutoReplyLimiter(autoReplyCooldown),
+		innerReplied:  newInnerRepliedSet(),
 	}
 	if _, err := os.Stat(marker); err == nil {
 		r.hasSession = true
@@ -88,6 +134,9 @@ func (r *codexRunner) query(ctx context.Context, prompt, _ string, tracker *acti
 	cmd.Dir = r.cfg.Workdir
 	cmd.Stderr = os.Stderr
 	cmd.Env = r.buildEnv()
+	// issue #336 #1: 上限到達・停止で kill するときは wrapper だけでなく子孫ごと止める (proctree.go)
+	cmd.SysProcAttr = newProcessGroupAttr()
+	cmd.Cancel = func() error { return killProcessTree(cmd.Process.Pid) }
 
 	stdinPipe, err := cmd.StdinPipe()
 	if err != nil {
@@ -129,6 +178,11 @@ func (r *codexRunner) query(ctx context.Context, prompt, _ string, tracker *acti
 	if err := cmd.Wait(); err != nil {
 		usage.IsError = true
 		slog.Error("runner: codex subprocess exited with error", "pid", pid, "err", err)
+		// issue #336 #1: 上限到達による kill は sentinel で区別する (親 ctx のキャンセルは除く)
+		if ctx.Err() == nil && errors.Is(queryCtx.Err(), context.DeadlineExceeded) {
+			return usage, fmt.Errorf("codex subprocess killed (SubprocessTimeout=%s, pid=%d): %w",
+				r.cfg.SubprocessTimeout, pid, errSubprocessTimeout)
+		}
 		return usage, fmt.Errorf("codex subprocess error (pid=%d): %w", pid, err)
 	}
 
@@ -258,6 +312,11 @@ func (r *codexRunner) readOutput(ctx context.Context, stdout io.Reader, tracker 
 		}
 
 		slog.Debug("runner: codex event", "type", ev.Type)
+
+		// issue #336 #4: 内側 codex の send_message 成功を記録する
+		if causedBy, ok := repliedCausedBy(ev); ok {
+			usage.RepliedCausedBy = append(usage.RepliedCausedBy, causedBy)
+		}
 
 		// agent 系イベントで tracker を更新
 		switch ev.Type {

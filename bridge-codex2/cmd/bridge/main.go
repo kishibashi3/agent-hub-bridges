@@ -26,6 +26,9 @@
 //	AGENT_HUB_PUSH_SILENT_THRESHOLD_S optional gap 警告閾値秒数 (default: 25)
 //	BRIDGE_INVENTORY            optional    bridge inventory ファイルパス
 //	AGENT_HUB_BRIDGE_MAX_RETRIES optional   circuit breaker 連続失敗上限 (default: 10, 0=無限)
+//	AGENT_HUB_SUBPROCESS_TIMEOUT optional   1 依頼あたりの codex 作業時間の上限 (Go duration: "30m", "1h", "0" = 無制限;
+//	                                        default: 30m; --subprocess-timeout フラグが優先)。上限に達すると codex を止め、
+//	                                        送信元へエラーを 1 回返す (リトライしない、issue #336)
 //	AGENT_HUB_TELEMETRY_URL     optional    OTLP endpoint
 //	BRIDGE_LOG_DIR              optional    ログディレクトリ (省略 = ~/.agent-hub/logs/; --log-file が優先)
 //	BRIDGE_LOG_FILE             optional    ログファイルパス (省略 = BRIDGE_LOG_DIR/bridge-<user>.log)
@@ -88,10 +91,15 @@ type config struct {
 	// MaxRetries は circuit breaker の連続失敗上限 (0 = 無制限)。
 	MaxRetries int
 	// SubprocessTimeout は runner.query の最大実行時間 (0 = タイムアウトなし)。
+	// --subprocess-timeout > AGENT_HUB_SUBPROCESS_TIMEOUT env > 30m (issue #336 #1)。
 	SubprocessTimeout time.Duration
 	// ScannerBufferSize は stream-json bufio.Scanner のバッファサイズ (bytes)。
 	// AGENT_HUB_SCANNER_BUFFER_SIZE env で設定可能 (例: "4MB", "8MB")。デフォルト 4MB。
 	ScannerBufferSize int
+	// GHLogin は起動時に解決した GitHub login 名 (footer の <gh-login> 用、issue #336 #5)。
+	GHLogin string
+	// GitHubFooter は bridge が真値から組成した GitHub 投稿用 footer (issue #336 #5)。
+	GitHubFooter string
 }
 
 func parseConfig() (*config, error) {
@@ -107,7 +115,7 @@ func parseConfig() (*config, error) {
 		pollInterval      = flag.Duration("poll-interval", 5*time.Second, "get_messages polling interval")
 		reconnectBackoff  = flag.Duration("reconnect-backoff", 5*time.Second, "backoff on MCP reconnect")
 		maxRetries        = flag.Int("max-retries", 10, "circuit breaker: max consecutive get_messages failures (0 = unlimited)")
-		subprocessTimeout = flag.Duration("subprocess-timeout", 10*time.Minute, "codex subprocess max runtime per query (0 = no timeout)")
+		subprocessTimeout = flag.Duration("subprocess-timeout", -1, "codex subprocess max runtime per query (0 = no timeout; -1 = use AGENT_HUB_SUBPROCESS_TIMEOUT env or default 30m)")
 		showVersion       = flag.Bool("version", false, "print version and exit")
 		addDirs           stringSlice
 	)
@@ -212,6 +220,12 @@ func parseConfig() (*config, error) {
 		codexHomeDir = filepath.Join(home, ".agent-hub", "codex-home", *user)
 	}
 
+	// subprocess-timeout: --subprocess-timeout フラグ > AGENT_HUB_SUBPROCESS_TIMEOUT env > 30m
+	resolvedSubprocessTimeout, err := resolveSubprocessTimeout(*subprocessTimeout)
+	if err != nil {
+		return nil, err
+	}
+
 	// scanner-buffer-size: AGENT_HUB_SCANNER_BUFFER_SIZE env > 4MB
 	resolvedScannerBufferSize, err := resolveScannerBufferSize()
 	if err != nil {
@@ -235,7 +249,7 @@ func parseConfig() (*config, error) {
 		PollInterval:      *pollInterval,
 		ReconnectBackoff:  *reconnectBackoff,
 		MaxRetries:        *maxRetries,
-		SubprocessTimeout: *subprocessTimeout,
+		SubprocessTimeout: resolvedSubprocessTimeout,
 		ScannerBufferSize: resolvedScannerBufferSize,
 	}, nil
 }
@@ -388,8 +402,11 @@ func linkAuthJSON(codexHomeDir string) error {
 
 // formatPrompt は受信メッセージを codex への user prompt に変換する。
 // bridge-claude2 の formatPrompt と同等。
-func formatPrompt(selfHandle string, msg agenthub.Message) string {
-	return fmt.Sprintf(
+//
+// footer が非空なら、GitHub 投稿時に付ける footer の指示を毎メッセージ末尾に注入する
+// (issue #336 #5)。内側 codex が model 等を推測で埋めず、bridge が真値から組んだ footer を使うようにする。
+func formatPrompt(selfHandle string, msg agenthub.Message, footer string) string {
+	base := fmt.Sprintf(
 		"あなたは agent-hub の peer worker `%s` として動いています。\n"+
 			"agent-hub 経由で %s から以下の message が届きました。\n"+
 			"宛先: %s\n"+
@@ -405,6 +422,46 @@ func formatPrompt(selfHandle string, msg agenthub.Message) string {
 		msg.Sender, msg.ID,
 		msg.Sender,
 	)
+	if footer == "" {
+		return base
+	}
+	return base + fmt.Sprintf(
+		"\n\n【GitHub 投稿ルール (issue #245)】git / GitHub への投稿"+
+			"(PR・issue のコメント等) や成果物テキストを作成する場合は、文末に次の "+
+			"footer 行を**そのまま**付けること。model 等は推測で書き換えず、"+
+			"この literal を一切変更しないこと:\n%s",
+		footer,
+	)
+}
+
+// buildGitHubFooter は GitHub 投稿用の footer を bridge の知る真値から組む (issue #336 #5)。
+// 形式: @<handle> [<bridge-type> · <model>] (operator-supervised · <gh-login>/agent-hub)
+//   - model が空 (codex の既定 model を使う) なら model 欄ごと省略: [<bridge-type>]
+//   - ghLogin が空なら login 部を省略: (operator-supervised · agent-hub)
+//
+// 欠けている真値は推測で埋めず省略する。
+func buildGitHubFooter(handle, bridgeType, model, ghLogin string) string {
+	bridgeLabel := bridgeType
+	if model != "" {
+		bridgeLabel = bridgeType + " · " + model
+	}
+	repoRef := "agent-hub"
+	if ghLogin != "" {
+		repoRef = ghLogin + "/agent-hub"
+	}
+	return fmt.Sprintf("@%s [%s] (operator-supervised · %s)", handle, bridgeLabel, repoRef)
+}
+
+// resolveGHLogin は起動時に GitHub の login 名を解決する (footer の <gh-login> 用)。
+// `gh api user --jq .login` を実行し、失敗時は "" を返す (footer の login 部は省略)。
+func resolveGHLogin() string {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "gh", "api", "user", "--jq", ".login").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
 }
 
 // ──────────────────────────────────────────────────────────────────────── //
@@ -421,12 +478,18 @@ func main() {
 	closeLogger := setupLogger(cfg.LogLevel, cfg.LogFile)
 	defer closeLogger()
 
+	// issue #336 #5: GitHub 投稿 footer を真値から組む (gh-login は実行時解決、失敗時は省略)
+	cfg.GHLogin = resolveGHLogin()
+	cfg.GitHubFooter = buildGitHubFooter(cfg.User, bridgeType, cfg.Model, cfg.GHLogin)
+
 	slog.Info("bridge-codex2 starting",
 		"version", version,
 		"handle", "@"+cfg.User,
 		"workdir", cfg.Workdir,
 		"mode", cfg.Mode,
 		"model", orDefault(cfg.Model, "(codex default)"),
+		"gh_login", orDefault(cfg.GHLogin, "(unresolved)"),
+		"github_footer", cfg.GitHubFooter,
 		"poll_interval_s", cfg.PollInterval.Seconds(),
 		"subprocess_timeout_s", cfg.SubprocessTimeout.Seconds(),
 		"scanner_buffer_size", cfg.ScannerBufferSize,
@@ -486,6 +549,29 @@ func orDefault(s, fallback string) string {
 	}
 	return fallback
 }
+
+// resolveSubprocessTimeout は --subprocess-timeout フラグ値 (-1 = 未指定) を解決する (issue #336 #1)。
+// 優先順位: flagVal (>=0) > AGENT_HUB_SUBPROCESS_TIMEOUT env > 30m (default)
+// 0 はタイムアウト無効を意味するため、未指定 sentinel は -1 を使う。
+func resolveSubprocessTimeout(flagVal time.Duration) (time.Duration, error) {
+	if flagVal >= 0 {
+		return flagVal, nil
+	}
+	if envVal := os.Getenv("AGENT_HUB_SUBPROCESS_TIMEOUT"); envVal != "" {
+		d, err := time.ParseDuration(envVal)
+		if err != nil {
+			return 0, fmt.Errorf("AGENT_HUB_SUBPROCESS_TIMEOUT %q: %w", envVal, err)
+		}
+		if d < 0 {
+			return 0, fmt.Errorf("AGENT_HUB_SUBPROCESS_TIMEOUT %q: must not be negative", envVal)
+		}
+		return d, nil
+	}
+	return defaultSubprocessTimeout, nil
+}
+
+// defaultSubprocessTimeout は 1 依頼あたりの codex 作業時間の既定上限 (bridge-claude2 と同じ値)。
+const defaultSubprocessTimeout = 30 * time.Minute
 
 // resolveScannerBufferSize は AGENT_HUB_SCANNER_BUFFER_SIZE env を解決する。
 // 優先順位: AGENT_HUB_SCANNER_BUFFER_SIZE env > 4MB (default)

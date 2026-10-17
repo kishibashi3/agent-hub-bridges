@@ -209,6 +209,14 @@ func runHubSession(
 				continue
 			}
 
+			// issue #336 #4: 内側 codex が先回りで返信済みの inbound は流さない (二重返信防止)
+			if runner.innerReplied.has(msg.ID) {
+				slog.Warn("runHubSession: skipping already-replied-by-inner-codex message (issue #336)",
+					"msg_id", msg.ID, "from", msg.Sender)
+				_ = client.MarkAsRead(ctx, msg.ID)
+				continue
+			}
+
 			// issue #176: MarkAsRead を handleOne 前に呼ぶ
 			if err := client.MarkAsRead(ctx, msg.ID); err != nil {
 				slog.Warn("runHubSession: pre-process mark_as_read failed; cursor will guard on retry",
@@ -296,6 +304,14 @@ func startupCatchup(
 			continue
 		}
 
+		// issue #336 #4: 内側 codex が先回りで返信済みの inbound は流さない
+		if runner.innerReplied.has(msg.ID) {
+			slog.Warn("[startup-catchup] skipping already-replied-by-inner-codex message (issue #336)",
+				"msg_id", msg.ID, "from", msg.Sender)
+			_ = client.MarkAsRead(ctx, msg.ID)
+			continue
+		}
+
 		gapTracker.onMessageReceived(msg.ID)
 
 		if err := client.MarkAsRead(ctx, msg.ID); err != nil {
@@ -316,6 +332,14 @@ func startupCatchup(
 }
 
 // handleOne は message 1 件を codex に流して応答を待つ。
+//
+// 失敗時の扱い (issue #336、約束 C1・C4):
+//   - SubprocessTimeout 到達 (errSubprocessTimeout): リトライせず、送信元へエラーを 1 回返す。
+//     リトライすると実際に作業できる時間が上限の数倍になり、「何分まで作業できるか」が決まらなくなる
+//   - 内側 codex が処理中の inbound へ返信済み (caused_by=msg.ID が成功): エラーは返さない
+//     (返すと 1 依頼に 2 返信になる)
+//   - SIGTERM 等で ctx がキャンセル済み: エラーは返さない。キャンセル済み ctx で送ると送信に
+//     失敗して journal に残り、次回起動時に replay されて偽エラーになる (bridge-claude2 #240 / #250)
 func handleOne(
 	ctx context.Context,
 	client *agenthub.Client,
@@ -328,26 +352,88 @@ func handleOne(
 	if _, err := os.Stat(cfg.Workdir); err != nil {
 		slog.Error("handleOne: workdir gone",
 			"workdir", cfg.Workdir, "msg_id", msg.ID)
-		errMsg := fmt.Sprintf("(auto) bridge-codex2 error: bridge の workdir が存在しません: %s", cfg.Workdir)
-		_ = journalledSend(ctx, client, journal, msg.Sender, errMsg, msg.ID)
+		sendAutoErrorReply(ctx, client, runner, journal, msg,
+			fmt.Sprintf("bridge の workdir が存在しません: %s", cfg.Workdir))
 		return nil
 	}
 
 	slog.Info("← message",
 		"msg_id", msg.ID, "from", msg.Sender, "body_preview", truncate(msg.Body, 120))
 
-	prompt := formatPrompt("@"+cfg.User, msg)
+	prompt := formatPrompt("@"+cfg.User, msg, cfg.GitHubFooter)
 	usage, err := runner.query(ctx, prompt, msg.Sender, tracker)
 	emitSpan(msg.ID, cfg.Model, usage)
-	if err != nil {
-		slog.Error("handleOne: codex query error", "msg_id", msg.ID, "err", err)
-		errMsg := fmt.Sprintf("(auto) bridge-codex2 error: %v", err)
-		_ = journalledSend(ctx, client, journal, msg.Sender, errMsg, msg.ID)
+	// issue #336 #4: 内側 codex が先回りで返信した他の inbound を記録する (query の成否に関わらず、
+	// 成功を確認できた送信は hub に届いている)
+	recordInnerReplied(runner, msg.ID, usage.RepliedCausedBy)
+	if err == nil {
+		slog.Info("→ message processed", "msg_id", msg.ID, "from", msg.Sender)
+		return nil
+	}
+
+	if usage.repliedTo(msg.ID) {
+		slog.Warn("handleOne: codex failed after replying to this message — suppressing error report "+
+			"to avoid a second reply (issue #336)",
+			"msg_id", msg.ID, "err", err)
+		return err
+	}
+	if ctx.Err() != nil {
+		slog.Info("handleOne: query cancelled by shutdown — suppressing error report (issue #336)",
+			"msg_id", msg.ID, "err", err)
 		return err
 	}
 
-	slog.Info("→ message processed", "msg_id", msg.ID, "from", msg.Sender)
-	return nil
+	slog.Error("handleOne: codex query error", "msg_id", msg.ID, "err", err)
+	sendAutoErrorReply(ctx, client, runner, journal, msg, fmt.Sprint(err))
+	return err
+}
+
+// sendAutoErrorReply は送信元へ `autoErrorPrefix + " " + detail` の auto 返信を送る。
+// auto 返信の全経路 (codex 失敗 / workdir 不在) はここを通し、echo 抑止と送信元別 cooldown を
+// 共通に掛ける (issue #336 #3、autoreply.go 参照)。
+func sendAutoErrorReply(
+	ctx context.Context,
+	client *agenthub.Client,
+	runner *codexRunner,
+	journal *Journal,
+	msg agenthub.Message,
+	detail string,
+) {
+	if isAutoErrorEcho(msg.Body) {
+		slog.Warn("sendAutoErrorReply: inbound is an auto reply — suppressing auto error reply (issue #336)",
+			"msg_id", msg.ID, "from", msg.Sender)
+		return
+	}
+	if ok, wait := runner.autoReply.allow(msg.Sender, time.Now()); !ok {
+		slog.Warn("sendAutoErrorReply: auto error reply suppressed by per-sender cooldown (issue #336)",
+			"msg_id", msg.ID, "from", msg.Sender,
+			"cooldown_s", fmt.Sprintf("%.0f", autoReplyCooldown.Seconds()),
+			"retry_after_s", fmt.Sprintf("%.0f", wait.Seconds()))
+		return
+	}
+	errMsg := fmt.Sprintf("%s %s", autoErrorPrefix, detail)
+	_ = journalledSend(ctx, client, journal, msg.Sender, errMsg, msg.ID)
+}
+
+// recordInnerReplied は内側 codex が返信した inbound ID を runner.innerReplied に積む。
+// 処理中の inbound (currentID) への返信は正規の応答なので除外する。
+func recordInnerReplied(runner *codexRunner, currentID string, ids []string) {
+	if runner == nil || runner.innerReplied == nil {
+		return
+	}
+	var others []string
+	for _, id := range ids {
+		if id != currentID {
+			others = append(others, id)
+		}
+	}
+	if len(others) == 0 {
+		return
+	}
+	runner.innerReplied.add(others...)
+	slog.Warn("recordInnerReplied: inner codex replied to other inbound messages — "+
+		"they will be skipped on next get_messages (issue #336)",
+		"current_msg_id", currentID, "inner_replied_ids", others)
 }
 
 // journalledSend は journal write → hub.SendMessage → journal delete の順で送信を永続化する。
@@ -439,6 +525,13 @@ func runGracefulDrain(
 		}
 		if cursor.seen(m) {
 			// best-effort: 失敗は致命的でなく、次回 polling で再試行される
+			_ = client.MarkAsRead(drainCtx, m.ID)
+			continue
+		}
+		// issue #336 #4: 内側 codex が先回りで返信済みの inbound は流さない
+		if runner.innerReplied.has(m.ID) {
+			slog.Warn("[drain] skipping already-replied-by-inner-codex message (issue #336)",
+				"msg_id", m.ID, "from", m.Sender)
 			_ = client.MarkAsRead(drainCtx, m.ID)
 			continue
 		}
