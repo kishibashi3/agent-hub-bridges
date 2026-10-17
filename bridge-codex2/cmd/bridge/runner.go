@@ -3,7 +3,9 @@
 // bridge-claude2 の claudeRunner に相当するが、claude CLI の代わりに
 // codex CLI を使う。subprocess の寿命は 1 query に限定する (on-demand)。
 //
-// セッション継続の仕組み:
+// 文脈の段 (AGENT_HUB_CONTEXT_STAGE、issue #339、contextstage.go):
+//   - none (既定、段 1): 毎回 `codex exec ... -` で新規セッション。marker file は読まず書かない
+//   - last (deprecated): 旧挙動のセッション継続
 //   - 初回: `codex exec ... -` でプロンプトを stdin から渡す (新規セッション)
 //   - 2回目以降: `codex exec resume --last ... -` で最新セッションを継続
 //   - セッション状態は CODEX_HOME (永続ディレクトリ) に保存されるため bridge 再起動後も継続可能
@@ -92,7 +94,7 @@ type codexRunner struct {
 }
 
 // newCodexRunner は codexRunner を生成する。
-// CODEX_HOME 内の marker file が存在すれば hasSession = true で初期化する。
+// 段が last のときだけ、CODEX_HOME 内の marker file が存在すれば hasSession = true で初期化する。
 func newCodexRunner(cfg *config) *codexRunner {
 	marker := filepath.Join(cfg.CodexHomeDir, sessionMarkerFile)
 	r := &codexRunner{
@@ -100,6 +102,10 @@ func newCodexRunner(cfg *config) *codexRunner {
 		sessionMarker: marker,
 		autoReply:     newAutoReplyLimiter(autoReplyCooldown),
 		innerReplied:  newInnerRepliedSet(),
+	}
+	if !r.continuesSession() {
+		slog.Info("runner: context stage " + string(cfg.ContextStage) + " — every message starts a new codex session")
+		return r
 	}
 	if _, err := os.Stat(marker); err == nil {
 		r.hasSession = true
@@ -188,15 +194,22 @@ func (r *codexRunner) query(ctx context.Context, prompt, _ string, tracker *acti
 
 	slog.Info("runner: codex subprocess finished", "pid", pid)
 
-	// 成功: 次回から resume を使えるようにする
-	r.markSessionExists()
+	// 成功: 次回から resume を使えるようにする (段 last のみ)
+	if r.continuesSession() {
+		r.markSessionExists()
+	}
 
 	return usage, nil
 }
 
-// buildArgs は hasSession に応じて codex CLI 引数を組み立てる。
+// continuesSession は codex のセッションを便をまたいで継続する段 (last) かを返す。
+func (r *codexRunner) continuesSession() bool {
+	return r.cfg.ContextStage == contextStageLast
+}
+
+// buildArgs は段と hasSession に応じて codex CLI 引数を組み立てる。
 func (r *codexRunner) buildArgs() []string {
-	if r.hasSession {
+	if r.continuesSession() && r.hasSession {
 		return r.buildResumeArgs()
 	}
 	return r.buildExecArgs()

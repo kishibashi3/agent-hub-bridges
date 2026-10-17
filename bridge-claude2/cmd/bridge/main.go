@@ -43,6 +43,10 @@
 //	BRIDGE_INVENTORY            optional    bridge inventory ファイルパス
 //	AGENT_HUB_BRIDGE_MAX_RETRIES optional   circuit breaker 連続失敗上限 (default: 10, 0=無限)
 //	AGENT_HUB_INBOX_POLL_INTERVAL_S optional safety-net poll / heartbeat 間隔秒数 (default: 30; issue #234)
+//	AGENT_HUB_CONTEXT_STAGE     optional    文脈の段 (default: none; issue #339、bridge-codex2 と同じ env 名・値)。
+//	                                        none = 継続しない (段 1)。last = bridge-codex2 の旧挙動 (deprecated) で、
+//	                                        claude2 では warning を出して none で動く。それ以外の値は起動エラー。
+//	                                        claude2 は 1 通ごとに文脈ゼロなので、どの値でも振る舞いは変わらない
 //	BRIDGE_LOG_DIR              optional    ログディレクトリ (省略 = ~/.agent-hub/logs/; --log-file が優先)
 //	BRIDGE_LOG_FILE             optional    ログファイルパス (省略 = BRIDGE_LOG_DIR/bridge-<participant>.log)
 //
@@ -120,6 +124,9 @@ type config struct {
 	GHLogin string
 	// GitHubFooter は bridge が真値から組成した GitHub 投稿用 footer (issue #245)。
 	GitHubFooter string
+	// ContextStage は AGENT_HUB_CONTEXT_STAGE で指定された文脈の段 (issue #339)。
+	// claude2 は常に段 1 で動き、この値は起動ログに出すだけ。
+	ContextStage contextStage
 }
 
 func parseConfig() (*config, error) {
@@ -235,6 +242,12 @@ func parseConfig() (*config, error) {
 		return nil, err
 	}
 
+	// context stage: AGENT_HUB_CONTEXT_STAGE env > none (issue #339)
+	resolvedContextStage, err := resolveContextStage()
+	if err != nil {
+		return nil, err
+	}
+
 	// journal dir: AGENT_HUB_JOURNAL_DIR env > ~/.agent-hub/journals (HOME がなければ起動エラー)
 	resolvedJournalDir, err := journalDir()
 	if err != nil {
@@ -289,6 +302,7 @@ func parseConfig() (*config, error) {
 		MaxQueryRetries:   resolvedMaxQueryRetries,
 		ScannerBufferSize: resolvedScannerBufferSize,
 		JournalDir:        resolvedJournalDir,
+		ContextStage:      resolvedContextStage,
 	}, nil
 }
 
@@ -504,6 +518,7 @@ func main() {
 		"add_dirs_count", len(cfg.AddDirs),
 		"log_file", orDefault(cfg.LogFile, "(stderr only)"),
 	)
+	logContextStage(cfg.ContextStage)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
