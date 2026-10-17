@@ -96,7 +96,8 @@ type config struct {
 
 func parseConfig() (*config, error) {
 	var (
-		user              = flag.String("user", "", "agent-hub handle (without @) [required]")
+		participantVal    string
+		userDeprecated    string
 		displayName       = flag.String("display-name", "", "display name (optional)")
 		tenant            = flag.String("tenant", "", "agent-hub tenant ID (overrides AGENT_HUB_TENANT env)")
 		workdir           = flag.String("workdir", "", "peer workdir (default: cwd)")
@@ -111,6 +112,9 @@ func parseConfig() (*config, error) {
 		showVersion       = flag.Bool("version", false, "print version and exit")
 		addDirs           stringSlice
 	)
+	flag.StringVar(&participantVal, "participant", "", "agent-hub handle (without @) [required]")
+	flag.StringVar(&participantVal, "p", "", "agent-hub handle (short alias for --participant)")
+	flag.StringVar(&userDeprecated, "user", "", "deprecated: use --participant / -p")
 	flag.Var(&addDirs, "add-dir", "add extra directory to codex context (repeatable; only applied on new sessions)")
 	flag.Parse()
 
@@ -119,11 +123,17 @@ func parseConfig() (*config, error) {
 		os.Exit(0)
 	}
 
+	// --user is a deprecated alias for --participant / -p
+	if participantVal == "" && userDeprecated != "" {
+		fmt.Fprintf(os.Stderr, "warning: --user is deprecated, use --participant / -p instead\n")
+		participantVal = userDeprecated
+	}
+
 	if err := validateLogLevel(*logLevel); err != nil {
 		return nil, err
 	}
-	if *user == "" {
-		return nil, fmt.Errorf("--user is required")
+	if participantVal == "" {
+		return nil, fmt.Errorf("--participant (or -p) is required")
 	}
 	if *mode != "stateful" && *mode != "stateless" && *mode != "global" {
 		return nil, fmt.Errorf("--mode must be stateful|stateless|global, got %q", *mode)
@@ -182,7 +192,7 @@ func parseConfig() (*config, error) {
 	// display_name: --display-name フラグ > "{user} — codex bridge"
 	resolvedDisplayName := *displayName
 	if resolvedDisplayName == "" {
-		resolvedDisplayName = *user + " — codex bridge"
+		resolvedDisplayName = participantVal + " — codex bridge"
 	}
 
 	// log file: --log-file フラグ > BRIDGE_LOG_FILE env > BRIDGE_LOG_DIR env / ~/.agent-hub/logs/
@@ -199,7 +209,7 @@ func parseConfig() (*config, error) {
 			}
 			logDir = filepath.Join(home, ".agent-hub", "logs")
 		}
-		resolvedLogFile = filepath.Join(logDir, "bridge-"+*user+".log")
+		resolvedLogFile = filepath.Join(logDir, "bridge-"+participantVal+".log")
 	}
 
 	// codex home dir: CODEX_HOME_DIR env > ~/.agent-hub/codex-home/<user>
@@ -209,7 +219,7 @@ func parseConfig() (*config, error) {
 		if err != nil {
 			return nil, fmt.Errorf("get home dir: %w", err)
 		}
-		codexHomeDir = filepath.Join(home, ".agent-hub", "codex-home", *user)
+		codexHomeDir = filepath.Join(home, ".agent-hub", "codex-home", participantVal)
 	}
 
 	// scanner-buffer-size: AGENT_HUB_SCANNER_BUFFER_SIZE env > 4MB
@@ -219,7 +229,7 @@ func parseConfig() (*config, error) {
 	}
 
 	return &config{
-		User:              *user,
+		User:              participantVal,
 		DisplayName:       resolvedDisplayName,
 		AgentHubURL:       url,
 		GitHubPAT:         pat,

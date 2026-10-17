@@ -21,4 +21,4 @@ clean:
 # 使用例:
 #   make build
 #   AGENT_HUB_URL=http://localhost:3000/mcp GITHUB_PAT=ghp_... \
-#     ./bridge-codex2 --user bridge-codex --workdir /path/to/workdir
+#     ./bridge-codex2 --participant bridge-codex --workdir /path/to/workdir
