@@ -32,6 +32,19 @@ type queryUsage struct {
 	CacheReadInputTokens int
 	TotalCostUSD         *float64
 	IsError              bool
+	// RepliedCausedBy は内側 codex の agent-hub send_message が成功した呼び出しの caused_by 一覧
+	// (issue #336 #4)。処理中の inbound への返信済み判定と、先回り返信の skip に使う。
+	RepliedCausedBy []string
+}
+
+// repliedTo は caused_by=msgID の send_message が成功していたかを返す。
+func (u queryUsage) repliedTo(msgID string) bool {
+	for _, id := range u.RepliedCausedBy {
+		if id == msgID {
+			return true
+		}
+	}
+	return false
 }
 
 var (
