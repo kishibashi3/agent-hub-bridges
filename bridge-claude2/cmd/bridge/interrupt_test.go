@@ -67,3 +67,59 @@ func TestHandleOne_ShutdownNoNoticeForAutoReply(t *testing.T) {
 		t.Errorf("send_message called %d times; want 0", n)
 	}
 }
+
+// stoppedCtx は「停止が掛かった」状態の ctx。Err() は Canceled を返すが Done() は閉じない
+// (Background のまま) ので、fake claude は kill されずに result まで出せる。実機では stop の
+// SIGTERM が内側 claude にも届き、claude が is_error=false の result で終わる (issue #337)。
+type stoppedCtx struct{ context.Context }
+
+func (stoppedCtx) Err() error { return context.Canceled }
+
+// TestHandleOne_ShutdownWithNonErrorResultSendsOneInterruptNotice: 停止中に内側 claude が
+// is_error=false の result で終わり、この依頼に返信していなければ、中断通知を 1 通返す (issue #337)。
+func TestHandleOne_ShutdownWithNonErrorResultSendsOneInterruptNotice(t *testing.T) {
+	client, cfg, runner, hub, journal := newTestEnv(t, writeFakeClaude(t, t.TempDir(), okResultLine(), 0))
+	if err := handleOne(stoppedCtx{context.Background()}, client, runner, inbound("hello"), cfg, &activityTracker{}, journal); err != nil {
+		t.Fatalf("handleOne: %v", err)
+	}
+	sends := hub.callsNamed("send_message")
+	if len(sends) != 1 {
+		t.Fatalf("send_message called %d times; want exactly 1 interrupt notice", len(sends))
+	}
+	if body, _ := sends[0].Args["message"].(string); !strings.HasPrefix(body, autoNoticePrefix) {
+		t.Errorf("message = %q, want an interrupt notice", body)
+	}
+	if cb, _ := sends[0].Args["caused_by"].(string); cb != "msg-1" {
+		t.Errorf("caused_by = %q, want msg-1", cb)
+	}
+	if entries := journal.loadAll(); len(entries) != 0 {
+		t.Errorf("journal must be empty after a successful send, got %d", len(entries))
+	}
+}
+
+// TestHandleOne_ShutdownAfterInnerReplyNoNotice: 内側がこの依頼に返信済みなら、停止中に
+// 終わっても中断通知は送らない (返信は 1 通のまま)。
+func TestHandleOne_ShutdownAfterInnerReplyNoNotice(t *testing.T) {
+	lines := `{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"mcp__agent-hub__send_message","input":{"to":"@peer","message":"x","caused_by":"msg-1"}}]}}` + "\n" +
+		`{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","is_error":false}]}}` + "\n" +
+		okResultLine()
+	client, cfg, runner, hub, journal := newTestEnv(t, writeFakeClaude(t, t.TempDir(), lines, 0))
+	if err := handleOne(stoppedCtx{context.Background()}, client, runner, inbound("hello"), cfg, &activityTracker{}, journal); err != nil {
+		t.Fatalf("handleOne: %v", err)
+	}
+	if n := len(hub.callsNamed("send_message")); n != 0 {
+		t.Errorf("send_message called %d times by bridge; want 0 (inner already replied)", n)
+	}
+}
+
+// TestHandleOne_NonErrorResultWithoutShutdownNoNotice: 停止が掛かっていなければ、従来どおり
+// bridge からは何も送らない (中断していない依頼の返信数は変わらない)。
+func TestHandleOne_NonErrorResultWithoutShutdownNoNotice(t *testing.T) {
+	client, cfg, runner, hub, journal := newTestEnv(t, writeFakeClaude(t, t.TempDir(), okResultLine(), 0))
+	if err := handleOne(context.Background(), client, runner, inbound("hello"), cfg, &activityTracker{}, journal); err != nil {
+		t.Fatalf("handleOne: %v", err)
+	}
+	if n := len(hub.callsNamed("send_message")); n != 0 {
+		t.Errorf("send_message called %d times; want 0", n)
+	}
+}

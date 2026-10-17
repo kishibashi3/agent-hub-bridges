@@ -538,6 +538,16 @@ func handleOne(
 		recordInnerHandled(runner, msg.ID, usage.InnerHandledIDs)
 
 		if err == nil {
+			// issue #337: stop の SIGTERM は内側 claude にも届き、claude は中断した turn を
+			// is_error=false の result で終える。エラーにならないので下の中断通知の分岐を
+			// 通らず、返信 0 通のまま「処理済み」になっていた。停止が掛かっていて、内側が
+			// この依頼にまだ返信していなければ、中断として通知を 1 通送る。
+			if ctx.Err() != nil && !usage.repliedTo(msg.ID) {
+				slog.Info("handleOne: query ended without reply during shutdown — sending interrupt notice (issue #337)",
+					"msg_id", msg.ID, "err", ctx.Err())
+				sendInterruptNotice(ctx, client, journal, msg)
+				return nil
+			}
 			slog.Info("→ message processed", "msg_id", msg.ID, "from", msg.Sender)
 			return nil
 		}
