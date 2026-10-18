@@ -12,19 +12,60 @@
 //   - プロセスグループごと SIGKILL (/proc が読めない環境の fallback を兼ねる)
 //
 // を行う。
+//
+// issue #371: bridge 本体が SIGKILL・クラッシュ・OOM kill で死んだときは上の経路が走らず、
+// subprocess とツールの子が孤児として残る。そこで subprocess に Pdeathsig: SIGTERM を付け、
+// bridge が死んだら kernel から SIGTERM を届ける (SIGTERM を受けた engine はツールの子を
+// 始末してから終わる)。Pdeathsig は親プロセスの死ではなく「fork したスレッドの終了」で発火する
+// ため、cmd.Start は startProcess 経由で、終わらない専用スレッドから実行する。
 package main
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 )
 
 // newProcessGroupAttr は subprocess を新しいプロセスグループで起動する SysProcAttr を返す。
+// Pdeathsig を付けるので、cmd.Start は必ず startProcess 経由で呼ぶこと (issue #371)。
+// SIGKILL にしないのは、SIGTERM でないと engine がツールの子を始末しないため (issue #344)。
 func newProcessGroupAttr() *syscall.SysProcAttr {
-	return &syscall.SysProcAttr{Setpgid: true}
+	return &syscall.SysProcAttr{Setpgid: true, Pdeathsig: syscall.SIGTERM}
+}
+
+type startRequest struct {
+	cmd  *exec.Cmd
+	done chan error
+}
+
+var (
+	startRequests = make(chan startRequest)
+	startLoopOnce sync.Once
+)
+
+// startProcess は cmd.Start() を起動専用スレッドで実行する (issue #371)。
+// Pdeathsig は fork したスレッドが終わると発火するので、任意の goroutine から Start すると、
+// そのスレッドが終了したとき (LockOSThread したまま goroutine が終わったとき) に bridge が
+// 生きていても engine が止まる。専用スレッドは bridge が生きている間は終わらないので、
+// Pdeathsig は bridge 本体の死でだけ発火する。Wait などはどの goroutine から呼んでもよい。
+func startProcess(cmd *exec.Cmd) error {
+	startLoopOnce.Do(func() { go startLoop() })
+	done := make(chan error, 1)
+	startRequests <- startRequest{cmd: cmd, done: done}
+	return <-done
+}
+
+// startLoop は OS スレッドに固定したまま終わらない。UnlockOSThread も呼ばない。
+func startLoop() {
+	runtime.LockOSThread()
+	for req := range startRequests {
+		req.done <- req.cmd.Start()
+	}
 }
 
 // killProcessTree は pid とその子孫、および pid のプロセスグループを SIGKILL する。
