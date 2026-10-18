@@ -44,7 +44,7 @@ func parseControlResponses(t *testing.T, out string) []controlResponseLine {
 	return lines
 }
 
-func hookCallbackLine(requestID, callbackID, command string) string {
+func hookCallbackLine(requestID, callbackID, command string, background bool) string {
 	b, _ := json.Marshal(map[string]any{
 		"type":       "control_request",
 		"request_id": requestID,
@@ -55,7 +55,7 @@ func hookCallbackLine(requestID, callbackID, command string) string {
 				"hook_event_name": "PreToolUse",
 				"tool_name":       "Bash",
 				"tool_use_id":     "toolu_1",
-				"tool_input":      map[string]any{"command": command, "run_in_background": true},
+				"tool_input":      map[string]any{"command": command, "run_in_background": background},
 			},
 		},
 	})
@@ -82,9 +82,9 @@ func TestInitializeRequest_RegistersPreToolUseHook(t *testing.T) {
 // どの control_request にも必ず 1 行の control_response を返すこと (issue #345)。
 func TestReadUntilResult_RepliesToEveryControlRequest(t *testing.T) {
 	input := strings.Join([]string{
-		hookCallbackLine("r1", blockingHookCallbackID, "touch MARK; sleep 618"),
-		hookCallbackLine("r2", blockingHookCallbackID, "ls -la"),
-		hookCallbackLine("r3", "hook_unknown", "sleep 618"),
+		hookCallbackLine("r1", blockingHookCallbackID, "touch MARK; sleep 618", false),
+		hookCallbackLine("r2", blockingHookCallbackID, "ls -la", false),
+		hookCallbackLine("r3", "hook_unknown", "sleep 618", true),
 		`{"type":"control_request","request_id":"r4","request":{"subtype":"can_use_tool"}}`,
 		`{"type":"control_request","request_id":"r5","request":"not-an-object"}`,
 		resultLine,
@@ -155,7 +155,7 @@ func TestReadUntilResult_HookCallbackRoundTrip(t *testing.T) {
 
 	cliDone := make(chan string, 1)
 	go func() {
-		_, _ = io.WriteString(stdoutW, hookCallbackLine("req_x", blockingHookCallbackID, "gh run watch 123")+"\n")
+		_, _ = io.WriteString(stdoutW, hookCallbackLine("req_x", blockingHookCallbackID, "gh run watch 123", false)+"\n")
 		line, err := bufio.NewReader(stdinR).ReadString('\n')
 		if err != nil {
 			cliDone <- "read error: " + err.Error()
@@ -190,7 +190,7 @@ func TestReadUntilResult_HookCallbackRoundTrip(t *testing.T) {
 // scanner 上限を超えた control_request も、request_id を拾って error を返すこと。
 func TestReadUntilResult_OversizeControlRequestGetsReply(t *testing.T) {
 	const maxLine = 512
-	big := hookCallbackLine("r_big", blockingHookCallbackID, strings.Repeat("A", 10*maxLine))
+	big := hookCallbackLine("r_big", blockingHookCallbackID, strings.Repeat("A", 10*maxLine), false)
 	input := big + "\n" + resultLine + "\n"
 	var stdin bytes.Buffer
 	if _, err := readUntilResult(context.Background(), newStreamScanner(strings.NewReader(input), maxLine), &stdin, nil, false); err != nil {
@@ -199,5 +199,36 @@ func TestReadUntilResult_OversizeControlRequestGetsReply(t *testing.T) {
 	got := parseControlResponses(t, stdin.String())
 	if len(got) != 1 || got[0].Response.RequestID != "r_big" || got[0].Response.Subtype != "error" {
 		t.Fatalf("control_responses = %+v", got)
+	}
+}
+
+// run_in_background: true の Bash は、コマンドの中身によらず deny すること (issue #374)。
+func TestBlockingHookOutput_DeniesRunInBackground(t *testing.T) {
+	input := strings.Join([]string{
+		hookCallbackLine("b1", blockingHookCallbackID, "touch MARK; sleep 3", true),
+		hookCallbackLine("b2", blockingHookCallbackID, "tail -f /dev/null", true),
+		hookCallbackLine("b3", blockingHookCallbackID, "touch MARK; sleep 3", false),
+		resultLine,
+	}, "\n") + "\n"
+	var stdin bytes.Buffer
+	if _, err := readUntilResult(context.Background(), newStreamScanner(strings.NewReader(input), 1<<20), &stdin, nil, false); err != nil {
+		t.Fatalf("readUntilResult err = %v", err)
+	}
+	got := parseControlResponses(t, stdin.String())
+	if len(got) != 3 {
+		t.Fatalf("got %d control_responses, want 3: %s", len(got), stdin.String())
+	}
+	for _, i := range []int{0, 1} {
+		h := got[i].Response.Response.HookSpecificOutput
+		if got[i].Response.Subtype != "success" || h == nil || h.PermissionDecision != "deny" {
+			t.Fatalf("[%d] = %+v, want deny", i, got[i].Response)
+		}
+		if h.PermissionDecisionReason != backgroundDeniedMessage {
+			t.Errorf("[%d] reason = %q, want backgroundDeniedMessage", i, h.PermissionDecisionReason)
+		}
+	}
+	// フォアグラウンドのブロック対象外コマンドは今までどおり許可
+	if got[2].Response.Subtype != "success" || got[2].Response.Response.HookSpecificOutput != nil {
+		t.Errorf("[2] = %+v, want empty success", got[2].Response)
 	}
 }
