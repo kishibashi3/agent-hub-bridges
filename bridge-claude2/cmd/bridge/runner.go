@@ -428,7 +428,7 @@ func (r *claudeRunner) spawnSubprocess(ctx context.Context) (*exec.Cmd, io.Write
 		stdinPipe.Close()
 		return nil, nil, nil, fmt.Errorf("runner: stdout pipe: %w", err)
 	}
-	if err := cmd.Start(); err != nil {
+	if err := startProcess(cmd); err != nil {
 		stdinPipe.Close()
 		return nil, nil, nil, fmt.Errorf("runner: start subprocess: %w", err)
 	}

@@ -153,7 +153,7 @@ func (r *codexRunner) query(ctx context.Context, prompt, _ string, tracker *acti
 		stdinPipe.Close()
 		return queryUsage{IsError: true}, fmt.Errorf("runner: stdout pipe: %w", err)
 	}
-	if err := cmd.Start(); err != nil {
+	if err := startProcess(cmd); err != nil {
 		stdinPipe.Close()
 		return queryUsage{IsError: true}, fmt.Errorf("runner: start codex subprocess: %w", err)
 	}
