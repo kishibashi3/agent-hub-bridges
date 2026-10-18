@@ -248,7 +248,7 @@ func TestProcessMessages_LimitEntersSleep(t *testing.T) {
 		{ID: "m2", Sender: "@b", To: "@limit-test", Body: "second", Timestamp: "2026-09-16T09:00:02.000Z"},
 	}
 	cursor := processMessages(context.Background(), cfg, client, runner, nil, cursorPos{},
-		&activityTracker{}, &messageGapTracker{}, journal, sleeper, msgs, "test")
+		&activityTracker{}, &messageGapTracker{}, journal, sleeper, msgs, nil, "test")
 
 	sleeping, until, kind := sleeper.state()
 	if !sleeping || kind != "spend limit" || !until.After(time.Now()) {

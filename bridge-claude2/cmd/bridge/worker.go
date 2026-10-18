@@ -283,7 +283,7 @@ func runHubSession(
 			if _, err := client.Register(ctx, cfg.DisplayName, cfg.Mode); err != nil {
 				return cursor, true, fmt.Errorf("register after limit sleep: %w", err)
 			}
-			deferred := sleeper.wake()
+			deferred, markedRead := sleeper.wake()
 			slog.Info("[limit] woke up — resuming inbox fetch",
 				"kind", kind, "deferred", len(deferred))
 			// 休眠中に積まれた push シグナルは捨てる (この直後に GetMessages を呼ぶ)
@@ -291,11 +291,12 @@ func runHubSession(
 			case <-pushCh:
 			default:
 			}
-			// deferred (limit 到達時点で MarkAsRead 済み・未処理) を hub 未読より先に処理。
+			// deferred (limit 到達時点で未処理。先頭のみ MarkAsRead 済み) を hub 未読より先に処理。
 			// batch 途中で limit に当たった場合、残りはまだ router を通っていないので
 			// 復帰時も router を渡してスラッシュコマンドを claude に流さない (PR #269 review M3)
+			// issue #369: 先頭 (limit に当たった便) は MarkAsRead 済みなので markedRead で渡す。
 			cursor = processMessages(ctx, cfg, client, runner, router, cursor,
-				tracker, gapTracker, journal, sleeper, deferred, "[limit-resume]")
+				tracker, gapTracker, journal, sleeper, deferred, markedRead, "[limit-resume]")
 			// issue #271: 処理し終えたら deferred の記録を消す。SIGTERM で中断された場合は
 			// 残りが未処理のまま流れているので、次回起動時の WARN のために残す。
 			if ctx.Err() == nil {
@@ -335,7 +336,7 @@ func runHubSession(
 		}
 
 		cursor = processMessages(ctx, cfg, client, runner, router, cursor,
-			tracker, gapTracker, journal, sleeper, msgs, "runHubSession")
+			tracker, gapTracker, journal, sleeper, msgs, nil, "runHubSession")
 	}
 }
 
@@ -348,6 +349,10 @@ func runHubSession(
 // issue #268: handleOne が limitReachedError を返した場合、そのメッセージと残りを
 // sleeper に deferred として預けて休眠に入り、即 return する。limit に当たったメッセージの
 // cursor は保存しない (復帰後に再処理するため)。
+//
+// markedRead は msgs のうち呼び出し前に MarkAsRead 済みの便の ID (limit 復帰時の deferred の先頭)。
+// nil なら全便が hub で未読。停止で残す便のうち MarkAsRead 済みのものは drain / 次回起動の
+// GetMessages に出てこないので、中断通知を送る (issue #369)。
 func processMessages(
 	ctx context.Context,
 	cfg *config,
@@ -360,6 +365,7 @@ func processMessages(
 	journal *Journal,
 	sleeper *limitSleeper,
 	msgs []agenthub.Message,
+	markedRead map[string]bool,
 	logPrefix string,
 ) cursorPos {
 	selfHandle := "@" + cfg.Participant
@@ -368,7 +374,7 @@ func processMessages(
 		// issue #342: 停止が掛かったら残りの便は触らない (MarkAsRead も cursor 前進もしない)。
 		// 進めると drain / 次回起動の GetMessages で cursor.seen として捨てられ、返信なしで消える。
 		if ctx.Err() != nil {
-			logShutdownLeftUnread(logPrefix, msgs[i:])
+			leaveRestAtShutdown(ctx, client, journal, logPrefix, msgs[i:], markedRead)
 			return cursor
 		}
 
@@ -491,7 +497,7 @@ func startupCatchup(
 		"nl_count", len(nlMsgs), "cmd_count", cmdCount)
 
 	cursor = processMessages(ctx, cfg, client, runner, nil, cursor,
-		tracker, gapTracker, journal, sleeper, nlMsgs, "[startup-catchup]")
+		tracker, gapTracker, journal, sleeper, nlMsgs, nil, "[startup-catchup]")
 	return cursor, nil
 }
 
@@ -784,7 +790,7 @@ func runGracefulDrain(
 	// 何もせず exit する。deferred (MarkAsRead 済み・未処理) はプロセス終了で失われる
 	// ため ID を WARN で残す。記録ファイル (issue #271) は消さないので次回起動時にも WARN が出る。
 	if sleeping, until, kind := sleeper.state(); sleeping {
-		deferred := sleeper.wake()
+		deferred, _ := sleeper.wake()
 		ids := make([]string, 0, len(deferred))
 		for _, m := range deferred {
 			ids = append(ids, m.ID)

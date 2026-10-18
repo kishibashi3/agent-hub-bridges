@@ -57,6 +57,27 @@ func logShutdownInFlight(logPrefix string, msg agenthub.Message, handleErr error
 		"msg_id", msg.ID, "from", msg.Sender, "handle_err", handleErr)
 }
 
+// leaveRestAtShutdown は停止で手を付けずに残すバッチ残りの便を扱う (issue #342, #369)。
+// MarkAsRead 前の便は触らずに残し、drain か次回起動の catchup に任せる。markedRead にある便
+// (limit 復帰時の deferred の先頭) は既読化済みで drain にも次回起動にも出てこないため、
+// 送り主へ中断通知を 1 通送る。
+func leaveRestAtShutdown(ctx context.Context, client *agenthub.Client, journal *Journal,
+	logPrefix string, rest []agenthub.Message, markedRead map[string]bool) {
+	var unread []agenthub.Message
+	for _, m := range rest {
+		if !markedRead[m.ID] {
+			unread = append(unread, m)
+			continue
+		}
+		slog.Info(logPrefix+": shutdown — message already marked as read will not be picked up by drain / next startup; "+
+			"sending interrupt notice (issue #369)", "msg_id", m.ID, "from", m.Sender)
+		sendInterruptNotice(ctx, client, journal, m)
+	}
+	if len(unread) > 0 {
+		logShutdownLeftUnread(logPrefix, unread)
+	}
+}
+
 // logShutdownLeftUnread は停止で手を付けずに残したバッチ残りの便を 1 行で残す (issue #342)。
 // MarkAsRead も cursor 前進もしていないので、drain か次回起動の catchup で処理される。
 func logShutdownLeftUnread(logPrefix string, rest []agenthub.Message) {

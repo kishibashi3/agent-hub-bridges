@@ -201,9 +201,10 @@ func sleepingDisplayName(base string, until time.Time, kind string) string {
 // limitSleeper は休眠状態を保持する。runWorker が生成し、reconnect をまたいで共有する
 // (休眠中に hub session が切れて再接続しても休眠と deferred を引き継ぐため)。
 //
-// deferred は limit に当たった時点で「MarkAsRead 済みだが未処理」のメッセージ。
-// bridge は処理前に MarkAsRead する (issue #176) ため、hub の queue には戻せない。
-// in-memory で保持し、復帰後に hub の未読より先に処理する。
+// deferred は limit に当たった時点で未処理のメッセージ。in-memory で保持し、復帰後に
+// hub の未読より先に処理する。先頭 (limit に当たった便) は処理前に MarkAsRead 済み
+// (issue #176) で hub の queue には戻せない。2 便目以降は MarkAsRead 前なので hub では未読のまま
+// (issue #369)。markedRead は deferred のうち MarkAsRead 済みの便の ID。
 //
 // store が非 nil なら、enter のたびに deferred 一覧をファイルにも書く (issue #271 M2)。
 // ファイルは復帰後に deferred を処理し終えた時点 (finishResume) で消す。
@@ -213,16 +214,25 @@ type limitSleeper struct {
 	until    time.Time
 	kind     string
 	deferred []agenthub.Message
-	store    *deferredStore
+	// markedRead は deferred のうち MarkAsRead 済みの便の ID (issue #369)。
+	markedRead map[string]bool
+	store      *deferredStore
 }
 
 // enter は休眠状態に入る。既に休眠中なら until/kind を上書きし deferred を追記する。
+// deferred の先頭は limit に当たった便 (MarkAsRead 済み)、2 便目以降は MarkAsRead 前の便。
 func (s *limitSleeper) enter(e *limitReachedError, deferred []agenthub.Message) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.active = true
 	s.until = e.Until
 	s.kind = e.Kind
+	if len(deferred) > 0 {
+		if s.markedRead == nil {
+			s.markedRead = map[string]bool{}
+		}
+		s.markedRead[deferred[0].ID] = true
+	}
 	s.deferred = append(s.deferred, deferred...)
 	s.store.save(s.deferred, s.kind, s.until)
 }
@@ -241,16 +251,16 @@ func (s *limitSleeper) deferredCount() int {
 	return len(s.deferred)
 }
 
-// wake は休眠を解除し、deferred メッセージを取り出して返す。
-func (s *limitSleeper) wake() []agenthub.Message {
+// wake は休眠を解除し、deferred メッセージと、そのうち MarkAsRead 済みの便の ID を取り出して返す。
+func (s *limitSleeper) wake() ([]agenthub.Message, map[string]bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.active = false
 	s.until = time.Time{}
 	s.kind = ""
-	d := s.deferred
-	s.deferred = nil
-	return d
+	d, read := s.deferred, s.markedRead
+	s.deferred, s.markedRead = nil, nil
+	return d, read
 }
 
 // finishResume は復帰後の deferred 処理が終わったときに呼ぶ。再度休眠に入っていなければ
