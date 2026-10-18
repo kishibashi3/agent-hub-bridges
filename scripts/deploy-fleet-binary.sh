@@ -1,20 +1,36 @@
 #!/usr/bin/env bash
-# deploy-fleet-binary.sh — fleet 用の bridge-claude2 binary を main から build して配置する (issue #285)
+# deploy-fleet-binary.sh — fleet 用の bridge binary を main から build して配置する (issue #285 / #349)
 #
 # 使い方:
-#   scripts/deploy-fleet-binary.sh
+#   scripts/deploy-fleet-binary.sh [--activate] [bridge ...]
+#
+#   bridge を省略すると bridge-claude2 / bridge-codex2 / bridge-tmux の 3 つを対象にする。
+#   --activate を付けたときだけ symlink を張り替える。付けなければ実体を置くだけで、
+#   fleet が起動する binary は変わらない。
+#
+# 配置の形:
+#   $FLEET_BIN_DIR/<bridge>@<revision 先頭 12 桁>   バージョン付きの実体 (上書きしない)
+#   $FLEET_BIN_DIR/<bridge> -> <bridge>@<...>      symlink (--activate のときだけ張り替える)
+#
+#   実体の名前も "bridge-" で始まるので、/proc/<pid>/exe が実体を指しても
+#   agenthubctl の bridge 判定 (exe の basename が "bridge-" で始まること) を通る。
+#   前の版に戻すときは、残っている実体を指すように symlink を張り直す:
+#     ln -sfn '<bridge>@<revision>' "$FLEET_BIN_DIR/<bridge>"
 #
 # 処理:
 #   1. build 用の clone (作業ディレクトリとは別) を origin/main に合わせる。
 #      git worktree は使わない (vcs 情報が binary に付かないため)。
 #   2. agent-hub-sdk を ci.yml の AGENT_HUB_SDK_REF で sibling に clone する
 #      (bridge-claude2/go.mod の replace ../../agent-hub-sdk/go 用。CI と同じ ref)。
-#   3. 配置先と同じディレクトリの一時ファイルに build する。
+#      bridge-codex2 / bridge-tmux は replace を持たないので go.mod の require 版を使う。
+#   3. bridge ごとに、配置先と同じディレクトリの一時ファイルに build する。
 #   4. vcs.revision が main の HEAD と一致し、vcs.modified=false であることを確認する。
-#   5. rename で置き換え、配置先・sha256・vcs.revision を出力する。
-#   6. fleet.env の AGENT_HUB_BRIDGE_CLAUDE2_BIN が配置先を指しているかを確認する。
-#      指していなければ WARNING を出し、結果を出力したあと exit 1 で終了する
-#      (配置は済んでいるが、fleet が起動しない binary なので deploy としては失敗)。
+#   5. rename で <bridge>@<revision> に置く。同じ名前の実体がすでにあり sha256 が同じなら
+#      そのまま使う。sha256 が違えば上書きせずに失敗する (版の名前と中身を 1 対 1 に保つため)。
+#   6. --activate のときだけ、symlink を rename で <bridge>@<revision> に張り替える。
+#   7. bridge ごとに、実体・sha256・vcs.revision・symlink の向き先・fleet.env の *_BIN を出力する。
+#      fleet.env は読むだけで、symlink を指していなくても失敗にはしない
+#      (env をやめて symlink を参照する方針 (#348)。向け直しは operator が行う)。
 #
 # env (fleet.env / ~/.bashrc) の変更と bridge の restart は行わない (operator が行う)。
 #
@@ -27,26 +43,41 @@
 
 set -euo pipefail
 
-BINARY=bridge-claude2
+ALL_BRIDGES=(bridge-claude2 bridge-codex2 bridge-tmux)
 FLEET_BIN_DIR="${FLEET_BIN_DIR:-$HOME/.agent-hub/bin}"
 FLEET_BUILD_ROOT="${FLEET_BUILD_ROOT:-$HOME/.agent-hub/build}"
 BRIDGES_REPO_URL="${BRIDGES_REPO_URL:-https://github.com/kishibashi3/agent-hub-bridges.git}"
 SDK_REPO_URL="${SDK_REPO_URL:-https://github.com/kishibashi3/agent-hub-sdk.git}"
 FLEET_ENV_FILE="${FLEET_ENV_FILE:-$HOME/.agent-hub/fleet.env}"
-BIN_ENV_KEY=AGENT_HUB_BRIDGE_CLAUDE2_BIN
 
 bridges_dir="$FLEET_BUILD_ROOT/agent-hub-bridges"
 sdk_dir="$FLEET_BUILD_ROOT/agent-hub-sdk"
-dest="$FLEET_BIN_DIR/$BINARY"
 
 log() { echo "[deploy-fleet-binary] $*" >&2; }
 die() { log "ERROR: $*"; exit 1; }
+
+activate=false
+bridges=()
+for arg in "$@"; do
+    case "$arg" in
+        --activate) activate=true ;;
+        bridge-claude2 | bridge-codex2 | bridge-tmux) bridges+=("$arg") ;;
+        *) die "知らない引数です: $arg (使い方: $0 [--activate] [bridge-claude2|bridge-codex2|bridge-tmux ...])" ;;
+    esac
+done
+if [[ ${#bridges[@]} -eq 0 ]]; then
+    bridges=("${ALL_BRIDGES[@]}")
+fi
 
 mkdir -p "$FLEET_BIN_DIR" "$FLEET_BUILD_ROOT"
 
 # 同時実行すると build 用 clone を取り合うので排他する。
 exec 9>"$FLEET_BUILD_ROOT/.lock"
 flock -n 9 || die "別の deploy が実行中です ($FLEET_BUILD_ROOT/.lock)"
+
+tmp_files=()
+cleanup() { if [[ ${#tmp_files[@]} -gt 0 ]]; then rm -f "${tmp_files[@]}"; fi; }
+trap cleanup EXIT
 
 # ---------------------------------------------------------------------------
 # 1. agent-hub-bridges を origin/main に合わせる
@@ -59,6 +90,7 @@ git -C "$bridges_dir" fetch -q origin main
 git -C "$bridges_dir" checkout -q --force --detach origin/main
 git -C "$bridges_dir" clean -q -fdx
 revision=$(git -C "$bridges_dir" rev-parse HEAD)
+version="${revision:0:12}"
 log "agent-hub-bridges main = $revision"
 
 # ---------------------------------------------------------------------------
@@ -76,73 +108,109 @@ git -C "$sdk_dir" clean -q -fdx
 [[ "$(git -C "$sdk_dir" rev-parse HEAD)" == "$sdk_ref" ]] || die "agent-hub-sdk を $sdk_ref に合わせられません"
 log "agent-hub-sdk = $sdk_ref"
 
-# ---------------------------------------------------------------------------
-# 3. 配置先と同じディレクトリの一時ファイルに build する
-# ---------------------------------------------------------------------------
-tmp=$(mktemp "$FLEET_BIN_DIR/.$BINARY.XXXXXX")
-trap 'rm -f "$tmp"' EXIT
-log "build -> $tmp"
-(cd "$bridges_dir/$BINARY" && go build -o "$tmp" ./cmd/bridge)
-
-# ---------------------------------------------------------------------------
-# 4. vcs 情報を確認する
-# ---------------------------------------------------------------------------
-buildinfo=$(go version -m "$tmp")
-vcs_revision=$(awk '$1 == "build" && $2 ~ /^vcs\.revision=/ { sub(/^vcs\.revision=/, "", $2); print $2 }' <<<"$buildinfo")
-vcs_modified=$(awk '$1 == "build" && $2 ~ /^vcs\.modified=/ { sub(/^vcs\.modified=/, "", $2); print $2 }' <<<"$buildinfo")
-[[ "$vcs_revision" == "$revision" ]] || die "vcs.revision ($vcs_revision) が main ($revision) と一致しません"
-[[ "$vcs_modified" == "false" ]] || die "vcs.modified=$vcs_modified です (build 用 clone に変更があります)"
-
-# ---------------------------------------------------------------------------
-# 5. rename で置き換える
-# ---------------------------------------------------------------------------
-sha256=$(sha256sum "$tmp" | awk '{print $1}')
-prev_sha256="(なし)"
-if [[ -e "$dest" ]]; then
-    prev_sha256=$(sha256sum "$dest" | awk '{print $1}')
-fi
-chmod 755 "$tmp"
-mv -f -T "$tmp" "$dest"
-trap - EXIT
-
-log "配置しました。env の変更と restart は operator が行います。"
-
-# ---------------------------------------------------------------------------
-# 6. fleet.env の *_BIN が配置先を指しているかを確認する (書き換えはしない)
-# ---------------------------------------------------------------------------
-# 指していない場合、fleet は別の binary (作業ディレクトリや PATH 上のもの) を起動し続ける。
-# 配置 (rename) は済ませたうえで、WARNING と出力の fleet.env 行で知らせ、exit 1 で終了する。
-fleet_env_status="OK"
-if [[ ! -f "$FLEET_ENV_FILE" ]]; then
-    fleet_env_status="NG ($FLEET_ENV_FILE がありません)"
-else
-    # 最後の定義を採り、値を囲む引用符を外す (systemd の EnvironmentFile と同じ扱い)。
-    env_value=$(sed -n "s/^[[:space:]]*\(export[[:space:]]\{1,\}\)\{0,1\}$BIN_ENV_KEY=//p" "$FLEET_ENV_FILE" | tail -n 1)
-    if [[ "$env_value" =~ ^\"(.*)\"$ || "$env_value" =~ ^\'(.*)\'$ ]]; then
-        env_value="${BASH_REMATCH[1]}"
+# fleet.env の <key> の値 (最後の定義、値を囲む引用符を外す。systemd の EnvironmentFile と同じ扱い)。
+fleet_env_value() {
+    local key=$1 value
+    [[ -f "$FLEET_ENV_FILE" ]] || return 0
+    value=$(sed -n "s/^[[:space:]]*\(export[[:space:]]\{1,\}\)\{0,1\}$key=//p" "$FLEET_ENV_FILE" | tail -n 1)
+    if [[ "$value" =~ ^\"(.*)\"$ || "$value" =~ ^\'(.*)\'$ ]]; then
+        value="${BASH_REMATCH[1]}"
     fi
+    printf '%s' "$value"
+}
+
+for bridge in "${bridges[@]}"; do
+    entity="$bridge@$version"
+    dest="$FLEET_BIN_DIR/$entity"
+    link="$FLEET_BIN_DIR/$bridge"
+
+    # -----------------------------------------------------------------------
+    # 3. 配置先と同じディレクトリの一時ファイルに build する
+    # -----------------------------------------------------------------------
+    tmp=$(mktemp "$FLEET_BIN_DIR/.$bridge.XXXXXX")
+    tmp_files+=("$tmp")
+    log "$bridge: build -> $tmp"
+    (cd "$bridges_dir/$bridge" && go build -o "$tmp" ./cmd/bridge)
+
+    # -----------------------------------------------------------------------
+    # 4. vcs 情報を確認する
+    # -----------------------------------------------------------------------
+    buildinfo=$(go version -m "$tmp")
+    vcs_revision=$(awk '$1 == "build" && $2 ~ /^vcs\.revision=/ { sub(/^vcs\.revision=/, "", $2); print $2 }' <<<"$buildinfo")
+    vcs_modified=$(awk '$1 == "build" && $2 ~ /^vcs\.modified=/ { sub(/^vcs\.modified=/, "", $2); print $2 }' <<<"$buildinfo")
+    [[ "$vcs_revision" == "$revision" ]] || die "$bridge: vcs.revision ($vcs_revision) が main ($revision) と一致しません"
+    [[ "$vcs_modified" == "false" ]] || die "$bridge: vcs.modified=$vcs_modified です (build 用 clone に変更があります)"
+
+    # -----------------------------------------------------------------------
+    # 5. バージョン付きの実体を置く (既存の実体は上書きしない)
+    # -----------------------------------------------------------------------
+    sha256=$(sha256sum "$tmp" | awk '{print $1}')
+    if [[ -e "$dest" || -L "$dest" ]]; then
+        existing_sha256=$(sha256sum "$dest" | awk '{print $1}')
+        [[ "$existing_sha256" == "$sha256" ]] ||
+            die "$bridge: $dest はすでにあり、sha256 が今回の build と違います ($existing_sha256 != $sha256)。上書きしません"
+        rm -f "$tmp"
+        placed="既存の実体と同じ (置き直していません)"
+    else
+        chmod 755 "$tmp"
+        mv -f -T "$tmp" "$dest"
+        placed="新しく置きました"
+    fi
+    log "$bridge: $dest: $placed"
+
+    # -----------------------------------------------------------------------
+    # 6. --activate のときだけ symlink を張り替える
+    # -----------------------------------------------------------------------
+    prev_target="(なし)"
+    if [[ -L "$link" ]]; then
+        prev_target=$(readlink "$link")
+    elif [[ -e "$link" ]]; then
+        prev_target="(symlink ではないファイル, sha256 $(sha256sum "$link" | awk '{print $1}'))"
+    fi
+    if [[ "$activate" == true ]]; then
+        tmp_link="$FLEET_BIN_DIR/.$bridge.link.$$"
+        tmp_files+=("$tmp_link")
+        ln -s -f -T "$entity" "$tmp_link"
+        mv -f -T "$tmp_link" "$link"
+        log "$bridge: symlink $link -> $entity に張り替えました"
+    else
+        log "$bridge: --activate がないので symlink は変えていません"
+    fi
+    link_target="(なし)"
+    if [[ -L "$link" ]]; then
+        link_target=$(readlink "$link")
+    elif [[ -e "$link" ]]; then
+        link_target="(symlink ではないファイル)"
+    fi
+
+    # -----------------------------------------------------------------------
+    # 7. 結果を出力する (fleet.env は読むだけ)
+    # -----------------------------------------------------------------------
+    env_key="AGENT_HUB_$(tr '[:lower:]-' '[:upper:]_' <<<"$bridge")_BIN"
+    env_value=$(fleet_env_value "$env_key")
     if [[ -z "$env_value" ]]; then
-        fleet_env_status="NG ($BIN_ENV_KEY が $FLEET_ENV_FILE にありません)"
-    elif [[ "$(realpath -m -- "$env_value")" != "$(realpath -m -- "$dest")" ]]; then
-        fleet_env_status="NG ($BIN_ENV_KEY=$env_value は配置先ではありません)"
+        env_status="未設定 (PATH から解決される)"
+    elif [[ "$(realpath -m -s -- "$env_value")" == "$(realpath -m -s -- "$link")" ]]; then
+        env_status="symlink を指しています"
+    else
+        env_status="symlink ではない $env_value を指しています (向け直しは operator)"
     fi
-fi
-if [[ "$fleet_env_status" != "OK" ]]; then
-    log "WARNING: fleet.env: $fleet_env_status"
-    log "WARNING: fleet は今回配置した binary を起動しません。$BIN_ENV_KEY=$dest への変更を operator に依頼してください。"
-fi
 
-cat <<EOF
+    cat <<EOF
+[$bridge]
 path:           $dest
 sha256:         $sha256
 vcs.revision:   $vcs_revision
 vcs.modified:   $vcs_modified
-sdk ref:        $sdk_ref
-prev sha256:    $prev_sha256
-fleet.env:      $fleet_env_status
-EOF
+sdk ref:        $([[ "$bridge" == bridge-claude2 ]] && echo "$sdk_ref (replace)" || echo "go.mod の require 版")
+symlink:        $link -> $link_target (前: $prev_target)
+$env_key: $env_status
 
-if [[ "$fleet_env_status" != "OK" ]]; then
-    log "ERROR: fleet.env の確認が NG のため失敗として終了します (binary は配置済み)"
-    exit 1
+EOF
+done
+
+if [[ "$activate" == true ]]; then
+    log "symlink を張り替えました。restart は operator が行います。"
+else
+    log "実体を置きました (symlink は変えていません)。切り替えは --activate で行います。"
 fi
