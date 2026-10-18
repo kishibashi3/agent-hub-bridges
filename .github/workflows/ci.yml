@@ -88,4 +88,8 @@ jobs:
           cache: false
 
       - name: Check agent-hub-sdk version
+        # 他 module の go 行が setup-go の版より新しくても、go mod edit に
+        # toolchain を download させない (network 不要の前提を保つ。issue #365)。
+        env:
+          GOTOOLCHAIN: local
         run: scripts/check-sdk-version.sh
