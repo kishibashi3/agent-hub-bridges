@@ -41,7 +41,8 @@ type controlRequest struct {
 		ToolName  string `json:"tool_name"`
 		ToolUseID string `json:"tool_use_id"`
 		ToolInput struct {
-			Command string `json:"command"`
+			Command         string `json:"command"`
+			RunInBackground bool   `json:"run_in_background"`
 		} `json:"tool_input"`
 	} `json:"input"`
 }
@@ -65,13 +66,21 @@ func handleControlRequest(w io.Writer, requestID string, raw json.RawMessage) {
 }
 
 // blockingHookOutput は hook_callback への応答 (hook output) を返す。
-// ブロック対象の Bash コマンドなら deny、それ以外 (未知の callback_id を含む) は空 = 許可。
+// run_in_background: true (issue #374) かブロック対象の Bash コマンドなら deny、
+// それ以外 (未知の callback_id を含む) は空 = 許可。
 func blockingHookOutput(req controlRequest) map[string]any {
 	if req.CallbackID != blockingHookCallbackID {
 		slog.Warn("runner: unknown hook callback_id, allowing", "callback_id", req.CallbackID)
 		return map[string]any{}
 	}
 	command := req.Input.ToolInput.Command
+	if req.Input.ToolInput.RunInBackground {
+		slog.Warn("[blocking-cmd] run_in_background detected, denying via PreToolUse hook",
+			"command_preview", truncate(command, 120),
+			"tool_use_id", req.Input.ToolUseID,
+		)
+		return denyHookOutput(backgroundDeniedMessage)
+	}
 	pattern := checkBlockingCommand(command)
 	if pattern == "" {
 		return map[string]any{}
@@ -81,11 +90,23 @@ func blockingHookOutput(req controlRequest) map[string]any {
 		"command_preview", truncate(command, 120),
 		"tool_use_id", req.Input.ToolUseID,
 	)
+	return denyHookOutput(buildBlockingErrorMessage(pattern))
+}
+
+// backgroundDeniedMessage は run_in_background: true を deny するときの理由 (issue #374)。
+// bridge は依頼ごとに claude を終わらせるので、バックグラウンドのタスクは残らない。
+const backgroundDeniedMessage = "Error: run_in_background is not available in this bridge.\n" +
+	"This bridge ends the claude process after each request, so background tasks do not survive.\n\n" +
+	"If you need to wait, use @scheduler instead:\n" +
+	"  @scheduler /run_in 10m @<your-handle> <alternative-command>"
+
+// denyHookOutput は PreToolUse を deny する hook output を返す。
+func denyHookOutput(reason string) map[string]any {
 	return map[string]any{
 		"hookSpecificOutput": map[string]any{
 			"hookEventName":            "PreToolUse",
 			"permissionDecision":       "deny",
-			"permissionDecisionReason": buildBlockingErrorMessage(pattern),
+			"permissionDecisionReason": reason,
 		},
 	}
 }
