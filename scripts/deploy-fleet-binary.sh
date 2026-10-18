@@ -24,9 +24,8 @@
 #   1. build 用の clone (作業ディレクトリとは別) を origin/main に合わせる。
 #      git worktree は使わない (vcs 情報が binary に付かないため)。
 #      --revision があれば、origin/main の HEAD がその commit であることを確かめる。
-#   2. agent-hub-sdk を ci.yml の AGENT_HUB_SDK_REF で sibling に clone する
-#      (bridge-claude2/go.mod の replace ../../agent-hub-sdk/go 用。CI と同じ ref)。
-#      bridge-codex2 / bridge-tmux は replace を持たないので go.mod の require 版を使う。
+#   2. (なし) agent-hub-sdk は 3 bridge とも go.mod の pseudo-version で取り込むので、
+#      sibling clone は作らない (#328)。SDK の版は各 bridge の go.mod / go.sum で決まる。
 #   3〜5 は対象の bridge すべてに行い、すべて通ってから 6 に進む (#351)。途中の bridge で
 #   失敗すると、symlink は 1 つも張り替えない (置いた実体は残るが、起動する binary は変わらない)。
 #   3. bridge ごとに、配置先と同じディレクトリの一時ファイルに build する。
@@ -47,7 +46,6 @@
 #   FLEET_BIN_DIR      配置先ディレクトリ (既定: ~/.agent-hub/bin)。PATH には入れない。
 #   FLEET_BUILD_ROOT   build 用 clone の置き場所 (既定: ~/.agent-hub/build)
 #   BRIDGES_REPO_URL   agent-hub-bridges の clone 元 (既定: GitHub の https URL)
-#   SDK_REPO_URL       agent-hub-sdk の clone 元 (既定: GitHub の https URL)
 #   FLEET_ENV_FILE     確認する fleet.env (既定: ~/.agent-hub/fleet.env)。読むだけで書き換えない。
 
 set -euo pipefail
@@ -56,11 +54,9 @@ ALL_BRIDGES=(bridge-claude2 bridge-codex2 bridge-tmux)
 FLEET_BIN_DIR="${FLEET_BIN_DIR:-$HOME/.agent-hub/bin}"
 FLEET_BUILD_ROOT="${FLEET_BUILD_ROOT:-$HOME/.agent-hub/build}"
 BRIDGES_REPO_URL="${BRIDGES_REPO_URL:-https://github.com/kishibashi3/agent-hub-bridges.git}"
-SDK_REPO_URL="${SDK_REPO_URL:-https://github.com/kishibashi3/agent-hub-sdk.git}"
 FLEET_ENV_FILE="${FLEET_ENV_FILE:-$HOME/.agent-hub/fleet.env}"
 
 bridges_dir="$FLEET_BUILD_ROOT/agent-hub-bridges"
-sdk_dir="$FLEET_BUILD_ROOT/agent-hub-sdk"
 
 log() { echo "[deploy-fleet-binary] $*" >&2; }
 die() { log "ERROR: $*"; exit 1; }
@@ -120,21 +116,6 @@ if [[ -n "$want_revision" && "$revision" != "$want_revision"* ]]; then
     die "origin/main ($revision) が指定の revision ($want_revision) と違います。build も symlink の張り替えもしません"
 fi
 
-# ---------------------------------------------------------------------------
-# 2. agent-hub-sdk を CI と同じ ref で置く
-# ---------------------------------------------------------------------------
-sdk_ref=$(sed -n 's/^[[:space:]]*AGENT_HUB_SDK_REF:[[:space:]]*\([0-9a-f]\{40\}\)[[:space:]]*$/\1/p' \
-    "$bridges_dir/.github/workflows/ci.yml")
-[[ -n "$sdk_ref" ]] || die "ci.yml から AGENT_HUB_SDK_REF を取得できません"
-if [[ ! -d "$sdk_dir/.git" ]]; then
-    git init -q "$sdk_dir"
-fi
-git -C "$sdk_dir" fetch -q --depth 1 "$SDK_REPO_URL" "$sdk_ref"
-git -C "$sdk_dir" checkout -q --force --detach FETCH_HEAD
-git -C "$sdk_dir" clean -q -fdx
-[[ "$(git -C "$sdk_dir" rev-parse HEAD)" == "$sdk_ref" ]] || die "agent-hub-sdk を $sdk_ref に合わせられません"
-log "agent-hub-sdk = $sdk_ref"
-
 # fleet.env の <key> の値 (最後の定義、値を囲む引用符を外す。systemd の EnvironmentFile と同じ扱い)。
 fleet_env_value() {
     local key=$1 value
@@ -150,6 +131,7 @@ fleet_env_value() {
 sha256s=()
 vcs_revisions=()
 vcs_modifieds=()
+buildinfos=()
 
 for bridge in "${bridges[@]}"; do
     entity="$bridge@$version"
@@ -192,6 +174,7 @@ for bridge in "${bridges[@]}"; do
     sha256s+=("$sha256")
     vcs_revisions+=("$vcs_revision")
     vcs_modifieds+=("$vcs_modified")
+    buildinfos+=("$buildinfo")
 done
 
 # ---------------------------------------------------------------------------
@@ -253,7 +236,7 @@ path:           $dest
 sha256:         ${sha256s[$i]}
 vcs.revision:   ${vcs_revisions[$i]}
 vcs.modified:   ${vcs_modifieds[$i]}
-sdk ref:        $([[ "$bridge" == bridge-claude2 ]] && echo "$sdk_ref (replace)" || echo "go.mod の require 版")
+sdk:            $(awk '$1 == "dep" && $2 == "github.com/kishibashi3/agent-hub-sdk/go" { print $3 }' <<<"${buildinfos[$i]}")
 symlink:        $link -> $link_target (前: ${prev_targets[$i]})
 $env_key: $env_status
 

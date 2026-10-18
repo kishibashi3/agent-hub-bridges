@@ -4,7 +4,7 @@ go 1.25.0
 
 require (
 	github.com/kishibashi3/agent-hub-bridges/packages/github-client v0.0.0
-	github.com/kishibashi3/agent-hub-sdk/go v0.0.0-20260608021050-36d9b7bb87a6
+	github.com/kishibashi3/agent-hub-sdk/go v0.0.0-20260919213318-6bdf19dd4c84
 	go.opentelemetry.io/otel v1.44.0
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp v1.44.0
 	go.opentelemetry.io/otel/sdk v1.44.0
@@ -30,7 +30,5 @@ require (
 	google.golang.org/grpc v1.81.1 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
 )
-
-replace github.com/kishibashi3/agent-hub-sdk/go => ../../agent-hub-sdk/go
 
 replace github.com/kishibashi3/agent-hub-bridges/packages/github-client => ../packages/github-client
