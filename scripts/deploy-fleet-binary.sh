@@ -42,13 +42,16 @@
 #      fleet.env は読むだけで、symlink を指していなくても失敗にはしない
 #      (env をやめて symlink を参照する方針 (#348)。向け直しは operator が行う)。
 #
-# 同じ revision で sha256 が違って止まったとき (#352):
-#   実体の名前は revision だけで決まるので、Go の版 (や CGO_ENABLED / GOFLAGS) が前回と
-#   違うと、同じ revision でも別の binary になり、5 で止まる。エラーに出る 2 つの Go の版を見て、
-#   どちらかで直す。
-#   a. 既存の実体と同じ Go で build し直す (既存の実体はそのまま使われる):
-#        GOTOOLCHAIN=<既存の実体の Go の版> scripts/deploy-fleet-binary.sh ...
-#      Go の版が同じなら、エラーに出る build 設定の違い (CGO_ENABLED / GOFLAGS 等) を前回に揃える。
+# 同じ revision で sha256 が違って止まったとき (#352, #363):
+#   実体の名前は revision だけで決まるので、Go の版 (や CGO_ENABLED / GOFLAGS / GOEXPERIMENT)、
+#   build した場所 (FLEET_BUILD_ROOT)、GOROOT の場所が前回と違うと、同じ revision でも
+#   別の binary になり、5 で止まる。エラーに出る Go の版と build 設定の違いを見て、どれかで直す。
+#   a. 既存の実体と同じ条件で build し直す (既存の実体はそのまま使われる):
+#        GOTOOLCHAIN=<エラーに出る既存の実体の toolchain> scripts/deploy-fleet-binary.sh ...
+#      build 設定の違い (CGO_ENABLED / GOFLAGS / GOEXPERIMENT 等) があれば前回に揃える。
+#      build 設定の違いが空なら、build した場所や GOROOT の場所が違う可能性がある。
+#      FLEET_BUILD_ROOT と toolchain の場所 (mise の toolchain かダウンロードした toolchain か等) を
+#      前回に揃える。揃えられなければ b。
 #   b. 新しい Go の binary にしたいときは、main に新しい commit が入ってから deploy する
 #      (revision が変わるので別の実体になる)。
 #   既存の実体は消さない。symlink が指している実体や、戻し先として残している実体を
@@ -185,13 +188,26 @@ for bridge in "${bridges[@]}"; do
         existing_sha256=$(sha256sum "$dest" | awk '{print $1}')
         if [[ "$existing_sha256" != "$sha256" ]]; then
             existing_buildinfo=$(go version -m "$dest" 2>/dev/null || true)
-            existing_go=$(awk 'NR == 1 { print $NF }' <<<"$existing_buildinfo")
-            new_go=$(awk 'NR == 1 { print $NF }' <<<"$buildinfo")
+            # 1 行目は "<file>: <Go の版>"。GOEXPERIMENT 付きの build では版が
+            # go1.26.4-X:jsonv2 のようになるので、$NF ではなく "<file>: " より後をすべて使い、
+            # GOTOOLCHAIN に渡す toolchain 名は "-X:" より前だけにする。
+            existing_go=""
+            if [[ -n "$existing_buildinfo" ]]; then
+                existing_go=${existing_buildinfo%%$'\n'*}
+                existing_go=${existing_go#"$dest: "}
+            fi
+            new_go=${buildinfo%%$'\n'*}
+            new_go=${new_go#"$tmp: "}
             log "$bridge: Go の版: 既存の実体 ${existing_go:-(読めません)} / 今回の build $new_go"
-            if [[ -n "$existing_go" && "$existing_go" == "$new_go" ]]; then
-                # Go の版が同じなら build 設定の違いを出す (CGO_ENABLED / GOFLAGS 等)。
+            if [[ -n "$existing_go" ]]; then
+                log "$bridge: 既存の実体の toolchain: ${existing_go%%-X:*} (復旧手順 a の GOTOOLCHAIN に渡す値)"
+                # build 設定の違いは Go の版にかかわらず出す (CGO_ENABLED / GOFLAGS / GOEXPERIMENT 等)。
                 log "$bridge: build 設定の違い (< 既存の実体 / > 今回の build):"
-                diff <(awk '$1 == "build"' <<<"$existing_buildinfo") <(awk '$1 == "build"' <<<"$buildinfo") >&2 || true
+                if diff <(awk '$1 == "build"' <<<"$existing_buildinfo") <(awk '$1 == "build"' <<<"$buildinfo") >&2; then
+                    if [[ "$existing_go" == "$new_go" ]]; then
+                        log "$bridge: build 設定は同じです。build した場所 (FLEET_BUILD_ROOT) や GOROOT の場所が前回と違う可能性があります"
+                    fi
+                fi
             fi
             die "$bridge: $dest はすでにあり、sha256 が今回の build と違います ($existing_sha256 != $sha256)。上書きしません (復旧手順は script 冒頭のコメント「同じ revision で sha256 が違って止まったとき」)"
         fi
