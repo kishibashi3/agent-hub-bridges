@@ -320,6 +320,14 @@ func runHubSession(
 			}
 		}
 
+		// issue #355: 処理中に SIGTERM を受けると、select で ctx.Done() と pushCh /
+		// pollTicker.C が同時に準備完了になり、Go の select はランダムに選ぶ。
+		// push / poll が選ばれても、キャンセル済みの ctx で GetMessages を呼ばずに drain へ進む。
+		if ctx.Err() != nil {
+			runGracefulDrain(client, runner, cfg, cursor, tracker, journal, selfHandle, sleeper)
+			return cursor, true, ctx.Err()
+		}
+
 		msgs, err := client.GetMessages(ctx)
 		if err != nil {
 			slog.Warn("runHubSession: get_messages error", "err", err)
