@@ -538,6 +538,16 @@ func handleOne(
 		recordInnerHandled(runner, msg.ID, usage.InnerHandledIDs)
 
 		if err == nil {
+			// issue #337: stop の SIGTERM は内側 claude にも届き、claude は中断した turn を
+			// is_error=false の result で終える。エラーにならないので下の中断通知の分岐を
+			// 通らず、返信 0 通のまま「処理済み」になっていた。停止が掛かっていて、内側が
+			// この依頼にまだ返信していなければ、中断として通知を 1 通送る。
+			if ctx.Err() != nil && !usage.repliedTo(msg.ID) {
+				slog.Info("handleOne: query ended without reply during shutdown — sending interrupt notice (issue #337)",
+					"msg_id", msg.ID, "err", ctx.Err())
+				sendInterruptNotice(ctx, client, journal, msg)
+				return nil
+			}
 			slog.Info("→ message processed", "msg_id", msg.ID, "from", msg.Sender)
 			return nil
 		}
@@ -591,8 +601,10 @@ func handleOne(
 
 	// issue #240: SIGTERM 等で ctx がキャンセルされた状態の query 失敗
 	// (context.Canceled) はシャットダウン時の期待動作であり実エラーではない。
-	// 送信者への擬陽性エラー報告をスキップする。journalledSend を呼ばないことで
-	// journal.write 自体を回避し、次回起動時の replay による遅延誤送信も防ぐ。
+	// 送信者への擬陽性エラー報告はスキップする。キャンセル済み ctx で送ると送信に失敗して
+	// journal に残り、次回起動時の replay で遅延誤送信になるため。
+	// issue #337: 代わりに「停止で中断した」旨の通知を 1 通、キャンセルを切り離した ctx で
+	// 送る (interrupt.go)。送らないと、既読化済みの依頼への返信が 0 通になる。
 	//
 	// この分岐 (ctx.Err() != nil) は context.Canceled だけでなく
 	// context.DeadlineExceeded も捕捉する点に注意 (issue #250):
@@ -601,11 +613,12 @@ func handleOne(
 	//     時間内に終われば ctx.Err() == nil なので通常どおりエラー報告される。
 	//     ただし drain timeout (runGracefulDrain の compactTimeout + SubprocessTimeout
 	//     + 1分) を超過した場合は ctx.Err() == context.DeadlineExceeded となり、
-	//     この分岐で抑制される。drain は時間制限付きの best-effort なので、timeout
-	//     超過後のエラー報告も実質的に擬陽性であり、抑制は意図的な挙動である。
+	//     この分岐に入る。drain は時間制限付きの best-effort なので、timeout
+	//     超過後のエラー報告も実質的に擬陽性であり、エラーではなく中断通知を送る。
 	if ctx.Err() != nil {
-		slog.Info("handleOne: query cancelled by shutdown — suppressing error report",
+		slog.Info("handleOne: query cancelled by shutdown — sending interrupt notice instead of error report (issue #337)",
 			"msg_id", msg.ID, "err", lastErr)
+		sendInterruptNotice(ctx, client, journal, msg)
 		return lastErr
 	}
 
