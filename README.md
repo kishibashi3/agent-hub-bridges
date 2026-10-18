@@ -94,6 +94,26 @@ pytest
 ruff check src/
 ```
 
+### Go bridges: agent-hub-sdk の取り込みと bump 手順 (issue #328)
+
+Go の bridge 3 つ (`bridge-claude2` / `bridge-codex2` / `bridge-tmux`) は、`agent-hub-sdk/go` を
+**go.mod の pseudo-version で取り込む** (`replace` で sibling clone を参照しない)。SDK の版は各 module の
+`go.mod` / `go.sum` だけで決まり、CI・`scripts/deploy-fleet-binary.sh` も同じ版で build する。
+agent-hub-sdk は `go/vX.Y.Z` 形式の tag を持たないので、commit SHA から pseudo-version を作る。
+
+SDK を上げるときは、3 module すべてで同じ commit を指定する (1 つでも漏らさない):
+
+```bash
+SDK_SHA=<agent-hub-sdk の commit SHA (40 桁)>
+for m in bridge-claude2 bridge-codex2 bridge-tmux; do
+  (cd "$m" && go get "github.com/kishibashi3/agent-hub-sdk/go@$SDK_SHA" && go mod tidy)
+done
+grep -h 'agent-hub-sdk/go ' bridge-*/go.mod   # 3 行とも同じ pseudo-version になっていること
+```
+
+未 push の SDK 変更と合わせて手元で試すときは、commit しない `go.work` を使う
+(`go work init ./bridge-claude2 && go work use ../agent-hub-sdk/go` など)。`go.mod` に `replace` は足さない。
+
 Issues live at [`kishibashi3/agent-hub-bridges/issues`](https://github.com/kishibashi3/agent-hub-bridges/issues).
 Use labels `bridge:<name>` + `type:<kind>` (= `feat` / `bug` / `doc` / `refactor`).
 

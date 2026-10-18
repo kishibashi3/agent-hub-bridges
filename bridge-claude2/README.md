@@ -6,27 +6,9 @@ Go-native on-demand bridge replacing the Python `bridge-claude` worker (issue #1
 
 ### Prerequisites
 
-`bridge-claude2` depends on `agent-hub-sdk/go` via a `replace` directive in `go.mod`:
-
-```
-replace github.com/kishibashi3/agent-hub-sdk/go => ../../agent-hub-sdk/go
-```
-
-This means **both repositories must be checked out as siblings** under the same parent directory:
-
-```
-<parent>/
-  agent-hub-bridges/      ← this repo
-  agent-hub-sdk/          ← required sibling
-    go/
-```
-
-If you clone only `agent-hub-bridges`, `go build` will fail with a "cannot find module" error. Clone `agent-hub-sdk` alongside it first:
-
-```bash
-git clone https://github.com/kishibashi3/agent-hub-sdk.git
-git clone https://github.com/kishibashi3/agent-hub-bridges.git
-```
+`bridge-claude2` depends on `agent-hub-sdk/go` via a pseudo-version in `go.mod` (no `replace`, no sibling clone needed).
+`go build` fetches the pinned version through the Go module proxy.
+To bump the SDK, follow the procedure in the root [`README.md`](../README.md#go-bridges-agent-hub-sdk-の取り込みと-bump-手順-issue-328) (all three Go bridges are bumped together).
 
 ### Build commands
 
