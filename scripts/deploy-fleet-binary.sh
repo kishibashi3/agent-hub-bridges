@@ -2,11 +2,14 @@
 # deploy-fleet-binary.sh — fleet 用の bridge binary を main から build して配置する (issue #285 / #349)
 #
 # 使い方:
-#   scripts/deploy-fleet-binary.sh [--activate] [bridge ...]
+#   scripts/deploy-fleet-binary.sh [--activate] [--revision <commit>] [bridge ...]
 #
 #   bridge を省略すると bridge-claude2 / bridge-codex2 / bridge-tmux の 3 つを対象にする。
 #   --activate を付けたときだけ symlink を張り替える。付けなければ実体を置くだけで、
 #   fleet が起動する binary は変わらない。
+#   --revision には試した版の commit (7〜40 桁の 16 進) を渡す。origin/main の HEAD が
+#   その commit でなければ、build も張り替えもせずに失敗する (#351)。--activate のときは
+#   --revision が必須 (試していない版に張り替えないため)。
 #
 # 配置の形:
 #   $FLEET_BIN_DIR/<bridge>@<revision 先頭 12 桁>   バージョン付きの実体 (上書きしない)
@@ -20,14 +23,20 @@
 # 処理:
 #   1. build 用の clone (作業ディレクトリとは別) を origin/main に合わせる。
 #      git worktree は使わない (vcs 情報が binary に付かないため)。
+#      --revision があれば、origin/main の HEAD がその commit であることを確かめる。
 #   2. agent-hub-sdk を ci.yml の AGENT_HUB_SDK_REF で sibling に clone する
 #      (bridge-claude2/go.mod の replace ../../agent-hub-sdk/go 用。CI と同じ ref)。
 #      bridge-codex2 / bridge-tmux は replace を持たないので go.mod の require 版を使う。
+#   3〜5 は対象の bridge すべてに行い、すべて通ってから 6 に進む (#351)。途中の bridge で
+#   失敗すると、symlink は 1 つも張り替えない (置いた実体は残るが、起動する binary は変わらない)。
 #   3. bridge ごとに、配置先と同じディレクトリの一時ファイルに build する。
 #   4. vcs.revision が main の HEAD と一致し、vcs.modified=false であることを確認する。
 #   5. rename で <bridge>@<revision> に置く。同じ名前の実体がすでにあり sha256 が同じなら
 #      そのまま使う。sha256 が違えば上書きせずに失敗する (版の名前と中身を 1 対 1 に保つため)。
 #   6. --activate のときだけ、symlink を rename で <bridge>@<revision> に張り替える。
+#      一時 symlink を先に全部作ってから、rename だけを続けて行う。rename 自体が途中で
+#      失敗したとき (ディスクや権限の異常) は、それより前の bridge だけ張り替わる。
+#      3 つまとめての原子性は無い。
 #   7. bridge ごとに、実体・sha256・vcs.revision・symlink の向き先・fleet.env の *_BIN を出力する。
 #      fleet.env は読むだけで、symlink を指していなくても失敗にはしない
 #      (env をやめて symlink を参照する方針 (#348)。向け直しは operator が行う)。
@@ -56,15 +65,30 @@ sdk_dir="$FLEET_BUILD_ROOT/agent-hub-sdk"
 log() { echo "[deploy-fleet-binary] $*" >&2; }
 die() { log "ERROR: $*"; exit 1; }
 
+usage="$0 [--activate] [--revision <commit>] [bridge-claude2|bridge-codex2|bridge-tmux ...]"
 activate=false
+want_revision=""
 bridges=()
-for arg in "$@"; do
-    case "$arg" in
+while [[ $# -gt 0 ]]; do
+    case "$1" in
         --activate) activate=true ;;
-        bridge-claude2 | bridge-codex2 | bridge-tmux) bridges+=("$arg") ;;
-        *) die "知らない引数です: $arg (使い方: $0 [--activate] [bridge-claude2|bridge-codex2|bridge-tmux ...])" ;;
+        --revision)
+            [[ $# -ge 2 ]] || die "--revision に commit がありません (使い方: $usage)"
+            want_revision=$2
+            shift
+            ;;
+        --revision=*) want_revision=${1#--revision=} ;;
+        bridge-claude2 | bridge-codex2 | bridge-tmux) bridges+=("$1") ;;
+        *) die "知らない引数です: $1 (使い方: $usage)" ;;
     esac
+    shift
 done
+if [[ -n "$want_revision" && ! "$want_revision" =~ ^[0-9a-f]{7,40}$ ]]; then
+    die "--revision は 7〜40 桁の 16 進 (小文字) の commit で指定してください: $want_revision"
+fi
+if [[ "$activate" == true && -z "$want_revision" ]]; then
+    die "--activate には --revision <試した版の commit> が必要です (試していない版に張り替えないため)"
+fi
 if [[ ${#bridges[@]} -eq 0 ]]; then
     bridges=("${ALL_BRIDGES[@]}")
 fi
@@ -92,6 +116,9 @@ git -C "$bridges_dir" clean -q -fdx
 revision=$(git -C "$bridges_dir" rev-parse HEAD)
 version="${revision:0:12}"
 log "agent-hub-bridges main = $revision"
+if [[ -n "$want_revision" && "$revision" != "$want_revision"* ]]; then
+    die "origin/main ($revision) が指定の revision ($want_revision) と違います。build も symlink の張り替えもしません"
+fi
 
 # ---------------------------------------------------------------------------
 # 2. agent-hub-sdk を CI と同じ ref で置く
@@ -119,10 +146,14 @@ fleet_env_value() {
     printf '%s' "$value"
 }
 
+# 3〜5 の結果。6・7 で使う (添字は bridges と同じ)。
+sha256s=()
+vcs_revisions=()
+vcs_modifieds=()
+
 for bridge in "${bridges[@]}"; do
     entity="$bridge@$version"
     dest="$FLEET_BIN_DIR/$entity"
-    link="$FLEET_BIN_DIR/$bridge"
 
     # -----------------------------------------------------------------------
     # 3. 配置先と同じディレクトリの一時ファイルに build する
@@ -158,24 +189,44 @@ for bridge in "${bridges[@]}"; do
     fi
     log "$bridge: $dest: $placed"
 
-    # -----------------------------------------------------------------------
-    # 6. --activate のときだけ symlink を張り替える
-    # -----------------------------------------------------------------------
+    sha256s+=("$sha256")
+    vcs_revisions+=("$vcs_revision")
+    vcs_modifieds+=("$vcs_modified")
+done
+
+# ---------------------------------------------------------------------------
+# 6. --activate のときだけ symlink を張り替える (3〜5 がすべて通った後)
+# ---------------------------------------------------------------------------
+prev_targets=()
+for bridge in "${bridges[@]}"; do
+    link="$FLEET_BIN_DIR/$bridge"
     prev_target="(なし)"
     if [[ -L "$link" ]]; then
         prev_target=$(readlink "$link")
     elif [[ -e "$link" ]]; then
         prev_target="(symlink ではないファイル, sha256 $(sha256sum "$link" | awk '{print $1}'))"
     fi
-    if [[ "$activate" == true ]]; then
+    prev_targets+=("$prev_target")
+done
+if [[ "$activate" == true ]]; then
+    # 一時 symlink を先に全部作る。ここで失敗しても本物の symlink は変わらない。
+    for bridge in "${bridges[@]}"; do
         tmp_link="$FLEET_BIN_DIR/.$bridge.link.$$"
         tmp_files+=("$tmp_link")
-        ln -s -f -T "$entity" "$tmp_link"
-        mv -f -T "$tmp_link" "$link"
-        log "$bridge: symlink $link -> $entity に張り替えました"
-    else
-        log "$bridge: --activate がないので symlink は変えていません"
-    fi
+        ln -s -f -T "$bridge@$version" "$tmp_link"
+    done
+    for bridge in "${bridges[@]}"; do
+        mv -f -T "$FLEET_BIN_DIR/.$bridge.link.$$" "$FLEET_BIN_DIR/$bridge"
+        log "$bridge: symlink $FLEET_BIN_DIR/$bridge -> $bridge@$version に張り替えました"
+    done
+else
+    log "--activate がないので symlink は変えていません"
+fi
+
+for i in "${!bridges[@]}"; do
+    bridge=${bridges[$i]}
+    dest="$FLEET_BIN_DIR/$bridge@$version"
+    link="$FLEET_BIN_DIR/$bridge"
     link_target="(なし)"
     if [[ -L "$link" ]]; then
         link_target=$(readlink "$link")
@@ -199,11 +250,11 @@ for bridge in "${bridges[@]}"; do
     cat <<EOF
 [$bridge]
 path:           $dest
-sha256:         $sha256
-vcs.revision:   $vcs_revision
-vcs.modified:   $vcs_modified
+sha256:         ${sha256s[$i]}
+vcs.revision:   ${vcs_revisions[$i]}
+vcs.modified:   ${vcs_modifieds[$i]}
 sdk ref:        $([[ "$bridge" == bridge-claude2 ]] && echo "$sdk_ref (replace)" || echo "go.mod の require 版")
-symlink:        $link -> $link_target (前: $prev_target)
+symlink:        $link -> $link_target (前: ${prev_targets[$i]})
 $env_key: $env_status
 
 EOF
