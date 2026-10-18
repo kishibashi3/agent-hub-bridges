@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"strconv"
 )
 
 // blockingHookCallbackID は initialize で登録する PreToolUse フックの callback ID。
@@ -41,10 +42,33 @@ type controlRequest struct {
 		ToolName  string `json:"tool_name"`
 		ToolUseID string `json:"tool_use_id"`
 		ToolInput struct {
-			Command         string `json:"command"`
-			RunInBackground bool   `json:"run_in_background"`
+			Command string `json:"command"`
+			// RunInBackground は型を決めずに受ける (issue #379)。bool で受けると "true" などの
+			// 想定外の型で control_request 全体の parse が失敗し、pattern の deny まで効かなくなる。
+			RunInBackground json.RawMessage `json:"run_in_background"`
 		} `json:"tool_input"`
 	} `json:"input"`
+}
+
+// runInBackground は run_in_background を寛容に解釈する (issue #379)。
+// bool と、strconv.ParseBool で読める文字列 ("true" 等) を受け付ける。
+// 省略・null・解釈できない値は false (解釈できない値は warn を残す)。
+func runInBackground(raw json.RawMessage) bool {
+	if len(raw) == 0 || string(raw) == "null" {
+		return false
+	}
+	var b bool
+	if err := json.Unmarshal(raw, &b); err == nil {
+		return b
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		if v, perr := strconv.ParseBool(s); perr == nil {
+			return v
+		}
+	}
+	slog.Warn("runner: unexpected run_in_background value, treating as false", "value", truncate(string(raw), 120))
+	return false
 }
 
 // handleControlRequest は CLI からの control_request に control_response を返す。
@@ -74,7 +98,7 @@ func blockingHookOutput(req controlRequest) map[string]any {
 		return map[string]any{}
 	}
 	command := req.Input.ToolInput.Command
-	if req.Input.ToolInput.RunInBackground {
+	if runInBackground(req.Input.ToolInput.RunInBackground) {
 		slog.Warn("[blocking-cmd] run_in_background detected, denying via PreToolUse hook",
 			"command_preview", truncate(command, 120),
 			"tool_use_id", req.Input.ToolUseID,

@@ -44,7 +44,12 @@ func parseControlResponses(t *testing.T, out string) []controlResponseLine {
 	return lines
 }
 
-func hookCallbackLine(requestID, callbackID, command string, background bool) string {
+// background は run_in_background にそのまま入れる (bool 以外の型も試すため any、nil なら省略)。
+func hookCallbackLine(requestID, callbackID, command string, background any) string {
+	toolInput := map[string]any{"command": command}
+	if background != nil {
+		toolInput["run_in_background"] = background
+	}
 	b, _ := json.Marshal(map[string]any{
 		"type":       "control_request",
 		"request_id": requestID,
@@ -55,7 +60,7 @@ func hookCallbackLine(requestID, callbackID, command string, background bool) st
 				"hook_event_name": "PreToolUse",
 				"tool_name":       "Bash",
 				"tool_use_id":     "toolu_1",
-				"tool_input":      map[string]any{"command": command, "run_in_background": background},
+				"tool_input":      toolInput,
 			},
 		},
 	})
@@ -230,5 +235,95 @@ func TestBlockingHookOutput_DeniesRunInBackground(t *testing.T) {
 	// フォアグラウンドのブロック対象外コマンドは今までどおり許可
 	if got[2].Response.Subtype != "success" || got[2].Response.Response.HookSpecificOutput != nil {
 		t.Errorf("[2] = %+v, want empty success", got[2].Response)
+	}
+}
+
+// run_in_background は bool でも文字列 "true" でも deny されること (issue #379)。
+func TestBlockingHookOutput_DeniesRunInBackgroundString(t *testing.T) {
+	input := strings.Join([]string{
+		hookCallbackLine("s1", blockingHookCallbackID, "touch MARK; sleep 3", true),
+		hookCallbackLine("s2", blockingHookCallbackID, "touch MARK; sleep 3", "true"),
+		hookCallbackLine("s3", blockingHookCallbackID, "touch MARK; sleep 3", "false"),
+		resultLine,
+	}, "\n") + "\n"
+	var stdin bytes.Buffer
+	if _, err := readUntilResult(context.Background(), newStreamScanner(strings.NewReader(input), 1<<20), &stdin, nil, false); err != nil {
+		t.Fatalf("readUntilResult err = %v", err)
+	}
+	got := parseControlResponses(t, stdin.String())
+	if len(got) != 3 {
+		t.Fatalf("got %d control_responses, want 3: %s", len(got), stdin.String())
+	}
+	for _, i := range []int{0, 1} {
+		h := got[i].Response.Response.HookSpecificOutput
+		if got[i].Response.Subtype != "success" || h == nil || h.PermissionDecision != "deny" ||
+			h.PermissionDecisionReason != backgroundDeniedMessage {
+			t.Fatalf("[%d] = %+v, want deny with backgroundDeniedMessage", i, got[i].Response)
+		}
+	}
+	if got[2].Response.Subtype != "success" || got[2].Response.Response.HookSpecificOutput != nil {
+		t.Errorf("[2] = %+v, want empty success", got[2].Response)
+	}
+}
+
+// run_in_background が想定外の型でも control_request の parse は失敗せず、
+// blocking command の pattern deny が効くこと (issue #379)。
+func TestBlockingHookOutput_PatternDenyWithUnexpectedBackgroundType(t *testing.T) {
+	cases := []struct {
+		name       string
+		background any
+	}{
+		{"number", 1},
+		{"object", map[string]any{"x": 1}},
+		{"array", []any{true}},
+		{"unparsable string", "yes please"},
+		{"null", nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			line := hookCallbackLine("u1", blockingHookCallbackID, "gh run watch 123", tc.background)
+			if tc.background == nil {
+				// nil は helper では省略になるので、明示的な null を入れる
+				line = strings.Replace(line, `"command":"gh run watch 123"`, `"command":"gh run watch 123","run_in_background":null`, 1)
+			}
+			var stdin bytes.Buffer
+			if _, err := readUntilResult(context.Background(), newStreamScanner(strings.NewReader(line+"\n"+resultLine+"\n"), 1<<20), &stdin, nil, false); err != nil {
+				t.Fatalf("readUntilResult err = %v", err)
+			}
+			got := parseControlResponses(t, stdin.String())
+			if len(got) != 1 {
+				t.Fatalf("got %d control_responses, want 1: %s", len(got), stdin.String())
+			}
+			h := got[0].Response.Response.HookSpecificOutput
+			if got[0].Response.Subtype != "success" || h == nil || h.PermissionDecision != "deny" {
+				t.Fatalf("response = %+v, want pattern deny", got[0].Response)
+			}
+			if h.PermissionDecisionReason == backgroundDeniedMessage {
+				t.Errorf("reason = backgroundDeniedMessage, want pattern deny reason")
+			}
+		})
+	}
+}
+
+func TestRunInBackground(t *testing.T) {
+	cases := []struct {
+		raw  string
+		want bool
+	}{
+		{"", false},
+		{"null", false},
+		{"true", true},
+		{"false", false},
+		{`"true"`, true},
+		{`"TRUE"`, true},
+		{`"false"`, false},
+		{`"yes please"`, false},
+		{"1", false},
+		{`{"x":1}`, false},
+	}
+	for _, tc := range cases {
+		if got := runInBackground(json.RawMessage(tc.raw)); got != tc.want {
+			t.Errorf("runInBackground(%q) = %v, want %v", tc.raw, got, tc.want)
+		}
 	}
 }
