@@ -30,6 +30,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"syscall"
 	"time"
 
 	githubclient "github.com/kishibashi3/agent-hub-bridges/packages/github-client"
@@ -38,6 +39,12 @@ import (
 // errSubprocessTimeout は SubprocessTimeout によって subprocess がキルされたことを示す sentinel。
 // worker.go の handleOne がリトライ判定に使う。context.Canceled (SIGTERM) とは区別される。
 var errSubprocessTimeout = errors.New("subprocess timeout")
+
+// subprocessTermGrace は停止・SubprocessTimeout で claude に SIGTERM を送ってから、子孫ごと
+// SIGKILL するまでの猶予 (issue #344)。claude は SIGTERM でツールの子を始末して 1〜1.2s で
+// 終わる (実測)。agenthubctl bridge stop の猶予 5s に収まるようにする。
+// テストから短くできるよう var にしている。
+var subprocessTermGrace = 2 * time.Second
 
 // streamAssistantContent は stream-json の assistant メッセージ内の content block。
 // tool_use の blocking 検出に使う。
@@ -376,6 +383,14 @@ func (r *claudeRunner) spawnSubprocess(ctx context.Context) (*exec.Cmd, io.Write
 	cmd := exec.CommandContext(ctx, r.cfg.ClaudeCLI, args...)
 	cmd.Dir = r.cfg.Workdir
 	cmd.Stderr = os.Stderr
+	// issue #344: 停止・SubprocessTimeout で ctx が終わったら、SIGKILL ではなく SIGTERM を送って
+	// claude 自身にツールの子 (setsid 済みのシェルや run_in_background のもの) を始末させる。
+	// 猶予内に終わらなければ子孫ごと SIGKILL する (proctree.go)。
+	cmd.SysProcAttr = newProcessGroupAttr()
+	cmd.Cancel = func() error { return terminateProcessTree(cmd.Process, subprocessTermGrace) }
+	// tree kill の後も stdout が閉じない場合に備えた Wait の上限。tree kill より先に Go 側の
+	// Process.Kill (claude だけの SIGKILL) が走らないよう、猶予より長くとる。
+	cmd.WaitDelay = subprocessTermGrace + time.Second
 
 	// GitHub App IAT モード (issue #73): IAT manager が設定されていれば GH_TOKEN を注入する。
 	// gh CLI は GH_TOKEN を GITHUB_TOKEN より優先して使うため、これで bot identity になる。
@@ -410,6 +425,25 @@ func (r *claudeRunner) spawnSubprocess(ctx context.Context) (*exec.Cmd, io.Write
 	// issue #299: AGENT_HUB_SCANNER_BUFFER_SIZE (#231) を使う。上限を超えた行は読み捨てて続行する。
 	scanner := newStreamScanner(stdoutPipe, r.cfg.ScannerBufferSize)
 	return cmd, stdinPipe, scanner, nil
+}
+
+// terminateProcessTree は p に SIGTERM を送り、grace 経っても終わっていなければ子孫ごと
+// SIGKILL する (issue #344)。exec.Cmd.Cancel から呼ばれる。SIGTERM の送信結果を返す。
+func terminateProcessTree(p *os.Process, grace time.Duration) error {
+	err := p.Signal(syscall.SIGTERM)
+	if errors.Is(err, os.ErrProcessDone) {
+		return err
+	}
+	time.AfterFunc(grace, func() {
+		// Wait 済みなら ErrProcessDone になる (pid の再利用先を kill しない)
+		if p.Signal(syscall.Signal(0)) != nil {
+			return
+		}
+		slog.Warn("runner: Claude subprocess did not exit after SIGTERM, killing process tree",
+			"pid", p.Pid, "grace", grace)
+		_ = killProcessTree(p.Pid)
+	})
+	return err
 }
 
 // filteredEnv は os.Environ() から GITHUB_APP_* を除いた環境変数スライスを返す。
