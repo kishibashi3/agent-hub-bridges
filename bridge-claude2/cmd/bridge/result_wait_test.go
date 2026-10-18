@@ -2,12 +2,14 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -76,6 +78,9 @@ func TestQuery_ResultThenLingering_TerminatedAfterLimit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("err = %v; want nil (result was received)", err)
 	}
+	if elapsed < resultExitLimit {
+		t.Errorf("query took %s; want >= limit %s (must not terminate before the limit)", elapsed, resultExitLimit)
+	}
 	if elapsed > resultExitLimit+subprocessTermGrace {
 		t.Errorf("query took %s; want <= limit %s + grace %s", elapsed, resultExitLimit, subprocessTermGrace)
 	}
@@ -132,5 +137,62 @@ func TestQuery_LargeOutputAfterResult_DoesNotBlock(t *testing.T) {
 	}
 	if elapsed >= resultExitLimit {
 		t.Errorf("query took %s; want < limit %s (stdout must keep being read)", elapsed, resultExitLimit)
+	}
+}
+
+// TestQuery_ExitedWithStdoutHeldByDescendant_ReturnsWithoutLimit: result の後に claude が
+// 終わっていれば、子孫が stdout を握っていても上限を待たずに戻る (issue #378)。
+// 止めてはいないので terminating の Warn は出ず、stdout が残っていることを Warn で残す。
+func TestQuery_ExitedWithStdoutHeldByDescendant_ReturnsWithoutLimit(t *testing.T) {
+	withResultExitLimit(t, 5*time.Second, 2*time.Second)
+	logBuf := captureSlog(t)
+
+	pidPath := filepath.Join(t.TempDir(), "child.pid")
+	// stdout を引き継いだ子を残して claude 本体は終わる
+	script := writeAfterResultFakeClaude(t, fmt.Sprintf("sleep 30 &\necho $! > '%s'\nexit 0", pidPath))
+
+	elapsed, err := runQueryWithTimeout(t, script, time.Minute)
+	child := waitPIDFile(t, pidPath)
+	_ = syscall.Kill(child, syscall.SIGKILL)
+	if err != nil {
+		t.Fatalf("err = %v; want nil", err)
+	}
+	if elapsed >= resultExitLimit {
+		t.Errorf("query took %s; claude exited, should not wait for limit %s", elapsed, resultExitLimit)
+	}
+	logs := logBuf.String()
+	if strings.Contains(logs, "terminating") {
+		t.Errorf("claude exited by itself; should not be terminated:\n%s", logs)
+	}
+	if !strings.Contains(logs, "stdout is still open") {
+		t.Errorf("held-stdout warn not logged:\n%s", logs)
+	}
+}
+
+// TestQuery_TimeoutBeforeResult_NoAfterResultLogs: result を受け取る前に SubprocessTimeout で
+// 止めた経路では、result の後の待ち・ログを通さない (issue #378)。SIGTERM を受けた claude が
+// 終わる前に出したイベントを after-result として Warn しない。
+func TestQuery_TimeoutBeforeResult_NoAfterResultLogs(t *testing.T) {
+	withResultExitLimit(t, 5*time.Second, 2*time.Second)
+	logBuf := captureSlog(t)
+
+	path := filepath.Join(t.TempDir(), "fake-claude-no-result")
+	ev := `{"type":"system","subtype":"status"}`
+	script := fmt.Sprintf("#!/bin/sh\nread -r _init\nread -r _msg\nsleep 30 &\nc=$!\n"+
+		"trap 'kill $c; echo '\\''%[1]s'\\''; echo '\\''%[1]s'\\''; exit 143' TERM\nwait\n", ev)
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	elapsed, err := runQueryWithTimeout(t, path, 500*time.Millisecond)
+	if !errors.Is(err, errSubprocessTimeout) {
+		t.Errorf("err = %v; want errSubprocessTimeout", err)
+	}
+	if elapsed >= resultExitLimit {
+		t.Errorf("query took %s; want < limit %s", elapsed, resultExitLimit)
+	}
+	logs := logBuf.String()
+	if strings.Contains(logs, "after result") || strings.Contains(logs, "stdout is still open") {
+		t.Errorf("after-result wait/log ran without a result:\n%s", logs)
 	}
 }

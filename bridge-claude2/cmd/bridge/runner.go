@@ -32,6 +32,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unsafe"
 
 	githubclient "github.com/kishibashi3/agent-hub-bridges/packages/github-client"
 )
@@ -51,6 +52,12 @@ var subprocessTermGrace = 2 * time.Second
 // タスクが終わるまで終わらず、終わると 2 回目のターンを自分で始める。上限を超えたら
 // terminateProcessTree で止める。テストから短くできるよう var にしている。
 var resultExitLimit = 10 * time.Second
+
+// exitedDrainGrace は result の後に claude が終わったのに stdout が閉じないとき、終わる前に
+// 書かれた分を読み切るために待つ時間 (issue #378)。claude の外に切り離された子孫 (setsid 済みの
+// シェル等) が stdout を握っていると EOF は来ないので、待ちきったら Wait に進む。
+// テストから短くできるよう var にしている。
+var exitedDrainGrace = 500 * time.Millisecond
 
 // streamAssistantContent は stream-json の assistant メッセージ内の content block。
 // tool_use の blocking 検出に使う。
@@ -132,6 +139,10 @@ type queryUsage struct {
 	// handleOne がこれを runner.innerHandled に積み、processMessages が次の GetMessages
 	// で同じ ID を skip する (innerhandled.go 参照)。
 	InnerHandledIDs []string
+	// ResultReceived は stdout から result イベントを受け取ったかどうか (issue #378)。
+	// false (ctx cancel / SubprocessTimeout / result なしの EOF 等) なら query は
+	// result の後の待ち (waitAfterResult) を通らない。
+	ResultReceived bool
 }
 
 // repliedTo は処理中の inbound msgID を caused_by に持つ send_message が
@@ -319,7 +330,14 @@ func (r *claudeRunner) query(ctx context.Context, prompt, sessionID string, trac
 
 	// EOF を送って subprocess を自然終了させる
 	stdinPipe.Close()
-	waitErr := waitAfterResult(cmd, scanner, resultExitLimit)
+	var waitErr error
+	if usage.ResultReceived {
+		waitErr = waitAfterResult(cmd, scanner, resultExitLimit)
+	} else {
+		// result を受け取っていない (ctx cancel / SubprocessTimeout なら cmd.Cancel で止めている
+		// 最中) ので、result の後の待ち・ログは通さない (issue #378)
+		waitErr = cmd.Wait()
+	}
 	if waitErr != nil {
 		slog.Debug("runner: subprocess exited with error", "pid", pid, "err", waitErr)
 	}
@@ -459,7 +477,10 @@ func terminateProcessTree(p *os.Process, grace time.Duration) error {
 // waitAfterResult は result の後に claude が終わるのを limit まで待ち、cmd.Wait() の結果を返す
 // (issue #374)。待っている間も stdout を読み続け (パイプが詰まって CLI の書き込みが止まらない
 // ように)、result の後に出てきたイベントは Warn でログに残す。limit を超えたら
-// terminateProcessTree で止める。
+// terminateProcessTree で止める。result を受け取った後にだけ呼ぶこと (issue #378)。
+//
+// 待つのは stdout の EOF ではなく claude 本体の終了 (issue #378)。claude の外に切り離された
+// 子孫が stdout を握っていると EOF は来ないが、claude が終わっていれば上限を待たずに戻る。
 func waitAfterResult(cmd *exec.Cmd, scanner *bufio.Scanner, limit time.Duration) error {
 	pid := cmd.Process.Pid
 	drained := make(chan struct{})
@@ -467,25 +488,61 @@ func waitAfterResult(cmd *exec.Cmd, scanner *bufio.Scanner, limit time.Duration)
 		defer close(drained)
 		drainAfterResult(scanner, pid)
 	}()
+	exited := make(chan struct{})
+	go func() {
+		defer close(exited)
+		waitExited(pid)
+	}()
 
 	timer := time.NewTimer(limit)
 	defer timer.Stop()
 	select {
 	case <-drained:
+	case <-exited:
+		waitDrainedAfterExit(drained, pid)
 	case <-timer.C:
 		slog.Warn("runner: Claude subprocess did not exit after result, terminating "+
 			"(background task left running? issue #374)",
 			"pid", pid, "limit", limit)
 		_ = terminateProcessTree(cmd.Process, subprocessTermGrace)
-		// 止める間に出たイベントもログに残せるよう、stdout の EOF をしばらく待つ。
-		// claude の外に切り離された子が stdout を握っていると EOF は来ないので、待ちきったら
-		// Wait に進む (Wait は claude の終了後に stdout を閉じるので、drain も抜ける)。
+		// 止める間に出たイベントもログに残せるよう、stdout の EOF か claude の終了をしばらく待つ
 		select {
 		case <-drained:
+		case <-exited:
+			waitDrainedAfterExit(drained, pid)
 		case <-time.After(subprocessTermGrace + time.Second):
 		}
 	}
-	return cmd.Wait()
+	// Wait は claude の終了後に stdout を閉じるので、drain も抜ける。drain が抜けるのを
+	// 待ってから戻り、query の後に after-result の Warn が出ないようにする。
+	err := cmd.Wait()
+	<-drained
+	return err
+}
+
+// waitDrainedAfterExit は claude の終了後、stdout の EOF を exitedDrainGrace まで待つ
+// (issue #378)。EOF が来なければ、claude の外に切り離された子孫が stdout を握っている。
+func waitDrainedAfterExit(drained <-chan struct{}, pid int) {
+	select {
+	case <-drained:
+	case <-time.After(exitedDrainGrace):
+		slog.Warn("runner: Claude subprocess exited but its stdout is still open "+
+			"(held by a detached descendant? issue #378)", "pid", pid)
+	}
+}
+
+// waitExited は pid の子プロセスが終わるまでブロックする。reap はしない (WNOWAIT) ので、
+// 終了ステータスは後の cmd.Wait() で受け取れる (issue #378)。待てなければ (ECHILD 等) すぐ戻る。
+func waitExited(pid int) {
+	const pPID = 1     // P_PID
+	var info [128]byte // siginfo_t
+	for {
+		_, _, errno := syscall.Syscall6(syscall.SYS_WAITID, pPID, uintptr(pid),
+			uintptr(unsafe.Pointer(&info[0])), syscall.WEXITED|syscall.WNOWAIT, 0, 0)
+		if errno != syscall.EINTR {
+			return
+		}
+	}
 }
 
 // drainAfterResult は result の後の stdout を EOF まで読み、出てきたイベントを Warn でログに
@@ -549,7 +606,6 @@ func writeJSON(w io.Writer, v any) error {
 func readUntilResult(ctx context.Context, scanner *bufio.Scanner, stdinWriter io.Writer, tracker *activityTracker, isCompact bool) (queryUsage, error) {
 	var usage queryUsage
 	var resultErr error
-	resultReceived := false
 	// pending は send_message / mark_as_read の tool_use を観測した際の tool_use_id →
 	// 抜き出した inbound ID 群 (issue #266 / #264)。後続の "user" イベントに含まれる
 	// 対応する tool_result (is_error) を突き合わせて usage.SentMessageConfirmed と
@@ -657,7 +713,7 @@ func readUntilResult(ctx context.Context, scanner *bufio.Scanner, stdinWriter io
 		}
 
 		if ev.Type == "result" {
-			resultReceived = true
+			usage.ResultReceived = true
 			// issue #267: result イベントから token usage / コストを capture する
 			if ev.Usage != nil {
 				usage.InputTokens = ev.Usage.InputTokens
@@ -680,7 +736,7 @@ func readUntilResult(ctx context.Context, scanner *bufio.Scanner, stdinWriter io
 	}
 	// subprocess がクラッシュ等で result イベントを送出せずに終了した場合をエラーとして扱う
 	// (ctx キャンセルで subprocess がキルされた場合も含む — 呼び出し元で queryCtx.Err() を確認して補強する)
-	if !resultReceived {
+	if !usage.ResultReceived {
 		return usage, fmt.Errorf("claude subprocess exited without result event (EOF — crash or premature exit)")
 	}
 	return usage, resultErr
