@@ -99,7 +99,7 @@ func TestProcessMessages_SameMillisecondAllDispatched(t *testing.T) {
 	msgs := []agenthub.Message{msgAt("m1", ts), msgAt("m2", ts), msgAt("m3", ts)}
 
 	cursor := processMessages(context.Background(), cfg, client, runner, nil, cursorPos{},
-		&activityTracker{}, &messageGapTracker{}, journal, &limitSleeper{}, msgs, "test")
+		&activityTracker{}, &messageGapTracker{}, journal, &limitSleeper{}, msgs, nil, "test")
 
 	if n := countLines(t, logPath); n != 3 {
 		t.Fatalf("dispatched %d messages; want 3 (same-ms messages must not be skipped)", n)
@@ -115,7 +115,7 @@ func TestProcessMessages_SameMillisecondAllDispatched(t *testing.T) {
 	}
 	again := append(append([]agenthub.Message{}, msgs...), msgAt("m4", ts))
 	processMessages(context.Background(), cfg, client, runner, nil, reloaded,
-		&activityTracker{}, &messageGapTracker{}, journal, &limitSleeper{}, again, "test")
+		&activityTracker{}, &messageGapTracker{}, journal, &limitSleeper{}, again, nil, "test")
 
 	if n := countLines(t, logPath); n != 4 {
 		t.Errorf("dispatched %d messages in total; want 4 (m1-m3 skipped, m4 dispatched)", n)

@@ -53,7 +53,7 @@ func TestLimitSleeper_DeferredStore(t *testing.T) {
 	}
 
 	// 復帰 → deferred 処理中に再 limit (残り 1 件で enter) → finishResume しても残る
-	_ = s.wake()
+	_, _ = s.wake()
 	s.enter(&limitReachedError{Kind: "spend limit", Until: until}, deferredMsgs()[1:])
 	s.finishResume()
 	if !fileExists(t, store.path) {
@@ -74,9 +74,9 @@ func TestLimitSleeper_DeferredStore(t *testing.T) {
 
 	// 正常復帰: 処理し終えたら消える
 	s.enter(&limitReachedError{Kind: "session limit", Until: until}, nil)
-	_ = s.wake()
+	_, _ = s.wake()
 	s.enter(&limitReachedError{Kind: "session limit", Until: until}, deferredMsgs())
-	_ = s.wake()
+	_, _ = s.wake()
 	s.finishResume()
 	if fileExists(t, store.path) {
 		t.Fatal("deferred file must be removed after resume completes")

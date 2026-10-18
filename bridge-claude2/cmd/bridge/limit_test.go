@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -245,9 +246,16 @@ func TestLimitSleeper(t *testing.T) {
 	if s.deferredCount() != 3 {
 		t.Errorf("deferredCount = %d, want 3", s.deferredCount())
 	}
-	d := s.wake()
+	d, read := s.wake()
 	if len(d) != 3 || d[0].ID != "m1" || d[2].ID != "m3" {
 		t.Errorf("wake returned %+v", d)
+	}
+	// MarkAsRead 済みは各 enter の先頭 (limit に当たった便) だけ (issue #369)
+	if want := map[string]bool{"m1": true, "m3": true}; !reflect.DeepEqual(read, want) {
+		t.Errorf("wake markedRead = %v, want %v", read, want)
+	}
+	if _, read := s.wake(); read != nil {
+		t.Errorf("markedRead must be cleared after wake, got %v", read)
 	}
 	if sleeping, _, _ := s.state(); sleeping {
 		t.Error("after wake must not be sleeping")
