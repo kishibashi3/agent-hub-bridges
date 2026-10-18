@@ -5,6 +5,7 @@
 #   scripts/deploy-fleet-binary.sh [--activate] [--revision <commit>] [bridge ...]
 #
 #   bridge を省略すると bridge-claude2 / bridge-codex2 / bridge-tmux の 3 つを対象にする。
+#   同じ bridge を 2 回以上書いても 1 回分として扱う。
 #   --activate を付けたときだけ symlink を張り替える。付けなければ実体を置くだけで、
 #   fleet が起動する binary は変わらない。
 #   --revision には試した版の commit (7〜40 桁の 16 進) を渡す。origin/main の HEAD が
@@ -69,12 +70,21 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --activate) activate=true ;;
         --revision)
-            [[ $# -ge 2 ]] || die "--revision に commit がありません (使い方: $usage)"
+            [[ $# -ge 2 && -n "$2" ]] || die "--revision に commit がありません (使い方: $usage)"
             want_revision=$2
             shift
             ;;
-        --revision=*) want_revision=${1#--revision=} ;;
-        bridge-claude2 | bridge-codex2 | bridge-tmux) bridges+=("$1") ;;
+        --revision=*)
+            # 空 (--revision=) を「指定なし」として通さない (#354)。
+            want_revision=${1#--revision=}
+            [[ -n "$want_revision" ]] || die "--revision に commit がありません (使い方: $usage)"
+            ;;
+        bridge-claude2 | bridge-codex2 | bridge-tmux)
+            # 同じ bridge の 2 回目は無視する。一時 symlink の名前が重なるため (#354)。
+            if [[ " ${bridges[*]} " != *" $1 "* ]]; then
+                bridges+=("$1")
+            fi
+            ;;
         *) die "知らない引数です: $1 (使い方: $usage)" ;;
     esac
     shift
