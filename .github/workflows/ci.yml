@@ -70,3 +70,22 @@ jobs:
       - name: go vet
         working-directory: ${{ matrix.dir }}
         run: go vet ./...
+
+  # agent-hub-sdk を require する Go module 間で SDK の版が揃っているかを
+  # 検査する (issue #357)。1 module だけ上げ忘れても go-test は green の
+  # まま通るため (#321 型の取り残し)。対象 module は script が go.mod を
+  # 走査して拾う。
+  go-sdk-version:
+    name: go sdk version consistency
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: bridge-claude2/go.mod
+          cache: false
+
+      - name: Check agent-hub-sdk version
+        run: scripts/check-sdk-version.sh
