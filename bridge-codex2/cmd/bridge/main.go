@@ -1,7 +1,8 @@
 // bridge-codex2: Go ネイティブ bridge for Codex CLI.
 //
 // bridge-claude2 をベースに runner を codex CLI に差し替えた実装。
-// `codex exec resume --last` を使うことで on-demand でもセッション継続ができる。
+// 文脈は既定で 1 便ごとに新しいセッション (段 1、issue #339)。AGENT_HUB_CONTEXT_STAGE=last で
+// 旧挙動の `codex exec resume --last` (全員の便を 1 本のセッションに積む、deprecated) に戻せる。
 //
 // 動作フロー:
 //  1. 永続 CODEX_HOME セットアップ: config.toml 書き込み + auth.json symlink 作成
@@ -29,6 +30,11 @@
 //	AGENT_HUB_SUBPROCESS_TIMEOUT optional   1 依頼あたりの codex 作業時間の上限 (Go duration: "30m", "1h", "0" = 無制限;
 //	                                        default: 30m; --subprocess-timeout フラグが優先)。上限に達すると codex を止め、
 //	                                        送信元へエラーを 1 回返す (リトライしない、issue #336)
+//	AGENT_HUB_CONTEXT_STAGE     optional    文脈の段 (default: none; issue #339、bridge-claude2 と同じ env 名・値)。
+//	                                        none = 継続しない (段 1、1 便ごとに新しい codex セッション)。
+//	                                        last = 旧挙動の `codex exec resume --last` (deprecated、起動時に warning)。
+//	                                        それ以外の値は起動エラー。env を変えて再起動すれば切り替わる。
+//	                                        注意: env 未設定のまま更新すると旧挙動の `--last` 継続をやめる (戻すなら =last)
 //	AGENT_HUB_TELEMETRY_URL     optional    OTLP endpoint
 //	BRIDGE_LOG_DIR              optional    ログディレクトリ (省略 = ~/.agent-hub/logs/; --log-file が優先)
 //	BRIDGE_LOG_FILE             optional    ログファイルパス (省略 = BRIDGE_LOG_DIR/bridge-<user>.log)
@@ -100,6 +106,8 @@ type config struct {
 	GHLogin string
 	// GitHubFooter は bridge が真値から組成した GitHub 投稿用 footer (issue #336 #5)。
 	GitHubFooter string
+	// ContextStage は AGENT_HUB_CONTEXT_STAGE で選んだ文脈の段 (issue #339)。
+	ContextStage contextStage
 }
 
 func parseConfig() (*config, error) {
@@ -236,6 +244,12 @@ func parseConfig() (*config, error) {
 		return nil, err
 	}
 
+	// context stage: AGENT_HUB_CONTEXT_STAGE env > none (issue #339)
+	resolvedContextStage, err := resolveContextStage()
+	if err != nil {
+		return nil, err
+	}
+
 	// scanner-buffer-size: AGENT_HUB_SCANNER_BUFFER_SIZE env > 4MB
 	resolvedScannerBufferSize, err := resolveScannerBufferSize()
 	if err != nil {
@@ -261,6 +275,7 @@ func parseConfig() (*config, error) {
 		MaxRetries:        *maxRetries,
 		SubprocessTimeout: resolvedSubprocessTimeout,
 		ScannerBufferSize: resolvedScannerBufferSize,
+		ContextStage:      resolvedContextStage,
 	}, nil
 }
 
@@ -506,6 +521,7 @@ func main() {
 		"codex_home", cfg.CodexHomeDir,
 		"log_file", orDefault(cfg.LogFile, "(stderr only)"),
 	)
+	logContextStage(cfg.ContextStage)
 
 	// CODEX_HOME セットアップ (config.toml + auth.json symlink)
 	if err := setupCodexHome(cfg); err != nil {
