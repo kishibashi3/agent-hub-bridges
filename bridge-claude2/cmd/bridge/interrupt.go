@@ -48,3 +48,22 @@ func sendInterruptNotice(ctx context.Context, client *agenthub.Client, journal *
 	}
 	slog.Info("sendInterruptNotice: sent interrupt notice (issue #337)", "msg_id", msg.ID, "from", msg.Sender)
 }
+
+// logShutdownInFlight は停止が掛かった時点で処理中だった便の扱いを 1 行で残す (issue #342)。
+// この便は cursor を進め、再処理しない。内側が返信を出し終えていた場合の二重返信を避けるため。
+// 送り主への返信は handleOne が中断通知 (issue #337) または内側の返信で済ませている。
+func logShutdownInFlight(logPrefix string, msg agenthub.Message, handleErr error) {
+	slog.Info(logPrefix+": in-flight message at shutdown — cursor advanced, will not be reprocessed (issue #342)",
+		"msg_id", msg.ID, "from", msg.Sender, "handle_err", handleErr)
+}
+
+// logShutdownLeftUnread は停止で手を付けずに残したバッチ残りの便を 1 行で残す (issue #342)。
+// MarkAsRead も cursor 前進もしていないので、drain か次回起動の catchup で処理される。
+func logShutdownLeftUnread(logPrefix string, rest []agenthub.Message) {
+	ids := make([]string, len(rest))
+	for i, m := range rest {
+		ids[i] = m.ID
+	}
+	slog.Info(logPrefix+": shutdown — leaving remaining batch messages unread for drain / next startup (issue #342)",
+		"count", len(rest), "msg_ids", ids)
+}

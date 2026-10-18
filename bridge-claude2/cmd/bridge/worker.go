@@ -365,6 +365,13 @@ func processMessages(
 	selfHandle := "@" + cfg.Participant
 
 	for i, msg := range msgs {
+		// issue #342: 停止が掛かったら残りの便は触らない (MarkAsRead も cursor 前進もしない)。
+		// 進めると drain / 次回起動の GetMessages で cursor.seen として捨てられ、返信なしで消える。
+		if ctx.Err() != nil {
+			logShutdownLeftUnread(logPrefix, msgs[i:])
+			return cursor
+		}
+
 		// 自己ループ防止
 		if msg.Sender == selfHandle {
 			slog.Debug(logPrefix+": skip self-sent message", "msg_id", msg.ID)
@@ -426,6 +433,9 @@ func processMessages(
 		}
 		if handleErr != nil {
 			slog.Error(logPrefix+": handleOne error", "msg_id", msg.ID, "err", handleErr)
+		}
+		if ctx.Err() != nil {
+			logShutdownInFlight(logPrefix, msg, handleErr)
 		}
 
 		// issue #37, #176: process → save_cursor の順 (crash-safe secondary guard)。

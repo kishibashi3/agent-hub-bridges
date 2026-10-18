@@ -187,7 +187,14 @@ func runHubSession(
 			return cursor, true, fmt.Errorf("get_messages: %w", err)
 		}
 
-		for _, msg := range msgs {
+		for i, msg := range msgs {
+			// issue #342: 停止が掛かったら残りの便は触らない (MarkAsRead も cursor 前進もしない)。
+			// 進めると drain / 次回起動の GetMessages で cursor.seen として捨てられ、返信なしで消える。
+			if ctx.Err() != nil {
+				logShutdownLeftUnread("runHubSession", msgs[i:])
+				break
+			}
+
 			if msg.Sender == selfHandle {
 				slog.Debug("runHubSession: skip self-sent message", "msg_id", msg.ID)
 				// best-effort: 失敗は致命的でなく、次回 polling で再試行される
@@ -226,6 +233,9 @@ func runHubSession(
 			handleErr := handleOne(ctx, client, runner, msg, cfg, tracker, journal)
 			if handleErr != nil {
 				slog.Error("runHubSession: handleOne error", "msg_id", msg.ID, "err", handleErr)
+			}
+			if ctx.Err() != nil {
+				logShutdownInFlight("runHubSession", msg, handleErr)
 			}
 
 			cursor = cursor.advance(msg)
@@ -289,7 +299,13 @@ func startupCatchup(
 
 	selfHandle := "@" + cfg.User
 
-	for _, msg := range nlMsgs {
+	for i, msg := range nlMsgs {
+		// issue #342: 停止が掛かったら残りの便は触らない (MarkAsRead も cursor 前進もしない)
+		if ctx.Err() != nil {
+			logShutdownLeftUnread("[startup-catchup]", nlMsgs[i:])
+			break
+		}
+
 		if msg.Sender == selfHandle {
 			// best-effort: 失敗は致命的でなく、次回 polling で再試行される
 			_ = client.MarkAsRead(ctx, msg.ID)
@@ -322,6 +338,9 @@ func startupCatchup(
 		handleErr := handleOne(ctx, client, runner, msg, cfg, tracker, journal)
 		if handleErr != nil {
 			slog.Error("[startup-catchup] handleOne error", "msg_id", msg.ID, "err", handleErr)
+		}
+		if ctx.Err() != nil {
+			logShutdownInFlight("[startup-catchup]", msg, handleErr)
 		}
 
 		cursor = cursor.advance(msg)
