@@ -26,8 +26,11 @@ install: build
 # fleet 用の binary を配置する (issue #285 / #349)。作業ディレクトリの checkout や build 結果は使わず、
 # 別 clone で main を build して、bridge-claude2 / bridge-codex2 / bridge-tmux の 3 つを
 # ~/.agent-hub/bin/<bridge>@<revision> に置く。ACTIVATE=1 のときだけ symlink ~/.agent-hub/bin/<bridge> を張り替える。
+# ACTIVATE が未設定・空・0・false なら張り替えない。それ以外の値 (true / yes など) は
+# 張り替えるつもりかどうか分からないので、何もせずに失敗する (#351)。
 deploy:
-	../scripts/deploy-fleet-binary.sh $(if $(ACTIVATE),--activate)
+	$(if $(filter-out x1 x0 xfalse x,x$(strip $(ACTIVATE))),$(error ACTIVATE=$(ACTIVATE) は使えません。張り替えるときは ACTIVATE=1、張り替えないときは未設定か ACTIVATE=0 にしてください))
+	../scripts/deploy-fleet-binary.sh $(if $(filter x1,x$(strip $(ACTIVATE))),--activate)
 
 # 使用例:
 #   make build
