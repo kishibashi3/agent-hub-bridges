@@ -42,7 +42,9 @@ func newStreamScanner(r io.Reader, maxLine int) *bufio.Scanner {
 //
 // 読み捨てた行が result イベントの場合は、readUntilResult が result を待ち続けて
 // 止まらないよう、type / subtype / is_error だけを持つ result を代わりに返す
-// (result 本文と usage は失われる)。それ以外の種別は何も返さない。
+// (result 本文と usage は失われる)。control_request の場合は、CLI が応答待ちで止まらないよう
+// type / request_id だけを持つ control_request を返す (issue #345: readUntilResult が error 応答を返す)。
+// それ以外の種別は何も返さない。
 func oversizeSkippingSplit(maxLine int) bufio.SplitFunc {
 	skipping := false
 	skipped := 0
@@ -66,7 +68,19 @@ func oversizeSkippingSplit(maxLine int) bufio.SplitFunc {
 			"head", string(head),
 		)
 		isError := sniffer.fields["is_error"] == "true"
+		requestID := sniffer.fields["request_id"]
 		head, sniffer = nil, nil
+		if evType == "control_request" && requestID != "" {
+			token, err := json.Marshal(map[string]any{
+				"type":       "control_request",
+				"request_id": requestID,
+				"request":    map[string]any{"subtype": "bridge_oversized_line"},
+			})
+			if err != nil {
+				return nil
+			}
+			return token
+		}
 		if evType != "result" {
 			return nil
 		}
@@ -104,7 +118,7 @@ func oversizeSkippingSplit(maxLine int) bufio.SplitFunc {
 			skipping = true
 			skipped = 0
 			head = append([]byte(nil), data[:min(len(data), oversizeHeadBytes)]...)
-			sniffer = newTopLevelSniffer("type", "subtype", "is_error")
+			sniffer = newTopLevelSniffer("type", "subtype", "is_error", "request_id")
 			skip(data)
 			return len(data), nil, nil
 		}

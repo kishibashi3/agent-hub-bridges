@@ -14,9 +14,9 @@
 // session_id を per-sender に設定することで Claude が自身のセッションストレージから
 // per-peer 会話コンテキストを復元できる (= Python bridge と同等の continuity)。
 //
-// blocking command 阻止 (issue #101):
-// stdout の stream-json で tool_use{Bash} を検出後、stdin に tool_result deny を inject する。
-// stdin は result イベント到達まで開放しておくことで inject を可能にする。
+// blocking command 阻止 (issue #101, #345):
+// initialize で PreToolUse フックを登録し、CLI から届く hook_callback に deny を返す (hook.go)。
+// stdin は result イベント到達まで開放しておくことで control_response を返せるようにする。
 package main
 
 import (
@@ -76,10 +76,13 @@ type streamUsage struct {
 
 // streamEvent は stream-json の 1 行イベント (extended 版)。
 type streamEvent struct {
-	Type         string                  `json:"type"`
-	Subtype      string                  `json:"subtype"`
-	IsError      bool                    `json:"is_error"`
-	Result       string                  `json:"result"`
+	Type    string `json:"type"`
+	Subtype string `json:"subtype"`
+	IsError bool   `json:"is_error"`
+	Result  string `json:"result"`
+	// RequestID / Request は type=="control_request" 用 (issue #345: PreToolUse フックの hook_callback)。
+	RequestID    string                  `json:"request_id,omitempty"`
+	Request      json.RawMessage         `json:"request,omitempty"`
 	Message      *streamAssistantMessage `json:"message,omitempty"`
 	Usage        *streamUsage            `json:"usage,omitempty"`
 	TotalCostUSD *float64                `json:"total_cost_usd,omitempty"`
@@ -280,12 +283,13 @@ func (r *claudeRunner) query(ctx context.Context, prompt, sessionID string, trac
 	pid := cmd.Process.Pid
 	slog.Info("runner: Claude subprocess started (on-demand)", "pid", pid, "session_id", sessionID)
 
-	// initialize control_request (Python SDK: query.py と同一フォーマット)
+	// initialize control_request (Python SDK: query.py と同一フォーマット)。
+	// blocking command 阻止の PreToolUse フックをここで登録する (issue #345)。
 	reqID := fmt.Sprintf("req_1_%d", time.Now().UnixNano())
 	if err := writeJSON(stdinPipe, map[string]any{
 		"type":       "control_request",
 		"request_id": reqID,
-		"request":    map[string]any{"subtype": "initialize"},
+		"request":    initializeRequest(true),
 	}); err != nil {
 		stdinPipe.Close()
 		_ = cmd.Wait()
@@ -304,7 +308,7 @@ func (r *claudeRunner) query(ctx context.Context, prompt, sessionID string, trac
 		return queryUsage{IsError: true}, fmt.Errorf("runner: write user message: %w", err)
 	}
 
-	// stdin は result イベントまで開放する (blocking command deny inject のため)
+	// stdin は result イベントまで開放する (hook_callback に control_response を返すため)
 	usage, resultErr := readUntilResult(queryCtx, scanner, stdinPipe, tracker, false)
 
 	// EOF を送って subprocess を自然終了させる
@@ -365,7 +369,7 @@ func (r *claudeRunner) compact(ctx context.Context) (string, error) {
 		_ = cmd.Wait()
 		return "", fmt.Errorf("runner: compact write message: %w", err)
 	}
-	// compact は tool_result inject が不要なので stdin を即時 close する
+	// compact はフックを登録しない (control_response を返す必要がない) ので stdin を即時 close する
 	stdinPipe.Close()
 
 	summary, resultErr := readUntilResultWithSummary(ctx, scanner)
@@ -472,8 +476,9 @@ func writeJSON(w io.Writer, v any) error {
 }
 
 // readUntilResult は stdout の stream-json を読んで result イベントまで待つ。
-// stdinWriter: blocking command deny inject に使う (result 受信まで開放しておくこと)。
-// isCompact=true のとき blocking command 検出をスキップする。
+// stdinWriter: CLI からの control_request (hook_callback 等) への control_response に使う
+// (result 受信まで開放しておくこと)。
+// isCompact=true のとき tool_use の観測をスキップする。
 // 戻り値の queryUsage は result イベントから取得した token usage / コスト (issue #267)。
 func readUntilResult(ctx context.Context, scanner *bufio.Scanner, stdinWriter io.Writer, tracker *activityTracker, isCompact bool) (queryUsage, error) {
 	var usage queryUsage
@@ -505,6 +510,13 @@ func readUntilResult(ctx context.Context, scanner *bufio.Scanner, stdinWriter io
 
 		slog.Debug("runner: stream-json event", "type", ev.Type, "subtype", ev.Subtype)
 
+		// issue #345: control_request (PreToolUse の hook_callback 等) には必ず応答する。
+		// 応答しないと CLI はツール実行を止めたまま待ち続ける。
+		if ev.Type == "control_request" {
+			handleControlRequest(stdinWriter, ev.RequestID, ev.Request)
+			continue
+		}
+
 		if ev.Type == "assistant" {
 			// activity tracking: Claude が応答を生成中
 			if tracker != nil {
@@ -516,7 +528,7 @@ func readUntilResult(ctx context.Context, scanner *bufio.Scanner, stdinWriter io
 			if ev.Message != nil && ev.Message.Model != "" {
 				usage.Model = ev.Message.Model
 			}
-			// blocking command 検出 (issue #101) + send_message tool_use 検知 (issue #264)。
+			// send_message tool_use 検知 (issue #264)。
 			// issue #264: result イベント到達前に subprocess が timeout kill されても、
 			// ここまでの stdout は既に読めているため「応答が hub に送信済みかもしれない」
 			// ことを handleOne 側へ伝えられる。
@@ -533,29 +545,6 @@ func readUntilResult(ctx context.Context, scanner *bufio.Scanner, stdinWriter io
 						pending[block.ID] = pendingToolUse{
 							name: block.Name,
 							ids:  extractInboundIDs(block.Name, block.Input),
-						}
-					}
-					if block.Name == "Bash" {
-						var input struct {
-							Command string `json:"command"`
-						}
-						if err := json.Unmarshal(block.Input, &input); err == nil && input.Command != "" {
-							if pattern := checkBlockingCommand(input.Command); pattern != "" {
-								slog.Warn("[blocking-cmd] blocking command detected, injecting deny",
-									"pattern", pattern,
-									"command_preview", truncate(input.Command, 120),
-									"tool_use_id", block.ID,
-								)
-								denyMsg := buildBlockingErrorMessage(pattern)
-								if err := writeJSON(stdinWriter, map[string]any{
-									"type":        "tool_result",
-									"tool_use_id": block.ID,
-									"content":     denyMsg,
-									"is_error":    true,
-								}); err != nil {
-									slog.Warn("[blocking-cmd] failed to inject tool_result deny", "err", err)
-								}
-							}
 						}
 					}
 				}
