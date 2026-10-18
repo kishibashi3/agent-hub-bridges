@@ -46,6 +46,12 @@ var errSubprocessTimeout = errors.New("subprocess timeout")
 // テストから短くできるよう var にしている。
 var subprocessTermGrace = 2 * time.Second
 
+// resultExitLimit は result を受け取ってから claude が終わるのを待つ上限 (issue #374)。
+// 通常は result から 1s 以内に終わるが、run_in_background のタスクが残っていると claude は
+// タスクが終わるまで終わらず、終わると 2 回目のターンを自分で始める。上限を超えたら
+// terminateProcessTree で止める。テストから短くできるよう var にしている。
+var resultExitLimit = 10 * time.Second
+
 // streamAssistantContent は stream-json の assistant メッセージ内の content block。
 // tool_use の blocking 検出に使う。
 type streamAssistantContent struct {
@@ -313,7 +319,7 @@ func (r *claudeRunner) query(ctx context.Context, prompt, sessionID string, trac
 
 	// EOF を送って subprocess を自然終了させる
 	stdinPipe.Close()
-	waitErr := cmd.Wait()
+	waitErr := waitAfterResult(cmd, scanner, resultExitLimit)
 	if waitErr != nil {
 		slog.Debug("runner: subprocess exited with error", "pid", pid, "err", waitErr)
 	}
@@ -448,6 +454,66 @@ func terminateProcessTree(p *os.Process, grace time.Duration) error {
 		_ = killProcessTree(p.Pid)
 	})
 	return err
+}
+
+// waitAfterResult は result の後に claude が終わるのを limit まで待ち、cmd.Wait() の結果を返す
+// (issue #374)。待っている間も stdout を読み続け (パイプが詰まって CLI の書き込みが止まらない
+// ように)、result の後に出てきたイベントは Warn でログに残す。limit を超えたら
+// terminateProcessTree で止める。
+func waitAfterResult(cmd *exec.Cmd, scanner *bufio.Scanner, limit time.Duration) error {
+	pid := cmd.Process.Pid
+	drained := make(chan struct{})
+	go func() {
+		defer close(drained)
+		drainAfterResult(scanner, pid)
+	}()
+
+	timer := time.NewTimer(limit)
+	defer timer.Stop()
+	select {
+	case <-drained:
+	case <-timer.C:
+		slog.Warn("runner: Claude subprocess did not exit after result, terminating "+
+			"(background task left running? issue #374)",
+			"pid", pid, "limit", limit)
+		_ = terminateProcessTree(cmd.Process, subprocessTermGrace)
+		// 止める間に出たイベントもログに残せるよう、stdout の EOF をしばらく待つ。
+		// claude の外に切り離された子が stdout を握っていると EOF は来ないので、待ちきったら
+		// Wait に進む (Wait は claude の終了後に stdout を閉じるので、drain も抜ける)。
+		select {
+		case <-drained:
+		case <-time.After(subprocessTermGrace + time.Second):
+		}
+	}
+	return cmd.Wait()
+}
+
+// drainAfterResult は result の後の stdout を EOF まで読み、出てきたイベントを Warn でログに
+// 残す (issue #374)。bridge はこれらを処理しない。2 回目のターンでツールを使っていれば、
+// bridge の知らないところで送信等が起きているので、ツール名も残す。
+func drainAfterResult(scanner *bufio.Scanner, pid int) {
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line == "" {
+			continue
+		}
+		var ev streamEvent
+		if err := json.Unmarshal([]byte(line), &ev); err != nil {
+			slog.Warn("runner: unparsable output after result (issue #374)",
+				"pid", pid, "line", truncate(line, 120))
+			continue
+		}
+		var tools []string
+		if ev.Message != nil {
+			for _, block := range ev.Message.Content {
+				if block.Type == "tool_use" {
+					tools = append(tools, block.Name)
+				}
+			}
+		}
+		slog.Warn("runner: event after result — not handled by bridge (issue #374)",
+			"pid", pid, "type", ev.Type, "subtype", ev.Subtype, "tools", tools)
+	}
 }
 
 // filteredEnv は os.Environ() から GITHUB_APP_* を除いた環境変数スライスを返す。
