@@ -32,6 +32,7 @@
 #   4. vcs.revision が main の HEAD と一致し、vcs.modified=false であることを確認する。
 #   5. rename で <bridge>@<revision> に置く。同じ名前の実体がすでにあり sha256 が同じなら
 #      そのまま使う。sha256 が違えば上書きせずに失敗する (版の名前と中身を 1 対 1 に保つため)。
+#      失敗のエラーには、既存の実体と今回の build それぞれの Go の版を出す (#352)。
 #   6. --activate のときだけ、symlink を rename で <bridge>@<revision> に張り替える。
 #      一時 symlink を先に全部作ってから、rename だけを続けて行う。rename 自体が途中で
 #      失敗したとき (ディスクや権限の異常) は、それより前の bridge だけ張り替わる。
@@ -39,6 +40,18 @@
 #   7. bridge ごとに、実体・sha256・vcs.revision・symlink の向き先・fleet.env の *_BIN を出力する。
 #      fleet.env は読むだけで、symlink を指していなくても失敗にはしない
 #      (env をやめて symlink を参照する方針 (#348)。向け直しは operator が行う)。
+#
+# 同じ revision で sha256 が違って止まったとき (#352):
+#   実体の名前は revision だけで決まるので、Go の版 (や CGO_ENABLED / GOFLAGS) が前回と
+#   違うと、同じ revision でも別の binary になり、5 で止まる。エラーに出る 2 つの Go の版を見て、
+#   どちらかで直す。
+#   a. 既存の実体と同じ Go で build し直す (既存の実体はそのまま使われる):
+#        GOTOOLCHAIN=<既存の実体の Go の版> scripts/deploy-fleet-binary.sh ...
+#      Go の版が同じなら、エラーに出る build 設定の違い (CGO_ENABLED / GOFLAGS 等) を前回に揃える。
+#   b. 新しい Go の binary にしたいときは、main に新しい commit が入ってから deploy する
+#      (revision が変わるので別の実体になる)。
+#   既存の実体は消さない。symlink が指している実体や、戻し先として残している実体を
+#   同じ名前で別の中身に置き換えると、版の名前と中身の対応が崩れるため。
 #
 # env (fleet.env / ~/.bashrc) の変更と bridge の restart は行わない (operator が行う)。
 #
@@ -160,8 +173,18 @@ for bridge in "${bridges[@]}"; do
     sha256=$(sha256sum "$tmp" | awk '{print $1}')
     if [[ -e "$dest" || -L "$dest" ]]; then
         existing_sha256=$(sha256sum "$dest" | awk '{print $1}')
-        [[ "$existing_sha256" == "$sha256" ]] ||
-            die "$bridge: $dest はすでにあり、sha256 が今回の build と違います ($existing_sha256 != $sha256)。上書きしません"
+        if [[ "$existing_sha256" != "$sha256" ]]; then
+            existing_buildinfo=$(go version -m "$dest" 2>/dev/null || true)
+            existing_go=$(awk 'NR == 1 { print $NF }' <<<"$existing_buildinfo")
+            new_go=$(awk 'NR == 1 { print $NF }' <<<"$buildinfo")
+            log "$bridge: Go の版: 既存の実体 ${existing_go:-(読めません)} / 今回の build $new_go"
+            if [[ -n "$existing_go" && "$existing_go" == "$new_go" ]]; then
+                # Go の版が同じなら build 設定の違いを出す (CGO_ENABLED / GOFLAGS 等)。
+                log "$bridge: build 設定の違い (< 既存の実体 / > 今回の build):"
+                diff <(awk '$1 == "build"' <<<"$existing_buildinfo") <(awk '$1 == "build"' <<<"$buildinfo") >&2 || true
+            fi
+            die "$bridge: $dest はすでにあり、sha256 が今回の build と違います ($existing_sha256 != $sha256)。上書きしません (復旧手順は script 冒頭のコメント「同じ revision で sha256 が違って止まったとき」)"
+        fi
         rm -f "$tmp"
         placed="既存の実体と同じ (置き直していません)"
     else
