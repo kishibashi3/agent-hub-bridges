@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -142,7 +143,8 @@ func TestQuery_LargeOutputAfterResult_DoesNotBlock(t *testing.T) {
 
 // TestQuery_ExitedWithStdoutHeldByDescendant_ReturnsWithoutLimit: result の後に claude が
 // 終わっていれば、子孫が stdout を握っていても上限を待たずに戻る (issue #378)。
-// 止めてはいないので terminating の Warn は出ず、stdout が残っていることを Warn で残す。
+// 上限で止めてはいないので terminating の Warn は出ない。stdout を握っている子孫は claude の
+// プロセスグループごと SIGKILL し、そのことを Warn で残す (issue #383)。
 func TestQuery_ExitedWithStdoutHeldByDescendant_ReturnsWithoutLimit(t *testing.T) {
 	withResultExitLimit(t, 5*time.Second, 2*time.Second)
 	logBuf := captureSlog(t)
@@ -153,7 +155,8 @@ func TestQuery_ExitedWithStdoutHeldByDescendant_ReturnsWithoutLimit(t *testing.T
 
 	elapsed, err := runQueryWithTimeout(t, script, time.Minute)
 	child := waitPIDFile(t, pidPath)
-	_ = syscall.Kill(child, syscall.SIGKILL)
+	// query が戻った時点で子孫は kill 済み (reap 待ちの zombie は許す)
+	waitGone(t, child, 200*time.Millisecond)
 	if err != nil {
 		t.Fatalf("err = %v; want nil", err)
 	}
@@ -164,8 +167,152 @@ func TestQuery_ExitedWithStdoutHeldByDescendant_ReturnsWithoutLimit(t *testing.T
 	if strings.Contains(logs, "terminating") {
 		t.Errorf("claude exited by itself; should not be terminated:\n%s", logs)
 	}
-	if !strings.Contains(logs, "stdout is still open") {
+	if !strings.Contains(logs, "stdout is still open, killing its process group") {
 		t.Errorf("held-stdout warn not logged:\n%s", logs)
+	}
+}
+
+// TestQuery_TerminatedWithStdoutHeldByDescendant_KillsGroup: 上限で SIGTERM を送り claude は
+// 終わったが、同じプロセスグループの子孫が stdout を握ったまま残る場合も、tree kill の猶予
+// (subprocessTermGrace) を待たずにグループごと止めて戻る (issue #383)。
+func TestQuery_TerminatedWithStdoutHeldByDescendant_KillsGroup(t *testing.T) {
+	withResultExitLimit(t, 500*time.Millisecond, 2*time.Second)
+	logBuf := captureSlog(t)
+
+	pidPath := filepath.Join(t.TempDir(), "child.pid")
+	// SIGTERM を受けると子を始末せずに終わる
+	script := writeAfterResultFakeClaude(t, fmt.Sprintf(
+		"sleep 30 &\necho $! > '%s'\ntrap 'exit 143' TERM\nwhile :; do wait; done", pidPath))
+
+	elapsed, err := runQueryWithTimeout(t, script, time.Minute)
+	child := waitPIDFile(t, pidPath)
+	waitGone(t, child, 200*time.Millisecond)
+	if err != nil {
+		t.Fatalf("err = %v; want nil (result was received)", err)
+	}
+	if elapsed < resultExitLimit {
+		t.Errorf("query took %s; want >= limit %s", elapsed, resultExitLimit)
+	}
+	if elapsed >= resultExitLimit+subprocessTermGrace {
+		t.Errorf("query took %s; want < limit %s + grace %s (group must be killed once claude exited)",
+			elapsed, resultExitLimit, subprocessTermGrace)
+	}
+	logs := logBuf.String()
+	if !strings.Contains(logs, "did not exit after result, terminating") {
+		t.Errorf("termination warn not logged:\n%s", logs)
+	}
+	if !strings.Contains(logs, "killing its process group") {
+		t.Errorf("group kill warn not logged:\n%s", logs)
+	}
+}
+
+// TestQuery_WaitExitedFails_LoggedAndLimitApplies: waitid が EINTR 以外で失敗したら (seccomp の
+// ENOSYS 等)、ログに残し、claude の終了を見ずに stdout の EOF と上限だけで待つ (issue #383)。
+// 失敗を「終わった」と扱うと上限なしの cmd.Wait() に進んでしまう。
+func TestQuery_WaitExitedFails_LoggedAndLimitApplies(t *testing.T) {
+	withResultExitLimit(t, 500*time.Millisecond, 2*time.Second)
+	logBuf := captureSlog(t)
+	orig := waitExitedFunc
+	waitExitedFunc = func(int) error { return syscall.ENOSYS }
+	t.Cleanup(func() { waitExitedFunc = orig })
+
+	pidPath := filepath.Join(t.TempDir(), "child.pid")
+	script := writeAfterResultFakeClaude(t, fmt.Sprintf(
+		"sleep 30 &\nchild=$!\necho $child > '%s'\ntrap 'kill $child; exit 143' TERM\nwhile :; do wait; done", pidPath))
+
+	elapsed, err := runQueryWithTimeout(t, script, time.Minute)
+	if err != nil {
+		t.Fatalf("err = %v; want nil (result was received)", err)
+	}
+	if elapsed < resultExitLimit || elapsed > resultExitLimit+subprocessTermGrace {
+		t.Errorf("query took %s; want limit %s .. limit + grace %s", elapsed, resultExitLimit, subprocessTermGrace)
+	}
+	waitGone(t, waitPIDFile(t, pidPath), 2*time.Second)
+	logs := logBuf.String()
+	if !strings.Contains(logs, "cannot wait for Claude subprocess exit") || !strings.Contains(logs, syscall.ENOSYS.Error()) {
+		t.Errorf("waitid failure not logged:\n%s", logs)
+	}
+	if !strings.Contains(logs, "did not exit after result, terminating") {
+		t.Errorf("limit did not apply:\n%s", logs)
+	}
+}
+
+// TestWaitExited_NotChild_ReturnsError: 自分の子でない pid は待てないのでエラーを返す (issue #383)。
+func TestWaitExited_NotChild_ReturnsError(t *testing.T) {
+	if err := waitExited(os.Getppid()); !errors.Is(err, syscall.ECHILD) {
+		t.Errorf("err = %v; want ECHILD", err)
+	}
+}
+
+// TestQuery_ErrorResult_WaitsAfterResult: is_error の result でも result の後の待ちを通る
+// (issue #383)。query は result のエラーを返し、result の後のイベントは Warn で残る。
+func TestQuery_ErrorResult_WaitsAfterResult(t *testing.T) {
+	withResultExitLimit(t, 5*time.Second, 2*time.Second)
+	logBuf := captureSlog(t)
+
+	path := filepath.Join(t.TempDir(), "fake-claude-error-result")
+	script := "#!/bin/sh\nread -r _init\nread -r _msg\n" +
+		`echo '{"type":"result","subtype":"error_during_execution","is_error":true,"result":"boom"}'` + "\n" +
+		`echo '{"type":"system","subtype":"status"}'` + "\nexit 1\n"
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	elapsed, err := runQueryWithTimeout(t, path, time.Minute)
+	if err == nil || !strings.Contains(err.Error(), "claude result error") {
+		t.Errorf("err = %v; want claude result error", err)
+	}
+	if elapsed >= resultExitLimit {
+		t.Errorf("query took %s; want < limit %s", elapsed, resultExitLimit)
+	}
+	if logs := logBuf.String(); !strings.Contains(logs, "event after result") {
+		t.Errorf("after-result wait did not run for is_error result:\n%s", logs)
+	}
+}
+
+// TestQuery_ParentCancelAfterResult_StopsWithoutLimit: result の後の待ちの最中に親 ctx が
+// cancel されたら (bridge の停止)、上限を待たずに SIGTERM で止めて戻る (issue #383)。
+func TestQuery_ParentCancelAfterResult_StopsWithoutLimit(t *testing.T) {
+	withResultExitLimit(t, 5*time.Second, 2*time.Second)
+	logBuf := captureSlog(t)
+
+	pidPath := filepath.Join(t.TempDir(), "child.pid")
+	script := writeAfterResultFakeClaude(t, fmt.Sprintf(
+		"sleep 30 &\nchild=$!\necho $child > '%s'\ntrap 'kill $child; exit 143' TERM\nwhile :; do wait; done", pidPath))
+
+	dir := t.TempDir()
+	runner := &claudeRunner{
+		cfg:           &config{Workdir: dir, ClaudeCLI: script, ScannerBufferSize: 64 * 1024},
+		mcpConfigPath: filepath.Join(dir, "mcp.json"),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		// pid ファイルは result の後に書かれる
+		for {
+			if _, err := os.Stat(pidPath); err == nil {
+				break
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		cancel()
+	}()
+	start := time.Now()
+	usage, err := runner.query(ctx, "prompt", "sess", &activityTracker{})
+	elapsed := time.Since(start)
+
+	if err != nil {
+		t.Errorf("err = %v; want nil (result was received)", err)
+	}
+	if !usage.ResultReceived {
+		t.Errorf("ResultReceived = false; want true")
+	}
+	if elapsed >= resultExitLimit {
+		t.Errorf("query took %s; want < limit %s (parent cancel must stop claude)", elapsed, resultExitLimit)
+	}
+	waitGone(t, waitPIDFile(t, pidPath), 2*time.Second)
+	if logs := logBuf.String(); strings.Contains(logs, "did not exit after result, terminating") {
+		t.Errorf("stopped by limit, not by parent cancel:\n%s", logs)
 	}
 }
 
