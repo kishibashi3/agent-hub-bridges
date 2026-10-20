@@ -32,9 +32,9 @@ import (
 	"strings"
 	"syscall"
 	"time"
-	"unsafe"
 
 	githubclient "github.com/kishibashi3/agent-hub-bridges/packages/github-client"
+	"golang.org/x/sys/unix"
 )
 
 // errSubprocessTimeout は SubprocessTimeout によって subprocess がキルされたことを示す sentinel。
@@ -489,9 +489,22 @@ func waitAfterResult(cmd *exec.Cmd, scanner *bufio.Scanner, limit time.Duration)
 		drainAfterResult(scanner, pid)
 	}()
 	exited := make(chan struct{})
+	// waiting は下の cmd.Wait() の前に閉じる。Wait が reap した後の waitid は ECHILD で
+	// 戻るので、それを失敗としてログに出さないようにする。
+	waiting := make(chan struct{})
 	go func() {
-		defer close(exited)
-		waitExited(pid)
+		if err := waitExitedFunc(pid); err != nil {
+			// exited を閉じない。drain と上限 (timer) だけで待つ (issue #383)
+			select {
+			case <-waiting:
+				return
+			default:
+			}
+			slog.Warn("runner: cannot wait for Claude subprocess exit, waiting for stdout EOF or limit",
+				"pid", pid, "err", err)
+			return
+		}
+		close(exited)
 	}()
 
 	timer := time.NewTimer(limit)
@@ -515,32 +528,38 @@ func waitAfterResult(cmd *exec.Cmd, scanner *bufio.Scanner, limit time.Duration)
 	}
 	// Wait は claude の終了後に stdout を閉じるので、drain も抜ける。drain が抜けるのを
 	// 待ってから戻り、query の後に after-result の Warn が出ないようにする。
+	close(waiting)
 	err := cmd.Wait()
 	<-drained
 	return err
 }
 
 // waitDrainedAfterExit は claude の終了後、stdout の EOF を exitedDrainGrace まで待つ
-// (issue #378)。EOF が来なければ、claude の外に切り離された子孫が stdout を握っている。
+// (issue #378)。EOF が来なければ子孫が stdout を握っているので、claude のプロセスグループに
+// 残っている子孫を SIGKILL する (issue #383)。claude はまだ reap していない (Wait 前) ので、
+// pgid が別のグループに再利用されていることはない。setsid 等でグループの外に出た子孫には届かない。
 func waitDrainedAfterExit(drained <-chan struct{}, pid int) {
 	select {
 	case <-drained:
 	case <-time.After(exitedDrainGrace):
-		slog.Warn("runner: Claude subprocess exited but its stdout is still open "+
-			"(held by a detached descendant? issue #378)", "pid", pid)
+		slog.Warn("runner: Claude subprocess exited but its stdout is still open, "+
+			"killing its process group (held by a descendant? issue #378, #383)", "pid", pid)
+		_ = unix.Kill(-pid, unix.SIGKILL)
 	}
 }
 
+// waitExitedFunc は waitAfterResult が claude の終了を待つ関数。テストから waitid の失敗を
+// 再現できるよう var にしている。
+var waitExitedFunc = waitExited
+
 // waitExited は pid の子プロセスが終わるまでブロックする。reap はしない (WNOWAIT) ので、
-// 終了ステータスは後の cmd.Wait() で受け取れる (issue #378)。待てなければ (ECHILD 等) すぐ戻る。
-func waitExited(pid int) {
-	const pPID = 1     // P_PID
-	var info [128]byte // siginfo_t
+// 終了ステータスは後の cmd.Wait() で受け取れる (issue #378)。待てなければ (ECHILD / EPERM /
+// seccomp による ENOSYS 等) そのエラーを返す (issue #383)。
+func waitExited(pid int) error {
 	for {
-		_, _, errno := syscall.Syscall6(syscall.SYS_WAITID, pPID, uintptr(pid),
-			uintptr(unsafe.Pointer(&info[0])), syscall.WEXITED|syscall.WNOWAIT, 0, 0)
-		if errno != syscall.EINTR {
-			return
+		err := unix.Waitid(unix.P_PID, pid, &unix.Siginfo{}, unix.WEXITED|unix.WNOWAIT, nil)
+		if err != unix.EINTR {
+			return err
 		}
 	}
 }
