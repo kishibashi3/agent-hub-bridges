@@ -216,44 +216,27 @@ func TestParseConfig_MaxQueryRetriesDefaults(t *testing.T) {
 func TestBuildGitHubFooter(t *testing.T) {
 	const bt = "bridge-claude2"
 	tests := []struct {
-		name    string
-		handle  string
-		model   string
-		ghLogin string
-		want    string
+		name   string
+		handle string
+		model  string
+		want   string
 	}{
 		{
-			name:    "all present",
-			handle:  "ntv-reviewer",
-			model:   "opus-4.8",
-			ghLogin: "kishibashi3",
-			want:    "@ntv-reviewer [bridge-claude2 · opus-4.8] (operator-supervised · kishibashi3/agent-hub)",
+			name:   "model present",
+			handle: "ntv-reviewer",
+			model:  "opus-4.8",
+			want:   "@ntv-reviewer [bridge-claude2 · opus-4.8] (operator-supervised)",
 		},
 		{
-			name:    "model omitted when empty",
-			handle:  "ntv-reviewer",
-			model:   "",
-			ghLogin: "kishibashi3",
-			want:    "@ntv-reviewer [bridge-claude2] (operator-supervised · kishibashi3/agent-hub)",
-		},
-		{
-			name:    "gh-login omitted when empty",
-			handle:  "ntv-reviewer",
-			model:   "opus-4.8",
-			ghLogin: "",
-			want:    "@ntv-reviewer [bridge-claude2 · opus-4.8] (operator-supervised · agent-hub)",
-		},
-		{
-			name:    "both model and gh-login omitted",
-			handle:  "ntv-reviewer",
-			model:   "",
-			ghLogin: "",
-			want:    "@ntv-reviewer [bridge-claude2] (operator-supervised · agent-hub)",
+			name:   "model omitted when empty",
+			handle: "ntv-reviewer",
+			model:  "",
+			want:   "@ntv-reviewer [bridge-claude2] (operator-supervised)",
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := buildGitHubFooter(tc.handle, bt, tc.model, tc.ghLogin); got != tc.want {
+			if got := buildGitHubFooter(tc.handle, bt, tc.model); got != tc.want {
 				t.Errorf("buildGitHubFooter() = %q, want %q", got, tc.want)
 			}
 		})
@@ -269,7 +252,7 @@ func TestFormatPrompt_FooterInjection(t *testing.T) {
 		To:     "@bob",
 		Body:   "hello",
 	}
-	footer := "@bob [bridge-claude2 · opus-4.8] (operator-supervised · kishibashi3/agent-hub)"
+	footer := "@bob [bridge-claude2 · opus-4.8] (operator-supervised)"
 
 	withFooter := formatPrompt("@bob", msg, footer)
 	if !strings.Contains(withFooter, footer) {

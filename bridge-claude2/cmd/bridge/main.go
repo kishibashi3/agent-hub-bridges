@@ -119,9 +119,6 @@ type config struct {
 	// ScannerBufferSize は stream-json bufio.Scanner のバッファサイズ (bytes)。
 	// AGENT_HUB_SCANNER_BUFFER_SIZE env で設定可能 (例: "4MB", "8MB")。デフォルト 4MB。
 	ScannerBufferSize int
-	// GHLogin は起動時に解決した GitHub login 名 (footer の <gh-login> 用、issue #245)。
-	// 解決失敗時は ""。
-	GHLogin string
 	// GitHubFooter は bridge が真値から組成した GitHub 投稿用 footer (issue #245)。
 	GitHubFooter string
 	// ContextStage は AGENT_HUB_CONTEXT_STAGE で指定された文脈の段 (issue #339)。
@@ -452,37 +449,18 @@ func formatPrompt(selfHandle string, msg agenthub.Message, footer string) string
 }
 
 // buildGitHubFooter は GitHub 投稿用の規約 footer を bridge の知る真値から組成する。
-// 形式: @<handle> [<bridge-type> · <model>] (operator-supervised · <gh-login>/agent-hub)
+// 形式: @<handle> [<bridge-type> · <model>] (operator-supervised)
 //   - model が空なら model 欄ごと省略: [<bridge-type>]
-//   - ghLogin が空なら login 部を省略: (operator-supervised · agent-hub)
 //
-// 全フィールド (handle / bridgeType / model / ghLogin) は呼び出し側が真値で渡す。
-// 唯一の固定リテラルは ecosystem ラベル "agent-hub" のみ (issue #245)。
-// 内側 Claude に model / login を推測させないため、欠けている真値は「省略」に倒す
-// (嘘を出さない)。ソースに個人固有名詞を焼かず、ghLogin は実行時解決した値を渡す。
-func buildGitHubFooter(handle, bridgeType, model, ghLogin string) string {
+// 全フィールド (handle / bridgeType / model) は呼び出し側が真値で渡す。
+// 内側 Claude に model を推測させないため、欠けている真値は「省略」に倒す
+// (嘘を出さない)。GitHub アカウント名は公開 repo に出さないため載せない (issue #385)。
+func buildGitHubFooter(handle, bridgeType, model string) string {
 	bridgeLabel := bridgeType
 	if model != "" {
 		bridgeLabel = bridgeType + " · " + model
 	}
-	repoRef := "agent-hub"
-	if ghLogin != "" {
-		repoRef = ghLogin + "/agent-hub"
-	}
-	return fmt.Sprintf("@%s [%s] (operator-supervised · %s)", handle, bridgeLabel, repoRef)
-}
-
-// resolveGHLogin は起動時に GitHub の login 名を解決する (footer の <gh-login> 用)。
-// `gh api user --jq .login` を実行し、失敗時は "" を返す (footer の login 部は省略)。
-// 個人固有名詞をソースに焼かないため、必ず実行時に解決する (issue #245)。
-func resolveGHLogin() string {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	out, err := exec.CommandContext(ctx, "gh", "api", "user", "--jq", ".login").Output()
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(string(out))
+	return fmt.Sprintf("@%s [%s] (operator-supervised)", handle, bridgeLabel)
 }
 
 // ──────────────────────────────────────────────────────────────────────── //
@@ -499,10 +477,9 @@ func main() {
 	closeLogger := setupLogger(cfg.LogLevel, cfg.LogFile)
 	defer closeLogger()
 
-	// issue #245: GitHub 投稿 footer を真値から組成する。gh-login は実行時解決
-	// (失敗時は login 部を省略)。formatPrompt で毎メッセージ内側 Claude に注入される。
-	cfg.GHLogin = resolveGHLogin()
-	cfg.GitHubFooter = buildGitHubFooter(cfg.Participant, bridgeType, cfg.Model, cfg.GHLogin)
+	// issue #245: GitHub 投稿 footer を真値から組成する。
+	// formatPrompt で毎メッセージ内側 Claude に注入される。
+	cfg.GitHubFooter = buildGitHubFooter(cfg.Participant, bridgeType, cfg.Model)
 
 	slog.Info(bridgeType+" starting",
 		"version", version,
@@ -510,7 +487,6 @@ func main() {
 		"workdir", cfg.Workdir,
 		"mode", cfg.Mode,
 		"model", orDefault(cfg.Model, "(claude default)"),
-		"gh_login", orDefault(cfg.GHLogin, "(unresolved)"),
 		"github_footer", cfg.GitHubFooter,
 		"subprocess_timeout_s", cfg.SubprocessTimeout.Seconds(),
 		"max_query_retries", cfg.MaxQueryRetries,

@@ -102,8 +102,6 @@ type config struct {
 	// ScannerBufferSize は stream-json bufio.Scanner のバッファサイズ (bytes)。
 	// AGENT_HUB_SCANNER_BUFFER_SIZE env で設定可能 (例: "4MB", "8MB")。デフォルト 4MB。
 	ScannerBufferSize int
-	// GHLogin は起動時に解決した GitHub login 名 (footer の <gh-login> 用、issue #336 #5)。
-	GHLogin string
 	// GitHubFooter は bridge が真値から組成した GitHub 投稿用 footer (issue #336 #5)。
 	GitHubFooter string
 	// ContextStage は AGENT_HUB_CONTEXT_STAGE で選んだ文脈の段 (issue #339)。
@@ -460,33 +458,16 @@ func formatPrompt(selfHandle string, msg agenthub.Message, footer string) string
 }
 
 // buildGitHubFooter は GitHub 投稿用の footer を bridge の知る真値から組む (issue #336 #5)。
-// 形式: @<handle> [<bridge-type> · <model>] (operator-supervised · <gh-login>/agent-hub)
+// 形式: @<handle> [<bridge-type> · <model>] (operator-supervised)
 //   - model が空 (codex の既定 model を使う) なら model 欄ごと省略: [<bridge-type>]
-//   - ghLogin が空なら login 部を省略: (operator-supervised · agent-hub)
 //
-// 欠けている真値は推測で埋めず省略する。
-func buildGitHubFooter(handle, bridgeType, model, ghLogin string) string {
+// 欠けている真値は推測で埋めず省略する。GitHub アカウント名は載せない (issue #385)。
+func buildGitHubFooter(handle, bridgeType, model string) string {
 	bridgeLabel := bridgeType
 	if model != "" {
 		bridgeLabel = bridgeType + " · " + model
 	}
-	repoRef := "agent-hub"
-	if ghLogin != "" {
-		repoRef = ghLogin + "/agent-hub"
-	}
-	return fmt.Sprintf("@%s [%s] (operator-supervised · %s)", handle, bridgeLabel, repoRef)
-}
-
-// resolveGHLogin は起動時に GitHub の login 名を解決する (footer の <gh-login> 用)。
-// `gh api user --jq .login` を実行し、失敗時は "" を返す (footer の login 部は省略)。
-func resolveGHLogin() string {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	out, err := exec.CommandContext(ctx, "gh", "api", "user", "--jq", ".login").Output()
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(string(out))
+	return fmt.Sprintf("@%s [%s] (operator-supervised)", handle, bridgeLabel)
 }
 
 // ──────────────────────────────────────────────────────────────────────── //
@@ -503,9 +484,8 @@ func main() {
 	closeLogger := setupLogger(cfg.LogLevel, cfg.LogFile)
 	defer closeLogger()
 
-	// issue #336 #5: GitHub 投稿 footer を真値から組む (gh-login は実行時解決、失敗時は省略)
-	cfg.GHLogin = resolveGHLogin()
-	cfg.GitHubFooter = buildGitHubFooter(cfg.User, bridgeType, cfg.Model, cfg.GHLogin)
+	// issue #336 #5: GitHub 投稿 footer を真値から組む
+	cfg.GitHubFooter = buildGitHubFooter(cfg.User, bridgeType, cfg.Model)
 
 	slog.Info("bridge-codex2 starting",
 		"version", version,
@@ -513,7 +493,6 @@ func main() {
 		"workdir", cfg.Workdir,
 		"mode", cfg.Mode,
 		"model", orDefault(cfg.Model, "(codex default)"),
-		"gh_login", orDefault(cfg.GHLogin, "(unresolved)"),
 		"github_footer", cfg.GitHubFooter,
 		"poll_interval_s", cfg.PollInterval.Seconds(),
 		"subprocess_timeout_s", cfg.SubprocessTimeout.Seconds(),
