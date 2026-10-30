@@ -83,7 +83,7 @@ prompt** (`formatPrompt`). When the peer writes a PR / issue comment or any deli
 text, it is instructed to append a footer line of the form:
 
 ```
-@<handle> [bridge-claude2 · <model>] (operator-supervised · <gh-login>/agent-hub)
+@<handle> [bridge-claude2 · <model>] (operator-supervised)
 ```
 
 Every field is composed **by the bridge from real values** — the inner Claude is never
@@ -95,13 +95,12 @@ observability):
 | `<handle>` | `--participant` | always present |
 | `bridge-claude2` | `bridgeType` constant (single self-identity source) | always present |
 | `<model>` | `--model` / `AGENT_HUB_MODEL` | **model field omitted entirely** (`[bridge-claude2]`) — never guessed |
-| `<gh-login>` | resolved at startup via `gh api user --jq .login` | login part omitted (`(operator-supervised · agent-hub)`) |
 
 Design trade-off (agreed in #245): this is a **per-message prompt instruction, not a
 hard hook/shim**. The inner Claude can still forget to append it — in which case the
 footer is simply *absent (honest)*. The guarantee is that **any footer that *is* present
-carries only true values; at worst it is silent, never a lie**. Only the `agent-hub`
-ecosystem label is a fixed literal; no personal proper nouns are baked into the source.
+carries only true values; at worst it is silent, never a lie**. The GitHub account name
+is not included (#385), so a post to a public repo does not expose which account the host uses.
 
 > Operator note: spawn with `-model <actual-model>` so the `<model>` field is populated.
 > `gh-login` is self-resolved by the bridge and needs no extra argument.

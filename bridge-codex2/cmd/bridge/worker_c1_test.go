@@ -322,22 +322,21 @@ func TestResolveSubprocessTimeout(t *testing.T) {
 
 func TestBuildGitHubFooter(t *testing.T) {
 	cases := []struct {
-		model, login, want string
+		model, want string
 	}{
-		{"", "octo", "@codex-test [bridge-codex2] (operator-supervised · octo/agent-hub)"},
-		{"gpt-5.5", "octo", "@codex-test [bridge-codex2 · gpt-5.5] (operator-supervised · octo/agent-hub)"},
-		{"", "", "@codex-test [bridge-codex2] (operator-supervised · agent-hub)"},
+		{"", "@codex-test [bridge-codex2] (operator-supervised)"},
+		{"gpt-5.5", "@codex-test [bridge-codex2 · gpt-5.5] (operator-supervised)"},
 	}
 	for _, tc := range cases {
-		if got := buildGitHubFooter("codex-test", bridgeType, tc.model, tc.login); got != tc.want {
-			t.Errorf("buildGitHubFooter(%q, %q) = %q, want %q", tc.model, tc.login, got, tc.want)
+		if got := buildGitHubFooter("codex-test", bridgeType, tc.model); got != tc.want {
+			t.Errorf("buildGitHubFooter(%q) = %q, want %q", tc.model, got, tc.want)
 		}
 	}
 }
 
 func TestFormatPrompt_Footer(t *testing.T) {
 	msg := msgAt("m1", c1TS)
-	footer := "@codex-test [bridge-codex2] (operator-supervised · octo/agent-hub)"
+	footer := "@codex-test [bridge-codex2] (operator-supervised)"
 	if got := formatPrompt("@codex-test", msg, footer); !strings.HasSuffix(got, "\n"+footer) {
 		t.Errorf("prompt does not end with the footer:\n%s", got)
 	}
