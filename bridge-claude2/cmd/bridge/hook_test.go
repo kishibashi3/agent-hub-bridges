@@ -306,7 +306,7 @@ func TestBlockingHookOutput_PatternDenyWithUnexpectedBackgroundType(t *testing.T
 	}
 }
 
-// Monitor は command の中身によらず deny し、理由文で @scheduler を案内すること (issue #388)。
+// Monitor は command の中身によらず deny し、理由文で @scheduler ではなく send_message での即返信を案内すること (issue #388 / #389)。
 func TestBlockingHookOutput_DeniesMonitor(t *testing.T) {
 	input := strings.Join([]string{
 		hookCallbackLine("m1", monitorHookCallbackID, "until [ $(date +%s) -ge 9999999999 ]; do sleep 1; done; echo done", nil),
@@ -328,12 +328,12 @@ func TestBlockingHookOutput_DeniesMonitor(t *testing.T) {
 			t.Fatalf("[%d] = %+v, want deny with monitorDeniedMessage", i, got[i].Response)
 		}
 	}
-	if !strings.Contains(monitorDeniedMessage, "@scheduler /run_in") {
-		t.Errorf("monitorDeniedMessage does not guide to @scheduler: %q", monitorDeniedMessage)
+	if strings.Contains(monitorDeniedMessage, "@scheduler") || !strings.Contains(monitorDeniedMessage, "send_message") {
+		t.Errorf("monitorDeniedMessage should guide to send_message, not @scheduler: %q", monitorDeniedMessage)
 	}
 }
 
-// ScheduleWakeup / CronCreate は中身によらず deny し、理由文で @scheduler を案内すること (issue #389)。
+// ScheduleWakeup / CronCreate は中身によらず deny し、理由文で @scheduler ではなく send_message での即返信を案内すること (issue #389)。
 func TestBlockingHookOutput_DeniesScheduleWakeupAndCronCreate(t *testing.T) {
 	cases := []struct {
 		callbackID string
@@ -361,8 +361,8 @@ func TestBlockingHookOutput_DeniesScheduleWakeupAndCronCreate(t *testing.T) {
 			h.PermissionDecisionReason != c.want {
 			t.Fatalf("[%s] = %+v, want deny with its message", c.callbackID, got[i].Response)
 		}
-		if !strings.Contains(c.want, "@scheduler /run_in") {
-			t.Errorf("[%s] message does not guide to @scheduler: %q", c.callbackID, c.want)
+		if strings.Contains(c.want, "@scheduler") || !strings.Contains(c.want, "send_message") {
+			t.Errorf("[%s] message should guide to send_message, not @scheduler: %q", c.callbackID, c.want)
 		}
 	}
 }

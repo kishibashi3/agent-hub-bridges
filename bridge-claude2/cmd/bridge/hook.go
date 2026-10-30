@@ -4,7 +4,7 @@
 // initialize の control_request で PreToolUse (matcher Bash) のフックを登録すると、CLI は Bash を
 // 実行する前に hook_callback の control_request を stdout に出し、stdin への control_response を
 // 待つ。ブロック対象なら permissionDecision: deny を返し、コマンドを起動させない。
-// Monitor (issue #388) と ScheduleWakeup / CronCreate (issue #389) は常に deny する。
+// Monitor (issue #388) と ScheduleWakeup / CronCreate (issue #389) は常に deny し、待たずに依頼主へ返すよう案内する。
 // どれもターンが終わった後に harness が起こす前提のツールで、依頼ごとに終わる bridge では予約ごと消える。
 //
 // CLI は応答が来るまでツールの実行を止めたまま待つため、control_request には必ず何かを返す
@@ -155,27 +155,30 @@ const backgroundDeniedMessage = "Error: run_in_background is not available in th
 	"If you need to wait, use @scheduler instead:\n" +
 	"  @scheduler /run_in 10m @<your-handle> <alternative-command>"
 
+// cannotWaitGuidance は Monitor / ScheduleWakeup / CronCreate の理由文に共通の案内 (issue #389)。
+// @scheduler に委ねると発火した便の返信先が @scheduler になり、依頼主に届かない。
+// 待たずにいま依頼主へ send_message で返してからターンを終えるよう案内する。
+const cannotWaitGuidance = "This bridge cannot wait across turns.\n" +
+	"Do not wait. Reply to the requester now with send_message, then end the turn.\n" +
+	"If the task needs waiting, say so in the reply (e.g. that you cannot wait here)."
+
 // monitorDeniedMessage は Monitor を deny するときの理由 (issue #388)。
 // Monitor で待つとターンが先に終わり、result 後に bridge が claude を止めるので返信が届かない。
 const monitorDeniedMessage = "Error: Monitor is not available in this bridge.\n" +
 	"This bridge ends the claude process after each request, so monitors do not survive.\n\n" +
-	"If you need to wait, use @scheduler instead:\n" +
-	"  @scheduler /run_in 10m @<your-handle> <alternative-command>"
+	cannotWaitGuidance
 
 // scheduleWakeupDeniedMessage は ScheduleWakeup を deny するときの理由 (issue #389)。
 // 予約した wakeup はセッションと一緒に消えるので、ターンを終えると返信が届かない。
 const scheduleWakeupDeniedMessage = "Error: ScheduleWakeup is not available in this bridge.\n" +
 	"This bridge ends the claude process after each request, so scheduled wakeups do not survive.\n\n" +
-	"If you need to wait, use @scheduler instead:\n" +
-	"  @scheduler /run_in 10m @<your-handle> <alternative-command>"
+	cannotWaitGuidance
 
 // cronCreateDeniedMessage は CronCreate を deny するときの理由 (issue #389)。
 // CronCreate の予約もセッションと一緒に消える。
 const cronCreateDeniedMessage = "Error: CronCreate is not available in this bridge.\n" +
 	"This bridge ends the claude process after each request, so cron jobs do not survive.\n\n" +
-	"If you need to wait or repeat, use @scheduler instead:\n" +
-	"  @scheduler /run_in 10m @<your-handle> <alternative-command>\n" +
-	"  @scheduler /add <name> <cron-5> @<your-handle> <command>"
+	cannotWaitGuidance
 
 // denyHookOutput は PreToolUse を deny する hook output を返す。
 func denyHookOutput(reason string) map[string]any {
