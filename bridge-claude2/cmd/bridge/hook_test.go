@@ -74,7 +74,7 @@ func TestInitializeRequest_RegistersPreToolUseHook(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := `{"hooks":{"PreToolUse":[{"hookCallbackIds":["hook_blocking_bash"],"matcher":"Bash"}]},"subtype":"initialize"}`
+	want := `{"hooks":{"PreToolUse":[{"hookCallbackIds":["hook_blocking_bash"],"matcher":"Bash"},{"hookCallbackIds":["hook_deny_monitor"],"matcher":"Monitor"}]},"subtype":"initialize"}`
 	if string(b) != want {
 		t.Fatalf("initialize request = %s, want %s", b, want)
 	}
@@ -302,6 +302,33 @@ func TestBlockingHookOutput_PatternDenyWithUnexpectedBackgroundType(t *testing.T
 				t.Errorf("reason = backgroundDeniedMessage, want pattern deny reason")
 			}
 		})
+	}
+}
+
+// Monitor は command の中身によらず deny し、理由文で @scheduler を案内すること (issue #388)。
+func TestBlockingHookOutput_DeniesMonitor(t *testing.T) {
+	input := strings.Join([]string{
+		hookCallbackLine("m1", monitorHookCallbackID, "until [ $(date +%s) -ge 9999999999 ]; do sleep 1; done; echo done", nil),
+		hookCallbackLine("m2", monitorHookCallbackID, "echo hi", nil),
+		resultLine,
+	}, "\n") + "\n"
+	var stdin bytes.Buffer
+	if _, err := readUntilResult(context.Background(), newStreamScanner(strings.NewReader(input), 1<<20), &stdin, nil, false); err != nil {
+		t.Fatalf("readUntilResult err = %v", err)
+	}
+	got := parseControlResponses(t, stdin.String())
+	if len(got) != 2 {
+		t.Fatalf("got %d control_responses, want 2: %s", len(got), stdin.String())
+	}
+	for i := range got {
+		h := got[i].Response.Response.HookSpecificOutput
+		if got[i].Response.Subtype != "success" || h == nil || h.PermissionDecision != "deny" ||
+			h.PermissionDecisionReason != monitorDeniedMessage {
+			t.Fatalf("[%d] = %+v, want deny with monitorDeniedMessage", i, got[i].Response)
+		}
+	}
+	if !strings.Contains(monitorDeniedMessage, "@scheduler /run_in") {
+		t.Errorf("monitorDeniedMessage does not guide to @scheduler: %q", monitorDeniedMessage)
 	}
 }
 

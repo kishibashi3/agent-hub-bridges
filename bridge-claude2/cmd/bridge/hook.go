@@ -4,6 +4,7 @@
 // initialize の control_request で PreToolUse (matcher Bash) のフックを登録すると、CLI は Bash を
 // 実行する前に hook_callback の control_request を stdout に出し、stdin への control_response を
 // 待つ。ブロック対象なら permissionDecision: deny を返し、コマンドを起動させない。
+// Monitor (matcher Monitor) は常に deny する (issue #388)。
 //
 // CLI は応答が来るまでツールの実行を止めたまま待つため、control_request には必ず何かを返す
 // (未知の callback_id は許可、未対応の subtype は error)。
@@ -20,6 +21,9 @@ import (
 // blockingHookCallbackID は initialize で登録する PreToolUse フックの callback ID。
 const blockingHookCallbackID = "hook_blocking_bash"
 
+// monitorHookCallbackID は Monitor ツールを deny する PreToolUse フックの callback ID (issue #388)。
+const monitorHookCallbackID = "hook_deny_monitor"
+
 // initializeRequest は initialize の control_request の request 部分を組み立てる。
 // withHooks=true のとき blocking command 阻止の PreToolUse フックを登録する。
 func initializeRequest(withHooks bool) map[string]any {
@@ -28,6 +32,7 @@ func initializeRequest(withHooks bool) map[string]any {
 		req["hooks"] = map[string]any{
 			"PreToolUse": []map[string]any{
 				{"matcher": "Bash", "hookCallbackIds": []string{blockingHookCallbackID}},
+				{"matcher": "Monitor", "hookCallbackIds": []string{monitorHookCallbackID}},
 			},
 		}
 	}
@@ -91,8 +96,15 @@ func handleControlRequest(w io.Writer, requestID string, raw json.RawMessage) {
 
 // blockingHookOutput は hook_callback への応答 (hook output) を返す。
 // run_in_background: true (issue #374) かブロック対象の Bash コマンドなら deny、
-// それ以外 (未知の callback_id を含む) は空 = 許可。
+// Monitor は中身によらず deny (issue #388)。それ以外 (未知の callback_id を含む) は空 = 許可。
 func blockingHookOutput(req controlRequest) map[string]any {
+	if req.CallbackID == monitorHookCallbackID {
+		slog.Warn("[blocking-cmd] Monitor detected, denying via PreToolUse hook",
+			"command_preview", truncate(req.Input.ToolInput.Command, 120),
+			"tool_use_id", req.Input.ToolUseID,
+		)
+		return denyHookOutput(monitorDeniedMessage)
+	}
 	if req.CallbackID != blockingHookCallbackID {
 		slog.Warn("runner: unknown hook callback_id, allowing", "callback_id", req.CallbackID)
 		return map[string]any{}
@@ -121,6 +133,13 @@ func blockingHookOutput(req controlRequest) map[string]any {
 // bridge は依頼ごとに claude を終わらせるので、バックグラウンドのタスクは残らない。
 const backgroundDeniedMessage = "Error: run_in_background is not available in this bridge.\n" +
 	"This bridge ends the claude process after each request, so background tasks do not survive.\n\n" +
+	"If you need to wait, use @scheduler instead:\n" +
+	"  @scheduler /run_in 10m @<your-handle> <alternative-command>"
+
+// monitorDeniedMessage は Monitor を deny するときの理由 (issue #388)。
+// Monitor で待つとターンが先に終わり、result 後に bridge が claude を止めるので返信が届かない。
+const monitorDeniedMessage = "Error: Monitor is not available in this bridge.\n" +
+	"This bridge ends the claude process after each request, so monitors do not survive.\n\n" +
 	"If you need to wait, use @scheduler instead:\n" +
 	"  @scheduler /run_in 10m @<your-handle> <alternative-command>"
 
