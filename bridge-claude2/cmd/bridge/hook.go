@@ -4,7 +4,8 @@
 // initialize の control_request で PreToolUse (matcher Bash) のフックを登録すると、CLI は Bash を
 // 実行する前に hook_callback の control_request を stdout に出し、stdin への control_response を
 // 待つ。ブロック対象なら permissionDecision: deny を返し、コマンドを起動させない。
-// Monitor (matcher Monitor) は常に deny する (issue #388)。
+// Monitor (issue #388) と ScheduleWakeup / CronCreate (issue #389) は常に deny する。
+// どれもターンが終わった後に harness が起こす前提のツールで、依頼ごとに終わる bridge では予約ごと消える。
 //
 // CLI は応答が来るまでツールの実行を止めたまま待つため、control_request には必ず何かを返す
 // (未知の callback_id は許可、未対応の subtype は error)。
@@ -24,6 +25,20 @@ const blockingHookCallbackID = "hook_blocking_bash"
 // monitorHookCallbackID は Monitor ツールを deny する PreToolUse フックの callback ID (issue #388)。
 const monitorHookCallbackID = "hook_deny_monitor"
 
+// scheduleWakeupHookCallbackID / cronCreateHookCallbackID は ScheduleWakeup / CronCreate を
+// deny する PreToolUse フックの callback ID (issue #389)。
+const (
+	scheduleWakeupHookCallbackID = "hook_deny_schedule_wakeup"
+	cronCreateHookCallbackID     = "hook_deny_cron_create"
+)
+
+// deniedToolMessages は中身によらず deny するツールの callback ID と理由文。
+var deniedToolMessages = map[string]string{
+	monitorHookCallbackID:        monitorDeniedMessage,
+	scheduleWakeupHookCallbackID: scheduleWakeupDeniedMessage,
+	cronCreateHookCallbackID:     cronCreateDeniedMessage,
+}
+
 // initializeRequest は initialize の control_request の request 部分を組み立てる。
 // withHooks=true のとき blocking command 阻止の PreToolUse フックを登録する。
 func initializeRequest(withHooks bool) map[string]any {
@@ -33,6 +48,8 @@ func initializeRequest(withHooks bool) map[string]any {
 			"PreToolUse": []map[string]any{
 				{"matcher": "Bash", "hookCallbackIds": []string{blockingHookCallbackID}},
 				{"matcher": "Monitor", "hookCallbackIds": []string{monitorHookCallbackID}},
+				{"matcher": "ScheduleWakeup", "hookCallbackIds": []string{scheduleWakeupHookCallbackID}},
+				{"matcher": "CronCreate", "hookCallbackIds": []string{cronCreateHookCallbackID}},
 			},
 		}
 	}
@@ -96,14 +113,16 @@ func handleControlRequest(w io.Writer, requestID string, raw json.RawMessage) {
 
 // blockingHookOutput は hook_callback への応答 (hook output) を返す。
 // run_in_background: true (issue #374) かブロック対象の Bash コマンドなら deny、
-// Monitor は中身によらず deny (issue #388)。それ以外 (未知の callback_id を含む) は空 = 許可。
+// Monitor / ScheduleWakeup / CronCreate は中身によらず deny (issue #388 / #389)。それ以外 (未知の callback_id を含む) は空 = 許可。
 func blockingHookOutput(req controlRequest) map[string]any {
-	if req.CallbackID == monitorHookCallbackID {
-		slog.Warn("[blocking-cmd] Monitor detected, denying via PreToolUse hook",
+	if msg, ok := deniedToolMessages[req.CallbackID]; ok {
+		slog.Warn("[blocking-cmd] session-bound tool detected, denying via PreToolUse hook",
+			"callback_id", req.CallbackID,
+			"tool_name", req.Input.ToolName,
 			"command_preview", truncate(req.Input.ToolInput.Command, 120),
 			"tool_use_id", req.Input.ToolUseID,
 		)
-		return denyHookOutput(monitorDeniedMessage)
+		return denyHookOutput(msg)
 	}
 	if req.CallbackID != blockingHookCallbackID {
 		slog.Warn("runner: unknown hook callback_id, allowing", "callback_id", req.CallbackID)
@@ -142,6 +161,21 @@ const monitorDeniedMessage = "Error: Monitor is not available in this bridge.\n"
 	"This bridge ends the claude process after each request, so monitors do not survive.\n\n" +
 	"If you need to wait, use @scheduler instead:\n" +
 	"  @scheduler /run_in 10m @<your-handle> <alternative-command>"
+
+// scheduleWakeupDeniedMessage は ScheduleWakeup を deny するときの理由 (issue #389)。
+// 予約した wakeup はセッションと一緒に消えるので、ターンを終えると返信が届かない。
+const scheduleWakeupDeniedMessage = "Error: ScheduleWakeup is not available in this bridge.\n" +
+	"This bridge ends the claude process after each request, so scheduled wakeups do not survive.\n\n" +
+	"If you need to wait, use @scheduler instead:\n" +
+	"  @scheduler /run_in 10m @<your-handle> <alternative-command>"
+
+// cronCreateDeniedMessage は CronCreate を deny するときの理由 (issue #389)。
+// CronCreate の予約もセッションと一緒に消える。
+const cronCreateDeniedMessage = "Error: CronCreate is not available in this bridge.\n" +
+	"This bridge ends the claude process after each request, so cron jobs do not survive.\n\n" +
+	"If you need to wait or repeat, use @scheduler instead:\n" +
+	"  @scheduler /run_in 10m @<your-handle> <alternative-command>\n" +
+	"  @scheduler /add <name> <cron-5> @<your-handle> <command>"
 
 // denyHookOutput は PreToolUse を deny する hook output を返す。
 func denyHookOutput(reason string) map[string]any {
