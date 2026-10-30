@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
@@ -74,7 +75,7 @@ func TestInitializeRequest_RegistersPreToolUseHook(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := `{"hooks":{"PreToolUse":[{"hookCallbackIds":["hook_blocking_bash"],"matcher":"Bash"}]},"subtype":"initialize"}`
+	want := `{"hooks":{"PreToolUse":[{"hookCallbackIds":["hook_blocking_bash"],"matcher":"Bash"},{"hookCallbackIds":["hook_deny_monitor"],"matcher":"Monitor"},{"hookCallbackIds":["hook_deny_schedule_wakeup"],"matcher":"ScheduleWakeup"},{"hookCallbackIds":["hook_deny_cron_create"],"matcher":"CronCreate"}]},"subtype":"initialize"}`
 	if string(b) != want {
 		t.Fatalf("initialize request = %s, want %s", b, want)
 	}
@@ -302,6 +303,67 @@ func TestBlockingHookOutput_PatternDenyWithUnexpectedBackgroundType(t *testing.T
 				t.Errorf("reason = backgroundDeniedMessage, want pattern deny reason")
 			}
 		})
+	}
+}
+
+// Monitor は command の中身によらず deny し、理由文で @scheduler ではなく send_message での即返信を案内すること (issue #388 / #389)。
+func TestBlockingHookOutput_DeniesMonitor(t *testing.T) {
+	input := strings.Join([]string{
+		hookCallbackLine("m1", monitorHookCallbackID, "until [ $(date +%s) -ge 9999999999 ]; do sleep 1; done; echo done", nil),
+		hookCallbackLine("m2", monitorHookCallbackID, "echo hi", nil),
+		resultLine,
+	}, "\n") + "\n"
+	var stdin bytes.Buffer
+	if _, err := readUntilResult(context.Background(), newStreamScanner(strings.NewReader(input), 1<<20), &stdin, nil, false); err != nil {
+		t.Fatalf("readUntilResult err = %v", err)
+	}
+	got := parseControlResponses(t, stdin.String())
+	if len(got) != 2 {
+		t.Fatalf("got %d control_responses, want 2: %s", len(got), stdin.String())
+	}
+	for i := range got {
+		h := got[i].Response.Response.HookSpecificOutput
+		if got[i].Response.Subtype != "success" || h == nil || h.PermissionDecision != "deny" ||
+			h.PermissionDecisionReason != monitorDeniedMessage {
+			t.Fatalf("[%d] = %+v, want deny with monitorDeniedMessage", i, got[i].Response)
+		}
+	}
+	if strings.Contains(monitorDeniedMessage, "@scheduler") || !strings.Contains(monitorDeniedMessage, "send_message") {
+		t.Errorf("monitorDeniedMessage should guide to send_message, not @scheduler: %q", monitorDeniedMessage)
+	}
+}
+
+// ScheduleWakeup / CronCreate は中身によらず deny し、理由文で @scheduler ではなく send_message での即返信を案内すること (issue #389)。
+func TestBlockingHookOutput_DeniesScheduleWakeupAndCronCreate(t *testing.T) {
+	cases := []struct {
+		callbackID string
+		want       string
+	}{
+		{scheduleWakeupHookCallbackID, scheduleWakeupDeniedMessage},
+		{cronCreateHookCallbackID, cronCreateDeniedMessage},
+	}
+	lines := make([]string, 0, len(cases)+1)
+	for i, c := range cases {
+		lines = append(lines, hookCallbackLine(fmt.Sprintf("s%d", i), c.callbackID, "", nil))
+	}
+	input := strings.Join(append(lines, resultLine), "\n") + "\n"
+	var stdin bytes.Buffer
+	if _, err := readUntilResult(context.Background(), newStreamScanner(strings.NewReader(input), 1<<20), &stdin, nil, false); err != nil {
+		t.Fatalf("readUntilResult err = %v", err)
+	}
+	got := parseControlResponses(t, stdin.String())
+	if len(got) != len(cases) {
+		t.Fatalf("got %d control_responses, want %d: %s", len(got), len(cases), stdin.String())
+	}
+	for i, c := range cases {
+		h := got[i].Response.Response.HookSpecificOutput
+		if got[i].Response.Subtype != "success" || h == nil || h.PermissionDecision != "deny" ||
+			h.PermissionDecisionReason != c.want {
+			t.Fatalf("[%s] = %+v, want deny with its message", c.callbackID, got[i].Response)
+		}
+		if strings.Contains(c.want, "@scheduler") || !strings.Contains(c.want, "send_message") {
+			t.Errorf("[%s] message should guide to send_message, not @scheduler: %q", c.callbackID, c.want)
+		}
 	}
 }
 
