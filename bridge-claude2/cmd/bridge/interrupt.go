@@ -88,3 +88,23 @@ func logShutdownLeftUnread(logPrefix string, rest []agenthub.Message) {
 	slog.Info(logPrefix+": shutdown — leaving remaining batch messages unread for drain / next startup (issue #342)",
 		"count", len(rest), "msg_ids", ids)
 }
+
+// terminatedNoticeBody は result の後に claude を止めたときの通知の本文 (issue #395)。
+const terminatedNoticeBody = autoNoticePrefix + " 返信の後も claude が終わらなかったため、bridge が止めました。" +
+	"claude の中で動いていた作業 (background task 等) はこの時点で止まっており、結果は返りません。" +
+	"返信で「流した」「後で送る」とあった作業は進んでいません。必要なら依頼を送り直してください。"
+
+// sendTerminatedNotice は result の後に claude を止めた依頼の送り主へ通知を 1 通送る (issue #395)。
+func sendTerminatedNotice(ctx context.Context, client *agenthub.Client, journal *Journal, msg agenthub.Message) {
+	if isAutoErrorEcho(msg.Body) {
+		return
+	}
+	sendCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), interruptNoticeTimeout)
+	defer cancel()
+	if err := journalledSend(sendCtx, client, journal, msg.Sender, terminatedNoticeBody, msg.ID); err != nil {
+		slog.Warn("sendTerminatedNotice: send failed — kept in journal for replay on next startup (issue #395)",
+			"msg_id", msg.ID, "from", msg.Sender, "err", err)
+		return
+	}
+	slog.Info("sendTerminatedNotice: sent terminated notice (issue #395)", "msg_id", msg.ID, "from", msg.Sender)
+}
