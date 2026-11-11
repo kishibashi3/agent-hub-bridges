@@ -441,6 +441,11 @@ func (n detachNotice) body(now time.Time) string {
 	switch {
 	case n.Result == nil:
 		fmt.Fprintf(&b, "result: LOST — %s。処理が最後まで走ったかは分からない\n", n.Lost)
+		if r.SupervisorPID > 0 && processGroupAlive(r.SupervisorPID) {
+			// 見届け役は自分のプロセスグループ (pgid = 見届け役の pid) で処理を起動している
+			fmt.Fprintf(&b, "note: 処理のプロセスグループ (pgid %d) はまだ残っている。処理は終了の便なしで走り続けている可能性がある\n",
+				r.SupervisorPID)
+		}
 	case n.Result.Error != "":
 		fmt.Fprintf(&b, "result: FAILED — %s\n", n.Result.Error)
 	case n.Result.Signal != "":
@@ -556,6 +561,11 @@ func readTail(path string, max int64) string {
 		}
 	}
 	return strings.ToValidUTF8(strings.TrimRight(s, "\n"), "")
+}
+
+// processGroupAlive は pgid のプロセスグループにまだプロセスが居るかを返す。
+func processGroupAlive(pgid int) bool {
+	return syscall.Kill(-pgid, 0) == nil
 }
 
 // readStartTime は /proc/<pid>/stat の starttime (22 番目) を返す。プロセスが無ければ ok=false。

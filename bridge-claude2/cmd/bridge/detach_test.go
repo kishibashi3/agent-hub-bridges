@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -311,5 +312,40 @@ func TestFormatPrompt_HasDetachGuidance(t *testing.T) {
 	p := formatPrompt("@me", inbound("hi"), "")
 	if !strings.Contains(p, `"$AGENT_HUB_BRIDGE_BIN" detach --`) {
 		t.Errorf("prompt lacks detach guidance:\n%s", p)
+	}
+}
+
+// 見届け役だけが消えて処理が残っているときは、そのことを便に書く。
+func TestDetach_LostSupervisor_ChildStillRunning(t *testing.T) {
+	dir := setDetachEnv(t)
+	gate := filepath.Join(t.TempDir(), "gate")
+	var out, errOut strings.Builder
+	if code := runDetach([]string{"--", fmt.Sprintf("while [ ! -e '%s' ]; do sleep 0.05; done", gate)}, &out, &errOut); code != 0 {
+		t.Fatalf("runDetach: %s", errOut.String())
+	}
+	t.Cleanup(func() { _ = os.WriteFile(gate, nil, 0o600) })
+	time.Sleep(300 * time.Millisecond)
+	var rec detachRecord
+	entries, _ := filepath.Glob(filepath.Join(dir, "*.json"))
+	if len(entries) != 1 || readJSONFile(entries[0], &rec) != nil || rec.SupervisorPID == 0 {
+		t.Fatalf("record not found: %v", entries)
+	}
+	if err := syscall.Kill(rec.SupervisorPID, syscall.SIGKILL); err != nil {
+		t.Fatal(err)
+	}
+	var n detachNotice
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if ns := pendingDetachNotices(dir, time.Now()); len(ns) == 1 {
+			n = ns[0]
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if n.Lost == "" {
+		t.Fatal("want lost notice")
+	}
+	if body := n.body(time.Now()); !strings.Contains(body, "まだ残っている") {
+		t.Errorf("body should say the job may still be running:\n%s", body)
 	}
 }
