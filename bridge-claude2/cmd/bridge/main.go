@@ -116,6 +116,8 @@ type config struct {
 	MaxQueryRetries int
 	// JournalDir は journal / deferred 記録の保存先ディレクトリ (起動時に解決する)。
 	JournalDir string
+	// DetachDir は detach で切り離した処理の記録の置き場 (issue #395)。"" なら detach を使わない。
+	DetachDir string
 	// ScannerBufferSize は stream-json bufio.Scanner のバッファサイズ (bytes)。
 	// AGENT_HUB_SCANNER_BUFFER_SIZE env で設定可能 (例: "4MB", "8MB")。デフォルト 4MB。
 	ScannerBufferSize int
@@ -280,7 +282,7 @@ func parseConfig() (*config, error) {
 		resolvedLogFile = filepath.Join(logDir, "bridge-"+participantVal+".log")
 	}
 
-	return &config{
+	cfg := &config{
 		Participant:       participantVal,
 		DisplayName:       resolvedDisplayName,
 		AgentHubURL:       url,
@@ -300,7 +302,10 @@ func parseConfig() (*config, error) {
 		ScannerBufferSize: resolvedScannerBufferSize,
 		JournalDir:        resolvedJournalDir,
 		ContextStage:      resolvedContextStage,
-	}, nil
+	}
+	// issue #395: detach の記録は journal dir の下に participant (tenant) ごとに置く
+	cfg.DetachDir = filepath.Join(resolvedJournalDir, "detached", cfg.stateKey())
+	return cfg, nil
 }
 
 func validateLogLevel(level string) error {
@@ -468,6 +473,11 @@ func buildGitHubFooter(handle, bridgeType, model string) string {
 // ──────────────────────────────────────────────────────────────────────── //
 
 func main() {
+	// issue #395: claude のツールから呼ばれる detach / detach-run サブコマンド
+	if code, ok := runSubcommand(os.Args[1:]); ok {
+		os.Exit(code)
+	}
+
 	cfg, err := parseConfig()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "config error: %v\n", err)
