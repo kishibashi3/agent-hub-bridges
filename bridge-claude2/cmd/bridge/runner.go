@@ -441,6 +441,8 @@ func (r *claudeRunner) spawnSubprocess(ctx context.Context) (*exec.Cmd, io.Write
 			env = append(filteredEnv(), "GH_TOKEN="+tok)
 		}
 	}
+	// issue #395: ターンを越える処理を detach で切り離せるよう、置き場と依頼を渡す。
+	env = append(env, r.detachEnv(ctx)...)
 	// issue #264 方針 B: IAT あり/なし両経路で AGENT_HUB_BRIDGE=1 を付与し、plugin の
 	// SessionStart オープニング (get_messages 先読み) を bridge 配下では発火させない。
 	// 末尾に append するので、親環境に同名の値があっても子プロセスではこちらが優先される。
@@ -837,4 +839,34 @@ func (r *claudeRunner) buildArgs() []string {
 		args = append(args, "--add-dir", dir)
 	}
 	return args
+}
+
+// inboundKey は ctx に処理中の依頼 (セッションと message ID) を載せるキー (issue #395)。
+type inboundKey struct{}
+
+type inboundInfo struct {
+	Session  string
+	CausedBy string
+}
+
+// withInbound は処理中の依頼を ctx に載せる。spawnSubprocess が detach 用の env に使う。
+func withInbound(ctx context.Context, session, causedBy string) context.Context {
+	return context.WithValue(ctx, inboundKey{}, inboundInfo{Session: session, CausedBy: causedBy})
+}
+
+// detachEnv は claude に渡す detach 用の env を返す (issue #395)。
+// detach の置き場・依頼は分かるときだけ付ける。
+func (r *claudeRunner) detachEnv(ctx context.Context) []string {
+	if r.cfg.DetachDir == "" {
+		return nil
+	}
+	var env []string
+	if exe, err := os.Executable(); err == nil {
+		env = append(env, detachBinEnv+"="+exe)
+	}
+	env = append(env, detachDirEnv+"="+r.cfg.DetachDir)
+	if in, ok := ctx.Value(inboundKey{}).(inboundInfo); ok {
+		env = append(env, detachSessionEnv+"="+in.Session, detachCausedByEnv+"="+in.CausedBy)
+	}
+	return env
 }

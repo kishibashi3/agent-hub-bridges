@@ -116,7 +116,9 @@ type config struct {
 	MaxQueryRetries int
 	// JournalDir は journal / deferred 記録の保存先ディレクトリ (起動時に解決する)。
 	JournalDir string
-	// DetachDir は detach で切り離した処理の記録の置き場 (issue #395)。"" なら detach を使わない。
+	// DetachDir は detach で切り離した処理の記録の置き場 (issue #395)。
+	// 起動時に必ず journal dir の下に決まる (parseConfig)。"" になるのは cfg を直接組む test だけで、
+	// そのときは claude に detach の env を渡さず、便も出さない。
 	DetachDir string
 	// ScannerBufferSize は stream-json bufio.Scanner のバッファサイズ (bytes)。
 	// AGENT_HUB_SCANNER_BUFFER_SIZE env で設定可能 (例: "4MB", "8MB")。デフォルト 4MB。
@@ -441,10 +443,15 @@ func formatPrompt(selfHandle string, msg agenthub.Message, footer string) string
 		msg.Sender, msg.ID,
 		msg.Sender,
 	)
+	return base + detachGuidance + footerInstruction(footer)
+}
+
+// footerInstruction は GitHub 投稿 footer の指示を返す (issue #245)。footer が空なら "".
+func footerInstruction(footer string) string {
 	if footer == "" {
-		return base
+		return ""
 	}
-	return base + fmt.Sprintf(
+	return fmt.Sprintf(
 		"\n\n【GitHub 投稿ルール (issue #245)】git / GitHub への投稿"+
 			"(PR・issue のコメント等) や成果物テキストを作成する場合は、文末に次の "+
 			"footer 行を**そのまま**付けること。model 等は推測で書き換えず、"+

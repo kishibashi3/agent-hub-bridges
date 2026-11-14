@@ -222,6 +222,9 @@ func runHubSession(
 	pollInterval := resolveInboxPollInterval()
 	pollTicker := time.NewTicker(pollInterval)
 	defer pollTicker.Stop()
+	// issue #395: detach で切り離した処理が終わったら便を差し込む
+	detachTicker := time.NewTicker(detachPollInterval)
+	defer detachTicker.Stop()
 	slog.Info("runHubSession: safety-net poll enabled",
 		"interval_s", pollInterval.Seconds(),
 	)
@@ -318,6 +321,11 @@ func runHubSession(
 				slog.Debug("runHubSession: inbox push — calling GetMessages")
 			case <-pollTicker.C:
 				slog.Debug("runHubSession: safety-net poll / heartbeat — calling GetMessages")
+			case <-detachTicker.C:
+				if ctx.Err() == nil {
+					deliverDetachNotices(ctx, cfg, client, runner, tracker, journal, sleeper)
+				}
+				continue
 			}
 		}
 
@@ -539,7 +547,23 @@ func handleOne(
 	slog.Info("← message",
 		"msg_id", msg.ID, "from", msg.Sender, "body_preview", truncate(msg.Body, 120))
 
-	prompt := formatPrompt("@"+cfg.Participant, msg, cfg.GitHubFooter)
+	return runPrompt(ctx, client, runner, msg, formatPrompt("@"+cfg.Participant, msg, cfg.GitHubFooter), cfg, tracker, journal)
+}
+
+// runPrompt は prompt を claude に流し、失敗時のリトライ・依頼主への通知までを行う。
+// handleOne と detach の便 (issue #395) で共通。msg は依頼主 (Sender) と因果の ID (ID) に使う。
+func runPrompt(
+	ctx context.Context,
+	client *agenthub.Client,
+	runner *claudeRunner,
+	msg agenthub.Message,
+	prompt string,
+	cfg *config,
+	tracker *activityTracker,
+	journal *Journal,
+) error {
+	// issue #395: detach で切り離した処理の便を、この依頼主のセッションに返すため
+	ctx = withInbound(ctx, msg.Sender, msg.ID)
 
 	const retryBackoff = 5 * time.Second
 	var lastUsage queryUsage
