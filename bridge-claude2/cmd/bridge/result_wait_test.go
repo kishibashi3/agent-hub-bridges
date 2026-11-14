@@ -343,3 +343,46 @@ func TestQuery_TimeoutBeforeResult_NoAfterResultLogs(t *testing.T) {
 		t.Errorf("after-result wait/log ran without a result:\n%s", logs)
 	}
 }
+
+// result の後に claude を止めたら、依頼主に通知が 1 通届く (issue #395)。
+func TestHandleOne_TerminatedAfterResult_NotifiesRequester(t *testing.T) {
+	withResultExitLimit(t, 300*time.Millisecond, 500*time.Millisecond)
+	script := writeAfterResultFakeClaude(t, "trap 'exit 143' TERM\nwhile :; do sleep 0.1; done")
+	client, cfg, runner, hub, journal := newTestEnv(t, script)
+
+	if err := handleOne(context.Background(), client, runner, inbound("hello"), cfg, &activityTracker{}, journal); err != nil {
+		t.Fatalf("handleOne: %v", err)
+	}
+	sends := hub.callsNamed("send_message")
+	if len(sends) != 1 {
+		t.Fatalf("send_message = %d, want 1", len(sends))
+	}
+	if body, _ := sends[0].Args["message"].(string); body != terminatedNoticeBody {
+		t.Errorf("body = %q", body)
+	}
+	if to, _ := sends[0].Args["to"].(string); to != "@peer" {
+		t.Errorf("to = %q", to)
+	}
+}
+
+// claude が result の後に自分で終われば、通知は出さない (issue #395)。
+// claude の env には background task の無効化が付く。
+func TestHandleOne_ExitAfterResult_NoNoticeAndBackgroundTasksDisabled(t *testing.T) {
+	envLog := filepath.Join(t.TempDir(), "env")
+	script := writeAfterResultFakeClaude(t, fmt.Sprintf("env > '%s'\nexit 0", envLog))
+	client, cfg, runner, hub, journal := newTestEnv(t, script)
+
+	if err := handleOne(context.Background(), client, runner, inbound("hello"), cfg, &activityTracker{}, journal); err != nil {
+		t.Fatalf("handleOne: %v", err)
+	}
+	if n := len(hub.callsNamed("send_message")); n != 0 {
+		t.Errorf("send_message = %d, want 0", n)
+	}
+	envData, err := os.ReadFile(envLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(envData), disableBackgroundTasksEnv) {
+		t.Errorf("claude env missing %q", disableBackgroundTasksEnv)
+	}
+}

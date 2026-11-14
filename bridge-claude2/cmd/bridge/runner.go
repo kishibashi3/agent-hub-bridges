@@ -139,6 +139,10 @@ type queryUsage struct {
 	// handleOne がこれを runner.innerHandled に積み、processMessages が次の GetMessages
 	// で同じ ID を skip する (innerhandled.go 参照)。
 	InnerHandledIDs []string
+	// TerminatedAfterResult は result の後に claude が resultExitLimit 内に終わらず、bridge が
+	// 止めたかどうか (issue #395)。claude の中で動いていた作業も止まっているので、handleOne が
+	// 依頼主に知らせる。
+	TerminatedAfterResult bool
 	// ResultReceived は stdout から result イベントを受け取ったかどうか (issue #378)。
 	// false (ctx cancel / SubprocessTimeout / result なしの EOF 等) なら query は
 	// result の後の待ち (waitAfterResult) を通らない。
@@ -168,6 +172,11 @@ const markAsReadToolName = "mcp__agent-hub__mark_as_read"
 // agent-hub plugin の session-start.sh (agent-hub-plugins-claude#44) はこれが非空かつ "0"
 // 以外なら SessionStart オープニング (Monitor 起動 + get_messages 先読み) を発火しない。
 const bridgeSpawnedEnv = "AGENT_HUB_BRIDGE=1"
+
+// disableBackgroundTasksEnv は claude の中に background task を立てさせない (issue #395)。
+// 付けないと、タイムアウトした foreground の Bash が background に移り (PreToolUse の
+// run_in_background の deny をすり抜ける)、result 後に claude ごと止められる。
+const disableBackgroundTasksEnv = "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1"
 
 // pendingToolUse は send_message / mark_as_read の tool_use を観測してから tool_result で
 // 成否が確定するまでの間、input から抜き出した inbound ID を保持する (issue #264)。
@@ -332,7 +341,7 @@ func (r *claudeRunner) query(ctx context.Context, prompt, sessionID string, trac
 	stdinPipe.Close()
 	var waitErr error
 	if usage.ResultReceived {
-		waitErr = waitAfterResult(cmd, scanner, resultExitLimit)
+		usage.TerminatedAfterResult, waitErr = waitAfterResult(cmd, scanner, resultExitLimit)
 	} else {
 		// result を受け取っていない (ctx cancel / SubprocessTimeout なら cmd.Cancel で止めている
 		// 最中) ので、result の後の待ち・ログは通さない (issue #378)
@@ -436,6 +445,9 @@ func (r *claudeRunner) spawnSubprocess(ctx context.Context) (*exec.Cmd, io.Write
 	// SessionStart オープニング (get_messages 先読み) を bridge 配下では発火させない。
 	// 末尾に append するので、親環境に同名の値があっても子プロセスではこちらが優先される。
 	cmd.Env = append(env, bridgeSpawnedEnv)
+	// issue #395: claude の中に background task を立てさせない。立つと result 後に claude ごと止められ、
+	// 作業が黙って消える (タイムアウトした foreground の Bash も background に移らず、タイムアウトとして返る)。
+	cmd.Env = append(cmd.Env, disableBackgroundTasksEnv)
 
 	stdinPipe, err := cmd.StdinPipe()
 	if err != nil {
@@ -481,7 +493,9 @@ func terminateProcessTree(p *os.Process, grace time.Duration) error {
 //
 // 待つのは stdout の EOF ではなく claude 本体の終了 (issue #378)。claude の外に切り離された
 // 子孫が stdout を握っていると EOF は来ないが、claude が終わっていれば上限を待たずに戻る。
-func waitAfterResult(cmd *exec.Cmd, scanner *bufio.Scanner, limit time.Duration) error {
+//
+// terminated は上限を超えて止めたかどうか (issue #395: 止めたことを依頼主に知らせるため)。
+func waitAfterResult(cmd *exec.Cmd, scanner *bufio.Scanner, limit time.Duration) (terminated bool, err error) {
 	pid := cmd.Process.Pid
 	drained := make(chan struct{})
 	go func() {
@@ -514,6 +528,7 @@ func waitAfterResult(cmd *exec.Cmd, scanner *bufio.Scanner, limit time.Duration)
 	case <-exited:
 		waitDrainedAfterExit(drained, pid)
 	case <-timer.C:
+		terminated = true
 		slog.Warn("runner: Claude subprocess did not exit after result, terminating "+
 			"(background task left running? issue #374)",
 			"pid", pid, "limit", limit)
@@ -529,9 +544,9 @@ func waitAfterResult(cmd *exec.Cmd, scanner *bufio.Scanner, limit time.Duration)
 	// Wait は claude の終了後に stdout を閉じるので、drain も抜ける。drain が抜けるのを
 	// 待ってから戻り、query の後に after-result の Warn が出ないようにする。
 	close(waiting)
-	err := cmd.Wait()
+	err = cmd.Wait()
 	<-drained
-	return err
+	return terminated, err
 }
 
 // waitDrainedAfterExit は claude の終了後、stdout の EOF を exitedDrainGrace まで待つ
