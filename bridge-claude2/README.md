@@ -76,6 +76,24 @@ sender within the cooldown are suppressed with a WARN log
 or a normal peer is unchanged. The cooldown state lives in the runner and survives hub
 reconnects.
 
+### @scheduler bounce (issue #392)
+
+`@scheduler` answers any non-command (free text) DM with a fixed bounce
+(`@scheduler は自由メッセージは受け付けません。コマンドは /help で確認してください。`).
+If claude replied to that bounce, the reply would be bounced again and the exchange would
+never stop. The cooldown above does not help here, because it only covers the bridge's own
+auto replies. So an inbound message whose sender is `@scheduler` **and** whose body starts
+with `@scheduler は自由メッセージは受け付けません。` is marked read **without starting claude**,
+and the bridge logs one line (`skip @scheduler bounce without invoking claude (issue #392)`).
+This applies to normal processing, startup catch-up and the shutdown drain. Other
+`@scheduler` messages (fired `/run_in` / cron messages, command replies) are dispatched as
+before.
+
+**Dependency on the bounce text:** the check matches the text produced by agent-hub
+`packages/scheduler/scheduler.py` (`schedulerBouncePrefix` in `cmd/bridge/bounce.go`). If
+agent-hub changes that text, the check silently stops working and the loop can come back.
+Change both sides together.
+
 ## GitHub posting footer (standard rule, issue #245)
 
 This bridge **auto-injects a GitHub posting footer instruction into every inner-Claude
