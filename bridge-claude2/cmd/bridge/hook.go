@@ -51,6 +51,10 @@ func initializeRequest(withHooks bool) map[string]any {
 				{"matcher": "ScheduleWakeup", "hookCallbackIds": []string{scheduleWakeupHookCallbackID}},
 				{"matcher": "CronCreate", "hookCallbackIds": []string{cronCreateHookCallbackID}},
 			},
+			// issue #393: 依頼主に返さずにターンを終えるのを 1 回だけ差し戻す (stophook.go)
+			"Stop": []map[string]any{
+				{"hookCallbackIds": []string{stopHookCallbackID}},
+			},
 		}
 	}
 	return req
@@ -69,6 +73,9 @@ type controlRequest struct {
 			// 想定外の型で control_request 全体の parse が失敗し、pattern の deny まで効かなくなる。
 			RunInBackground json.RawMessage `json:"run_in_background"`
 		} `json:"tool_input"`
+		// StopHookActive は Stop の hook_callback で CLI が付ける (issue #393)。
+		// Stop フックの差し戻しで続いているターンなら true。
+		StopHookActive bool `json:"stop_hook_active"`
 	} `json:"input"`
 }
 
@@ -95,7 +102,8 @@ func runInBackground(raw json.RawMessage) bool {
 
 // handleControlRequest は CLI からの control_request に control_response を返す。
 // どの分岐でも必ず応答を書く (応答しないと CLI がツール実行を止めたまま待ち続ける)。
-func handleControlRequest(w io.Writer, requestID string, raw json.RawMessage) {
+// stop は Stop フック (issue #393) の応答を返す。nil なら Stop は許可 (空の応答)。
+func handleControlRequest(w io.Writer, requestID string, raw json.RawMessage, stop func(stopHookActive bool) map[string]any) {
 	var req controlRequest
 	if err := json.Unmarshal(raw, &req); err != nil {
 		slog.Warn("runner: control_request parse failed, replying error", "request_id", requestID, "err", err)
@@ -106,6 +114,14 @@ func handleControlRequest(w io.Writer, requestID string, raw json.RawMessage) {
 		slog.Warn("runner: unsupported control_request subtype, replying error",
 			"request_id", requestID, "subtype", req.Subtype)
 		writeControlResponse(w, requestID, nil, fmt.Errorf("bridge: unsupported control_request subtype %q", req.Subtype))
+		return
+	}
+	if req.CallbackID == stopHookCallbackID {
+		out := map[string]any{}
+		if stop != nil {
+			out = stop(req.Input.StopHookActive)
+		}
+		writeControlResponse(w, requestID, out, nil)
 		return
 	}
 	writeControlResponse(w, requestID, blockingHookOutput(req), nil)

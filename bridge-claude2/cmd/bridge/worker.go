@@ -559,7 +559,8 @@ func handleOne(
 			}
 		}
 
-		usage, err := runner.query(ctx, prompt, msg.Sender, tracker)
+		// issue #393: 返信も既読化もせずにターンを終えたら Stop フックで 1 回だけ差し戻す
+		usage, err := runner.query(withReplyCheck(ctx, msg.ID, msg.Sender), prompt, msg.Sender, tracker)
 		// issue #267: telemetry span は query 成否に関わらず emit する (usage があれば記録)
 		emitSpan(msg.ID, cfg.Model, usage)
 		lastUsage = usage
