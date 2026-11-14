@@ -385,6 +385,14 @@ func processMessages(
 			continue
 		}
 
+		// issue #392: @scheduler の自由文 bounce は claude を起動せずに既読にする (bounce.go)。
+		if isSchedulerBounce(msg) {
+			slog.Info(logPrefix+": skip @scheduler bounce without invoking claude (issue #392)",
+				"msg_id", msg.ID, "caused_by", msg.CausedBy)
+			_ = client.MarkAsRead(ctx, msg.ID)
+			continue
+		}
+
 		// スラッシュコマンドを CommandRouter で処理 (MarkAsRead は Handle 内部で呼ばれる)
 		if router != nil && router.Handle(ctx, client, msg) {
 			continue
@@ -846,6 +854,13 @@ func runGracefulDrain(
 		if runner.innerHandled.has(m.ID) {
 			slog.Warn("[drain] skipping already-replied-by-inner-session message (issue #264)",
 				"msg_id", m.ID, "from", m.Sender)
+			_ = client.MarkAsRead(drainCtx, m.ID)
+			continue
+		}
+		// issue #392: @scheduler の自由文 bounce は claude に渡さず既読にする (bounce.go)。
+		if isSchedulerBounce(m) {
+			slog.Info("[drain] skip @scheduler bounce without invoking claude (issue #392)",
+				"msg_id", m.ID, "caused_by", m.CausedBy)
 			_ = client.MarkAsRead(drainCtx, m.ID)
 			continue
 		}
