@@ -149,14 +149,42 @@ func TestDetach_RequiresEnv(t *testing.T) {
 // 処理のプロセスグループはまだ残っていると判定できる。
 func TestDetach_LostSupervisor_ChildStillRunning(t *testing.T) {
 	dir := setDetachEnv(t)
-	gate := filepath.Join(t.TempDir(), "gate")
-	rec := startDetach(t, dir, "--", fmt.Sprintf("while [ ! -e '%s' ]; do sleep 0.05; done", gate))
+	tmp := t.TempDir()
+	gate := filepath.Join(tmp, "gate")
+	started := filepath.Join(tmp, "started")
+	rec := startDetach(t, dir, "--", fmt.Sprintf("touch '%s'; while [ ! -e '%s' ]; do sleep 0.05; done", started, gate))
 	t.Cleanup(func() { _ = os.WriteFile(gate, nil, 0o600) })
+	// 見届け役が処理を起動する前に kill すると、グループには見届け役しか居ない。
+	// 処理が動き出したのを見てから kill する。
+	startDeadline := time.Now().Add(10 * time.Second)
+	for {
+		if _, err := os.Stat(started); err == nil {
+			break
+		}
+		if time.Now().After(startDeadline) {
+			t.Fatal("detached job did not start in time")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 	if st, ok := readStartTime(rec.SupervisorPID); !ok || st != rec.SupervisorStart {
 		t.Fatalf("supervisor start time = %d,%v; record has %d", st, ok, rec.SupervisorStart)
 	}
 	if err := syscall.Kill(rec.SupervisorPID, syscall.SIGKILL); err != nil {
 		t.Fatal(err)
+	}
+	// 見届け役はこの test process の子なので、回収しないと zombie として
+	// プロセスグループに残り、processGroupAlive が常に true になってしまう。
+	// 回収してから判定する。
+	var ws syscall.WaitStatus
+	for {
+		_, err := syscall.Wait4(rec.SupervisorPID, &ws, 0, nil)
+		if err == syscall.EINTR {
+			continue
+		}
+		if err != nil {
+			t.Fatalf("wait4 supervisor: %v", err)
+		}
+		break
 	}
 	deadline := time.Now().Add(10 * time.Second)
 	for {

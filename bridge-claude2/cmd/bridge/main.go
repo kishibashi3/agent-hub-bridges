@@ -116,7 +116,9 @@ type config struct {
 	MaxQueryRetries int
 	// JournalDir は journal / deferred 記録の保存先ディレクトリ (起動時に解決する)。
 	JournalDir string
-	// DetachDir は detach で切り離した処理の記録の置き場 (issue #395)。"" なら detach を使わない。
+	// DetachDir は detach で切り離した処理の記録の置き場 (issue #395)。
+	// 起動時に必ず journal dir の下に決まる (parseConfig)。"" になるのは cfg を直接組む test だけで、
+	// そのときは claude に detach の env を渡さず、便も出さない。
 	DetachDir string
 	// ScannerBufferSize は stream-json bufio.Scanner のバッファサイズ (bytes)。
 	// AGENT_HUB_SCANNER_BUFFER_SIZE env で設定可能 (例: "4MB", "8MB")。デフォルト 4MB。
