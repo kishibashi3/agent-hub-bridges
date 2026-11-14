@@ -94,6 +94,30 @@ before.
 agent-hub changes that text, the check silently stops working and the loop can come back.
 Change both sides together.
 
+## Work that outlives a turn: `detach` (issue #395)
+
+The bridge ends the inner `claude` after each request, so anything running *inside*
+claude (a `run_in_background` task, a foreground Bash moved to the background when it
+hit its timeout, a background Agent) stops with it. The bridge therefore:
+
+1. starts claude with `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`, so a command that hits
+   its timeout comes back to claude as a timeout instead of silently moving to the
+   background;
+2. offers `"$AGENT_HUB_BRIDGE_BIN" detach [-name <label>] -- '<command>'` (the prompt
+   tells the peer about it). It starts a supervisor with `setsid` outside claude's process
+   tree and returns at once. A single string runs with `bash -c`; two or more words run
+   as argv;
+3. checks the spool (`$AGENT_HUB_JOURNAL_DIR/detached/<tenant>__<participant>/`, default
+   `~/.agent-hub/journals/...`) every 5 s. For each job that ended — **any exit code,
+   a signal, a start failure, or a supervisor that disappeared (`LOST`)** — it wakes claude
+   once in the session of the requester the job was started for, with the exit code,
+   elapsed time, output path and the tail of the output. The hub does not accept a DM to
+   yourself, so this notice is injected inside the bridge, not sent through the hub. It is
+   kept on disk, so a bridge restart does not lose it (`<id>.notified` marks it as sent);
+4. if claude still does not exit within 10 s after its result, stops it as before
+   (issue #374) and now also sends `(auto) bridge-claude2 notice: …` to the requester,
+   so the stopped work does not vanish silently.
+
 ## GitHub posting footer (standard rule, issue #245)
 
 This bridge **auto-injects a GitHub posting footer instruction into every inner-Claude

@@ -441,10 +441,15 @@ func formatPrompt(selfHandle string, msg agenthub.Message, footer string) string
 		msg.Sender, msg.ID,
 		msg.Sender,
 	)
+	return base + detachGuidance + footerInstruction(footer)
+}
+
+// footerInstruction は GitHub 投稿 footer の指示を返す (issue #245)。footer が空なら "".
+func footerInstruction(footer string) string {
 	if footer == "" {
-		return base
+		return ""
 	}
-	return base + fmt.Sprintf(
+	return fmt.Sprintf(
 		"\n\n【GitHub 投稿ルール (issue #245)】git / GitHub への投稿"+
 			"(PR・issue のコメント等) や成果物テキストを作成する場合は、文末に次の "+
 			"footer 行を**そのまま**付けること。model 等は推測で書き換えず、"+
