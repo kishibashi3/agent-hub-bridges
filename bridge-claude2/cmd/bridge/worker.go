@@ -572,6 +572,11 @@ func handleOne(
 				sendInterruptNotice(ctx, client, journal, msg)
 				return nil
 			}
+			if usage.TerminatedAfterResult {
+				// issue #395: result の後も claude が終わらず止めた。claude の中で動いていた
+				// 作業も止まっているので、依頼主に知らせる (静かに成果が消えないように)。
+				sendTerminatedNotice(ctx, client, journal, msg)
+			}
 			slog.Info("→ message processed", "msg_id", msg.ID, "from", msg.Sender)
 			return nil
 		}
