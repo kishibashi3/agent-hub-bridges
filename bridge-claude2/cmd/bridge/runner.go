@@ -630,6 +630,8 @@ func readUntilResult(ctx context.Context, scanner *bufio.Scanner, stdinWriter io
 	// 対応する tool_result (is_error) を突き合わせて usage.SentMessageConfirmed と
 	// usage.InnerHandledIDs を確定させるために保持する。
 	pending := map[string]pendingToolUse{}
+	// rc は Stop フックで処理中の依頼への返信を確かめる (issue #393)。ctx に依頼が無ければ常に許可。
+	rc := newReplyCheck(ctx)
 
 	for scanner.Scan() {
 		select {
@@ -654,7 +656,9 @@ func readUntilResult(ctx context.Context, scanner *bufio.Scanner, stdinWriter io
 		// issue #345: control_request (PreToolUse の hook_callback 等) には必ず応答する。
 		// 応答しないと CLI はツール実行を止めたまま待ち続ける。
 		if ev.Type == "control_request" {
-			handleControlRequest(stdinWriter, ev.RequestID, ev.Request)
+			handleControlRequest(stdinWriter, ev.RequestID, ev.Request, func(active bool) map[string]any {
+				return rc.stopHookOutput(usage.InnerHandledIDs, active)
+			})
 			continue
 		}
 

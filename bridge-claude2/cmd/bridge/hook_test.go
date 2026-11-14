@@ -75,7 +75,7 @@ func TestInitializeRequest_RegistersPreToolUseHook(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := `{"hooks":{"PreToolUse":[{"hookCallbackIds":["hook_blocking_bash"],"matcher":"Bash"},{"hookCallbackIds":["hook_deny_monitor"],"matcher":"Monitor"},{"hookCallbackIds":["hook_deny_schedule_wakeup"],"matcher":"ScheduleWakeup"},{"hookCallbackIds":["hook_deny_cron_create"],"matcher":"CronCreate"}]},"subtype":"initialize"}`
+	want := `{"hooks":{"PreToolUse":[{"hookCallbackIds":["hook_blocking_bash"],"matcher":"Bash"},{"hookCallbackIds":["hook_deny_monitor"],"matcher":"Monitor"},{"hookCallbackIds":["hook_deny_schedule_wakeup"],"matcher":"ScheduleWakeup"},{"hookCallbackIds":["hook_deny_cron_create"],"matcher":"CronCreate"}],"Stop":[{"hookCallbackIds":["hook_stop_reply_check"]}]},"subtype":"initialize"}`
 	if string(b) != want {
 		t.Fatalf("initialize request = %s, want %s", b, want)
 	}
