@@ -1,22 +1,24 @@
 # GitHub ゲートウェイ peer 設計（issue #407）
 
-GitHub への書き込みを 1 つの非エージェント peer に通し、**DM の送り主ごとに使う鍵と許す操作を切り替える**。
+GitHub への書き込みを 1 つの非エージェント peer に通し、**DM の送り主の役（role）ごとに使う鍵と許す操作を切り替える**。
 
 - 状態: **設計のみ。実装はしていない。**
-- 正本の依頼: kishibashi3/agent-hub-bridges#407
-- **#73 の答え待ちで止めている所がある**（§7）。#73 の答えによって変わる所は「#73 がこう決まればこう」と分岐で書いた
+- 正本の依頼: kishibashi3/agent-hub-bridges#407（制約の追加: [権限表のメンテ](https://github.com/kishibashi3/agent-hub-bridges/issues/407#issuecomment-7116121242) / [App を使う・使わないの両方](https://github.com/kishibashi3/agent-hub-bridges/issues/407#issuecomment-7116190995)）
+- **#73 は「どれを採るか」ではなくなった。** 鍵の供給は App でも PAT でも動く構成にする（§7）。#73 の答えで決まるのは「App を使う構成のときの App の数・権限・入れ先」だけ
 - 時刻は RFC 3339 UTC で書く
 
 ---
 
 ## 0. 結論（先に）
 
-1. **非エージェント peer `@github`（仮称）を新設する。** `@scheduler` と同じく、DM の `/` コマンドを決まった形でだけ受け、LLM を通さない。送り主の handle から、**ポリシー表に書かれた操作だけ**を、**その送り主用に権限を絞って作ったトークン**で実行する。それ以外は断る
-2. **inbound（`@gh-watch`）とはプロセスを分ける。** 同じ GitHub App を使い、部品（`packages/github-client`）を共有する。落ち方と置き場所が違うため（§4）
-3. **ゲートウェイを入れただけでは何も守れない。** 各 peer が `gh` と共有トークンを持ったままなら、ゲートウェイは助言にすぎない。**外す段（S3）と、その前提になる「peer と鍵を別の uid に分ける」ことを段の中に入れた**（§6）
-4. **「絶対に事故が起きない」とはならない。** 残るもの: ゲートウェイの設定誤り／相手と鍵の対応の誤り／迂回。さらに、**今の hub では送り主の名乗りを偽れる**（§1.3）。これは「対応の誤り」と「迂回」の両方につながる。残るものは §5 にまとめた
-5. **人・CI・ゲートウェイを通らない peer との競合は守れない**（§5.2）
-6. **ゲートウェイが詰まり所になる。** 落ちると kishibashi3/* への書き込みが全部止まる（§5.3）
+1. **非エージェント peer `@github`（仮称）を新設する。** `@scheduler` と同じく、DM の `/` コマンドを決まった形でだけ受け、LLM を通さない。送り主の handle から**役（role）**を引き、**その役に許された操作だけ**を、**その役の鍵**で実行する。それ以外は断る
+2. **鍵の供給は差し替えられる。** GitHub App の installation token でも、PAT でも動く（§7）。**App あり・App なしのどちらも本線**として扱う（顧客環境では App が使えないことがある）。**DM の語彙・断り方・監査の記録の形は鍵の種類で変えない。** 違いは「落ちるもの」の表（§7.2）に出す
+3. **権限表は peer 単位ではなく役の種類で束ねる**（§3.2）。新しい peer は既存の役に 1 行で割り当てるだけにする。**表は既定拒否で、足す提案と減らす提案の両方をゲートウェイが監査から機械的に出し、人は yes / no だけを決める**（§3.8）
+4. **inbound（`@gh-watch`）とはプロセスを分ける。** inbound は App の webhook でも repo の webhook でも動く（§4）
+5. **ゲートウェイを入れただけでは何も守れない。** 各 peer が `gh` と共有トークンを持ったままなら、ゲートウェイは助言にすぎない。**外す段（S3）と、その前提になる「peer と鍵を別の uid に分ける」ことを段の中に入れた**（§6）
+6. **「絶対に事故が起きない」とはならない。** 残るもの: ゲートウェイの設定誤り／相手と鍵の対応の誤り／迂回。さらに、**今の hub では送り主の名乗りを偽れる**（§1.3）。これは「対応の誤り」と「迂回」の両方につながる。残るものは §5 にまとめた
+7. **人・CI・ゲートウェイを通らない peer との競合は守れない**（§5.2）
+8. **ゲートウェイが詰まり所になる。** 落ちると kishibashi3/* への書き込みが全部止まる（§5.3）
 
 ---
 
@@ -30,6 +32,7 @@ GitHub への書き込みを 1 つの非エージェント peer に通し、**DM
 - git の push も `gh` を credential helper にしている環境では同じトークンを通る（#73 の 2026-10-30 コメント、論点 C）
 - 全 peer が同じアカウントなので、GitHub 上の author は全部 `kishibashi3`。人と AI の区別も、どの peer かの区別も GitHub 側に残らない。role は footer の文字でしか分からない
 - 作者が自分の PR を approve できないため、formal な approve が使えず `LGTM ✅` コメントで代用している
+- **`gh` の設定（どのアカウントが active か）が全 peer で共有されている。** 1 つの session が `gh auth switch` すると、他の peer の書き込み先の名義も変わる。**この設計を書いている最中に実際に起きた**（2026-11-24）: operator の session が `gh` の active アカウントを切り替えて元に戻した結果、active が `k-ishibashi-ntv` になっており、`kishibashi3` の repo への操作が通らなかった。`GH_TOKEN=$(gh auth token -u kishibashi3)` をコマンドごとに付けて、共有設定は書き換えずに回避した。**peer ごとに鍵を持たせず、鍵の選択をゲートウェイに集める**のはこれをなくすためでもある（#391 も同じ問題を直す対象にしている）
 
 ### 1.2 既にあるもの
 
@@ -64,16 +67,19 @@ GitHub への書き込みを 1 つの非エージェント peer に通し、**DM
   peer (LLM)                 @github (非 LLM)                        GitHub
   ───────────               ──────────────────                      ──────
   DM: /pr comment ...  ──▶  1. from を読む
-                            2. policy.yaml で (from, op, repo) を引く
+                            2. policy.yaml で from → 役 → (op, repo) を引く
                                無ければ 拒否 → DM で返す + 監査に記録
-                            3. (from 用の App, repo, op に要る権限だけ)
-                               で installation token を作る           ──▶ access_tokens
+                            3. 役の鍵を鍵の供給元から受け取る
+                               App: repo と op に要る権限だけに絞って
+                                    installation token を作る          ──▶ access_tokens
+                               PAT: 役用に事前に作った PAT を使う
                             4. 対象ごとの直列キューに入れて実行        ──▶ REST API
                             5. 結果を監査に記録 → DM で返す
   ◀── 結果 DM (caused_by)
 ```
 
-- 鍵（App の秘密鍵）はゲートウェイの uid だけが読める場所に置く。**peer には秘密鍵も書き込み用トークンも渡さない**
+- 鍵（App の秘密鍵、または PAT）はゲートウェイの uid だけが読める場所に置く。**peer には秘密鍵も書き込み用トークンも渡さない**
+- 3 の「鍵の供給元」だけが鍵の種類で変わる。1・2・4・5（受け付け・判定・断り方・実行・記録）は鍵の種類を知らない（§7）
 - 読み取りは別扱い（§3.6）
 
 ---
@@ -110,58 +116,69 @@ GitHub への書き込みを 1 つの非エージェント peer に通し、**DM
 
 ゲートウェイは本文の末尾に footer を**自分で**付ける（`@<from> via @github`）。peer が書いた footer は信用しない。
 
-### 3.2 ポリシー表
+### 3.2 ポリシー表（役の種類で束ねる）
 
-`policy.yaml`（例）。**書かれていないものは全部拒否**（既定拒否）。
+**行は peer ではなく役の種類で作る。** peer は役に割り当てるだけ。
 
 ```yaml
 version: 1
-apps:
-  bot:      { app_id: ..., installation_id: ..., key_path: /…/agenthub-bot.pem }
-  reviewer: { app_id: ..., installation_id: ..., key_path: /…/agenthub-reviewer.pem }  # #73 次第
 
 repo_groups:
   core: [kishibashi3/agent-hub, kishibashi3/agent-hub-bridges, kishibashi3/agent-hub-sdk, kishibashi3/agent-hub-roles-kaz]
 
-rules:
-  - id: reviewer-review
-    from: ["@reviewer"]
-    app: reviewer
-    repos: core
-    ops: [pr.review, pr.comment]
-  - id: planner-merge
-    from: ["@planner"]
-    app: bot
-    repos: core
-    ops: [pr.merge, issue.close, issue.comment, pr.comment, issue.create, issue.label]
-  - id: impl-default
-    from: ["@bridges-impl", "@agent-hub-impl", "@sdk-impl"]
-    app: bot
-    repos: core
-    ops: [issue.create, issue.comment, pr.create, pr.comment, push]
+# 役の種類。許す op の組だけを持つ。peer の名前は出てこない
+roles:
+  read:   { repos: core, ops: [] }                       # 読み取りトークン（§3.6）だけ
+  review: { repos: core, ops: [pr.review, pr.comment, issue.comment] }
+  impl:   { repos: core, ops: [issue.create, issue.comment, pr.create, pr.comment, push] }
+  plan:   { repos: core, ops: [pr.merge, issue.close, issue.create, issue.comment, pr.comment, issue.label] }
+
+# peer → 役。1 peer に役は 1 つ
+members:
+  "@reviewer":       review
+  "@planner":        plan
+  "@bridges-impl":   impl
+  "@agent-hub-impl": impl
+  "@sdk-impl":       impl
+  "@researcher":     read
+
+# 鍵の供給元（§7）。役ごとにどの鍵を使うか。ここだけが鍵の種類で変わる
+keys:
+  provider: app            # app | pat
+  ...
 ```
 
-- 1 つの依頼に当たる rule が 0 件なら拒否。2 件以上当たったら**設定誤りとして拒否**（どちらの鍵を使うか推測しない）
-- 起動時に検証する（未知の op 名、存在しない app、鍵ファイルの mode が 600 でない、等）。**1 つでも通らなければ起動しない**（中途半端な表で動かない）
-- 表の置き場: 変更が review を通る場所（roles-kaz か専用 repo）。反映は operator。ゲートウェイ自身は表を書き換えない
+- `members` に無い送り主は全部拒否（`no-role`）。役に無い op・repo も全部拒否（既定拒否）
+- **1 peer に役は 1 つ。** 2 つの役の op が要る peer が出たら、両方を含む役を作る（例の `plan`）。1 peer に複数の役を許すと、どの鍵を使うかが曖昧になる（1 便目の「2 件以上当たったら設定誤り」はこの制約で起きなくなる）
+- **rule に peer 名を書く例外は作らない。** 1 体だけに要る op は、その 1 体のために役を 1 つ作る（それが例外だと表の上で見える）
+- 起動時に検証する（未知の op 名・役・鍵、鍵ファイルの mode が 600 でない、等）。**1 つでも通らなければ起動しない**（中途半端な表で動かない）
 - 誰にどの op を許すかは本 doc では決めない。上の例は形の説明。**誰が何をしてよいかは L1 の判断**（`collaboration-model` の L0/L1/L2 に合わせる）
+
+**判定軸: 新しい peer を足すときに `members` に 1 行足すだけで済むか。** 済む。行の数は「役の種類 × 1」で、peer の数（今 29 体）にも repo の数にも比例しない。peer ごとの行にしなかった理由:
+
+| | peer 単位 | 役の種類で束ねる |
+|---|---|---|
+| 表の大きさ | peer 数 × op × repo | 役の数 × op（repo は repo_groups で束ねる） |
+| peer を足す | 行を書き起こす（何を許すかをその都度決める） | 既存の役に 1 行で割り当てる |
+| 減らす提案（§3.8） | peer ごとに「使っていない」が出る。新しい peer は全部候補になる | 役の中の誰も使っていないものだけが出る |
+| 鍵の数（PAT のとき、§7.3） | peer 数に比例 | 役の種類の数で決まる |
+| 失うもの | — | 同じ役の peer の間で差を付けられない。付けたいときは役を分ける |
 
 ### 3.3 鍵の選び方
 
-鍵の切り替えは 2 段ある:
+鍵は**役ごと**に決まる。どう作るかは鍵の供給元（§7）が持つ:
 
-1. **どの App か**（= GitHub 上の名義）: rule の `app`
-2. **その App の中でどの権限・どの repo か**: installation token を作るときに `repositories` と `permissions` を指定して絞る（`POST /app/installations/{id}/access_tokens` の body）。例: `issue.comment` を `agent-hub-bridges` に → `{"repositories":["agent-hub-bridges"],"permissions":{"issues":"write"}}`
+- **App の供給元**: installation token を作るときに `repositories` と `permissions` を指定して、依頼 1 件分（その repo・その op に要る権限）まで絞る（`POST /app/installations/{id}/access_tokens` の body）。例: `issue.comment` を `agent-hub-bridges` に → `{"repositories":["agent-hub-bridges"],"permissions":{"issues":"write"}}`。トークンは (App, repo, 権限の組) ごとにキャッシュし、期限 5 分前に作り直す（今の `iat.go` と同じ考え方。`iat.go` に絞る引数を足す必要がある）
+- **PAT の供給元**: 役ごとに事前に作った PAT を使う。依頼ごとには絞れない（§7.3）。役の op に要る権限・repo までが上限になる
 
-2 は App が 1 つでも効く。**#73 で App が 1 つに決まっても、「どの peer に何をさせるか」はゲートウェイで分けられる。** 分けられないのは GitHub 上の名義だけ（§7）。
-
-トークンは (app, repo, 権限の組) ごとにキャッシュし、期限 5 分前に作り直す（今の `iat.go` と同じ考え方）。`iat.go` に絞る引数を足す必要がある（実装時）。
+どちらでも、**op を許すかどうかの判定はゲートウェイの表で行う。** 鍵の権限は「表が誤っていたとき・ゲートウェイに不具合があったときの上限」の役目になる。App のほうがその上限が細かい、というのが違い（§7.2）。
 
 ### 3.4 断り方
 
-- 送り主に DM で返す（`caused_by` = 依頼 msg ID）。形: `❌ denied: <op> <repo>#<n> — <理由>（rule=<id> / no-rule / ambiguous-rule / bad-args / expired）`
+- 送り主に DM で返す（`caused_by` = 依頼 msg ID）。形: `❌ denied: <op> <repo>#<n> — <理由>（no-role / op-not-in-role / repo-not-in-role / bad-args / expired / same-identity / key-unavailable）`
+- **理由の語彙は鍵の種類で変えない。** 例えば `same-identity`（PR の作者と同じ名義では approve できない）は、名義が 1 つの構成で多く出るが、App が 2 つの構成でも同じ語で返す。`key-unavailable`（鍵が取れない: App の秘密鍵の不備、installation が無い、PAT の期限切れ）も同じ。GitHub の応答に App / PAT 固有の文言が出ても、送り主には上の語彙に直して返し、原文は監査に残す
 - 理由は送り主が直せる粒度で書く。他の peer の rule の中身は書かない
-- **拒否したときに別の鍵で試すことはしない**（PAT へのフォールバックもしない）。IAT モードの「未設定なら PAT」のような逃げ道はゲートウェイには作らない
+- **拒否したときに別の鍵で試すことはしない。** 鍵の供給元は起動時に 1 つに決まり、動いている間に App から PAT へ落とすことはしない（IAT モードの「未設定なら PAT」のような逃げ道はゲートウェイには作らない）
 - 拒否も監査に記録する（§3.5）。拒否が続く送り主は、表の不足か、peer が誤った操作を頼んでいるかのどちらか。operator が見る
 
 ### 3.5 監査の記録
@@ -178,49 +195,104 @@ SQLite（ゲートウェイの uid だけが書ける）。1 依頼 1 行、状�
 | `args_digest` | 本文の sha256 と長さ（本文は GitHub 側に残るので全文は持たない） |
 | `decision` | `allowed` / `denied` |
 | `rule_id` / `deny_reason` | |
-| `app` / `token_scope` | 使った App と、絞った権限・repo |
+| `role` | 送り主に当たった役 |
+| `key_id` / `token_scope` | 使った鍵（`app:bot` / `pat:impl` のような ID。値は持たない）と、絞った権限・repo（PAT のときは鍵に付けた上限をそのまま書く） |
 | `state` | `queued` → `running` → `done` / `failed` / `unknown` |
 | `http_status` / `github_request_id` | GitHub の応答（`X-GitHub-Request-Id`） |
 | `result_url` | できたコメント・PR・merge commit の URL |
 
 - `running` のまま落ちた行は、再起動時に**自動で再実行しない**。`unknown` にして送り主に「結果不明、GitHub で確かめてから再依頼して」と返す（コメントの二重投稿・二重 merge を避ける）
-- GitHub 側の記録: author が App の bot 名義になり、footer に `@<from>` が入る。「誰が・いつ・どこに・何をした」は GitHub 側の author + footer と、ゲートウェイの監査の 2 か所で突き合わせられる
+- 列は鍵の種類で変えない。違いは `key_id` / `token_scope` の値だけ
+- GitHub 側の記録: author は鍵の名義（App なら bot、PAT なら PAT の持ち主）、footer に `@<from> via @github` が入る。「誰が・いつ・どこに・何をした」は GitHub 側の author + footer と、ゲートウェイの監査の 2 か所で突き合わせられる。**名義が 1 つの構成では GitHub の author だけでは peer を区別できないので、監査の `result_url` との突き合わせが主になる**（§9）
 
 ### 3.6 読み取り
 
 読み取り（`gh pr view` / `gh pr diff` / `gh pr checks` / `gh api` の GET）は peer の作業のほとんどを占める（未集計、S1 で測る）。これを全部ゲートウェイに通すと詰まり所が大きくなるので、2 案:
 
-- **R1（推奨）**: ゲートウェイが**読み取り専用に絞ったトークン**（contents / pull_requests / issues / checks / actions すべて `read`、repo も絞る）を作り、peer に渡す。peer は今の `gh` で読める。漏れても書けない
+- **R1（推奨）**: ゲートウェイが**読み取り専用に絞ったトークン**（contents / pull_requests / issues / checks / actions すべて `read`、repo も絞る）を peer に渡す。peer は今の `gh` で読める。漏れても書けない
+  - App の構成: ゲートウェイが 1 時間のトークンを作って渡す
+  - PAT の構成: 読み取り専用の fine-grained PAT を事前に 1 本作り、ゲートウェイが渡す。**期限が PAT の期限（最長 366 日 か 無期限）になる**ので、漏れたときに読める期間が長い（§7.2）。classic PAT には読み取りだけの scope が無い（`repo` が読み書き両方）ので、classic しか使えない環境では R1 は成り立たず R2 になる
 - R2: 読み取りもゲートウェイに通す。記録は全部残るが、待ちが増える
 
-R1 でも、読み取りトークンを作るのはゲートウェイなので、ゲートウェイが落ちると最長 1 時間後に読み取りも止まる（§5.3）。
+App の構成の R1 は、読み取りトークンを作るのがゲートウェイなので、ゲートウェイが落ちると最長 1 時間後に読み取りも止まる（§5.3）。
 
 ### 3.7 push
 
 push は working tree が要るので、DM 1 通では運べない。案:
 
 - **P1**: peer が `git bundle` を作り、ゲートウェイが読める場所に置いてパスを DM する。ゲートウェイは bundle を検証（branch 名がポリシーの prefix に合うか、`main` などの保護 branch でないか）して、自分の鍵で push する。**鍵は peer に渡らない**
-- P2: ゲートウェイが、その repo・`contents: write` だけに絞ったトークンを peer に渡す。単純だが、その 1 時間は peer がその repo に何でも push できる（**迂回の窓が開く**）
+- P2: ゲートウェイが、その repo・`contents: write` だけに絞ったトークンを peer に渡す。単純だが、その 1 時間は peer がその repo に何でも push できる（**迂回の窓が開く**）。**PAT の構成では「その repo だけ・1 時間だけ」が作れない**ので、渡すのは事前に作った PAT そのものになり、窓が PAT の期限まで開く。PAT の構成では P2 は採らない
 
-推奨は P1。P2 は S2 の間の暫定として使うかもしれない（その場合は保護 branch を GitHub 側の ruleset で守る）。**push を App の名義で行うかどうか自体が #73 の権限（Contents: write）次第**（§7）。
+推奨は P1（鍵の種類によらず同じ）。P2 は App の構成で S2 の間の暫定として使うかもしれない（その場合は保護 branch を GitHub 側の ruleset で守る）。App の構成で push を App の名義で行えるかは #73 の権限（Contents: write）次第（§7.4）。
+
+### 3.8 権限表のメンテ（足す・減らす・記録）
+
+放っておくと表は足す方向にだけ動く。**使われていない許可は害が見えないので残り続ける**（前例: `@reviewer` の規則が 653 行まで伸び、自己改善の節 3 箇所が実行 0 回 —— `deep-research/research-archive/2026-11-23-reviewer-refactor-proposal.md`）。そのため、減らす経路を足す経路と同時に作る。
+
+**材料は監査（§3.5）だけを使う。** ゲートウェイは通った依頼しか存在しない場所なので、「記録し忘れ」が起きない（`@reviewer` のリファクタ案 E は、subagent の起動 52 回のうち委任が archive に残っていたのが 10 件だった）。これは鍵の種類によらない。
+
+| | 足す提案 | 減らす提案 |
+|---|---|---|
+| 根拠 | **断られた記録**: `denied` のうち `op-not-in-role` / `repo-not-in-role` | **使われていない記録**: 役に許された (op, repo_group) のうち、N 日 `allowed` が 0 件 |
+| 単位 | (役, op, repo_group)。peer ごとには出さない | (役, op, repo_group)。役の中の誰か 1 体でも使っていれば出さない。`members` のうち N 日依頼が 0 件の peer も候補に出す |
+| 出す条件 | 同じ (役, op, repo_group) の拒否が窓の中で K 件以上（1 件の誤った依頼で表を広げないため） | N 日（例: 30 日。値は S1 の後に決める） |
+| 付ける根拠 | 拒否した依頼の msg_id と送り主の一覧。peer の誤りか表の不足かを人が見分けられるように | 最後に使われた日時（無ければ「表に入ってから一度も」） |
+
+- **提案はゲートウェイが機械的に出し、PR にする。** 人は PR を merge する（yes）か close する（no）かだけを決める。表を人が書き起こすことはしない
+- 提案を出す頻度は週 1（`@scheduler` から `/propose` を叩く）。同じ提案が close されたら、根拠が増えるまで（足す提案は拒否件数が倍になるまで、など）出し直さない
+- 役を分ける・新しい役を作る、は機械の提案に含めない（人が「この 1 体だけ」と判断したときに書く PR）。その PR も下の記録の規則に従う
+
+**表は repo のファイルにする**（置き場: roles-kaz か専用 repo）。変更は PR として残り、誰がいつ広げたかが GitHub に記録される。root `CLAUDE.md` §「自分の権限範囲は自分で書き換えない」の「**緩める方向にだけ外部の独立記録を要求する**」形を当てる:
+
+- **広げる変更**（役に op・repo を足す、peer をより広い役に移す、役を足す）: merge するのは kishibashi3 本人だけ
+- **狭める変更**: 記録（PR）は必須。merge を planner の L0 にしてよいかは L1 判断（§10）
+- **peer は自分の行（自分の役・自分が属する役の op）を広げる PR を通せない。operator も同じ**
+
+これをどう強制するか:
+
+- ゲートウェイは**表を置いた repo への書き込みを、表の中身に関係なく全部断る**（コードに固定。表で許せないようにする。表が自分を広げる経路を持たないため）。ゲートウェイの提案 PR だけは、ゲートウェイ自身が自分の鍵で出す
+- これで、S3（peer から書き込みの資格情報を外す）の後は、表の PR を merge できるのは kishibashi3 本人の `gh` だけになる。**operator の session も S3 で外す対象に含める**（operator が `kishibashi3` の `gh` を持ち続けると、operator は自分の行を広げられる）。§5.3 の非常口を operator に持たせるかは、ここと合わせて L1 で決める
+- **S3 の前は強制できない。** peer も operator も `kishibashi3` の `gh` を持っているので、表の repo に直接 push / merge できる。それまでは監査（表の repo の merge のうち、kishibashi3 本人の操作でないもの）で見つけるだけ。名義が 1 つの構成では GitHub の author からは見分けられないので、footer と session 記録で突き合わせる（§7.2）
+- 反映: merge された表を operator が配置してゲートウェイを再読み込みする。ゲートウェイ自身は表を書き換えない。起動時の検証（§3.2）に通らない表は読み込まない
 
 ---
 
 ## 4. 設計してほしいこと 3: inbound（`@gh-watch`）との関係
 
-**別プロセスにする。同じ App・同じ部品を使う。**
+**別プロセスにする。部品（`packages/github-client`）は共有する。**
 
 | | inbound（`@gh-watch`） | outbound（`@github`） |
 |---|---|---|
-| 要るもの | 公開 ingress + webhook secret | App の秘密鍵 |
-| 置き場所 | ingress に近い所（hub は家庭内 Pi5） | 秘密鍵を peer と別 uid で持てる所 |
+| 要るもの | 公開 ingress + webhook secret | 鍵（App の秘密鍵 または PAT） |
+| 置き場所 | ingress に近い所（hub は家庭内 Pi5） | 鍵を peer と別 uid で持てる所 |
 | 落ちたとき | 通知が来ないだけ（書き込みは止まらない） | 書き込みが全部止まる |
 | 攻撃面 | インターネットから届く | hub からだけ |
 
-- 1 プロセスにすると、**インターネットに面したプロセスが秘密鍵を持つ**ことになり、通知側の不具合で書き込みも止まる。分ける理由はこの 2 つ
-- kishibashi3 の言う「app 登録してフックにもなる」は、**同じ App の webhook を `@gh-watch` が受ける**ことで満たす。1 つの App に「書き込みの名義」と「webhook」の両方を持たせる（#73 の 2026-10-30 コメントの権限表・Webhook events と同じ）
+- 1 プロセスにすると、**インターネットに面したプロセスが鍵を持つ**ことになり、通知側の不具合で書き込みも止まる。分ける理由はこの 2 つ
 - 将来の連携の例: `@github` が merge した後、`@gh-watch` に来る `pull_request.closed` を見て、依頼主に完了を知らせる。今は `@github` が API の応答で直接返すので必須ではない
 - 実装言語は今は決めない。`iat.go` を使うなら Go、`gh-watch` / `scheduler` と揃えるなら Python。どちらでも設計は変わらない
+
+### 4.1 inbound は App 必須か → 必須ではない
+
+**repo の webhook は App なしで張れる。** GitHub の docs: 「You must be a repository owner or have admin access in the repository to create webhooks in that repository」（[Creating webhooks](https://docs.github.com/en/webhooks/using-webhooks/creating-webhooks)）。UI か `POST /repos/{owner}/{repo}/hooks` で作る。
+
+**`@gh-watch` のコードは App に依存していない**（`packages/gh-watch/gh_watch.py` を読んだ範囲）:
+
+- 検証に使うのは `X-Hub-Signature-256`（HMAC-SHA256）と `X-GitHub-Event` だけ。docs ではこの 2 つの header は webhook の配送全般に付く（[Webhook events and payloads](https://docs.github.com/en/webhooks/webhook-events-and-payloads) の Delivery headers。`X-Hub-Signature-256` は secret を設定した場合）
+- payload の `installation` は読んでいない。docs では `installation` は「the event is configured for and sent to a GitHub App」のときだけ入るので、repo webhook で無くても困らない
+- App の ID・秘密鍵は使っていない。README の「GitHub App 設定」節（App ID 4008981）が App 前提で書かれているだけ
+
+App なしの inbound で変わるもの:
+
+| | App の webhook | repo の webhook |
+|---|---|---|
+| 張る単位 | App 1 つに 1 か所。入れた repo 全部の event が来る | **repo ごとに 1 つずつ**張る（user 所有の repo には org webhook が無いので束ねられない）。repo を足すたびに張る作業が要る |
+| 張るのに要る権限 | App の設定権限 | **その repo の admin**（fine-grained PAT なら `Webhooks: write`）。張る作業は人の操作にする（ゲートウェイの op には入れない。入れると webhook の向き先を変えられる = 外への送信経路になる） |
+| secret | App に 1 つ | repo ごとに設定する（同じ値を使い回せる） |
+| 公開 ingress | 要る | **要る**（違いは無い） |
+
+- **どちらでも公開 ingress は要る。** 顧客環境で ingress が作れないなら、webhook の種類に関係なく inbound は落ちる。そのときの代わりは polling（Events API などを定期的に読む）だが、今の `@gh-watch` には無い（未実装。§7.2 の落ちるものに入れた）
+- 未確認: repo webhook で購読できる event に、`@gh-watch` が使う `check_suite` / `workflow_run` が入っているか（docs の event 一覧を event ごとには突き合わせていない。実装前に確かめる）
 
 ---
 
@@ -230,14 +302,14 @@ push は working tree が要るので、DM 1 通では運べない。案:
 
 | 残るもの | 例 | 何で減らすか | 消えない理由 |
 |---|---|---|---|
-| **ゲートウェイ自体の設定誤り** | `policy.yaml` で `@writer` に `pr.merge` を与えてしまう。App に要らない権限を付けてしまう | 表の変更を review に通す。起動時の検証。既定拒否。拒否・許可の件数を毎日見る | 表が「正しく誤っている」場合は検証では分からない |
-| **相手と鍵の対応の誤り** | **§1.3 の名乗り替え**。handle の付け替え（bridge を別 role に流用）で、古い rule が新しい中身の peer に当たる | hub 側で handle ごとに資格情報を分ける（§8）。handle の付け替え時に表を見直す運用 | hub が handle を保証するまでは、ゲートウェイには名乗りの真偽が分からない |
+| **ゲートウェイ自体の設定誤り** | `policy.yaml` で `@writer` に `pr.merge` を与えてしまう。鍵（App・PAT）に要らない権限を付けてしまう | 表の変更を review に通す。起動時の検証。既定拒否。拒否・許可の件数を毎日見る | 表が「正しく誤っている」場合は検証では分からない |
+| **相手と鍵の対応の誤り** | **§1.3 の名乗り替え**。handle の付け替え（bridge を別 role に流用）で、古い役の割り当て（`members` の行）が新しい中身の peer に当たる | hub 側で handle ごとに資格情報を分ける（§8）。handle の付け替え時に表を見直す運用 | hub が handle を保証するまでは、ゲートウェイには名乗りの真偽が分からない |
 | **迂回** | peer が `gh` / `curl` / `git push` で直接書く。IAT モードの `GH_TOKEN`。読み取りトークン以外のトークンが env やファイルに残っている | S3 で peer から書き込みの資格情報を外す（§6） | peer とゲートウェイが同じ uid の間は、ゲートウェイの鍵ファイルも hub の PAT も peer から読める。**uid を分けるまでは塞がらない** |
 
 その他に残るもの:
 
 - **許された操作の中身の誤り**: 許可された `issue.comment` で誤った内容を書く、正しい権限で間違った PR を merge する。ゲートウェイは中身を判断しない（非エージェントなので）
-- **ゲートウェイの乗っ取り**: 鍵が 1 か所に集まるので、そこが破られると全 App の権限が出る。今は鍵が全 peer から読めるので、集めることで悪くはならないが、ゼロにもならない
+- **ゲートウェイの乗っ取り**: 鍵が 1 か所に集まるので、そこが破られると全部の鍵の権限が出る。今は鍵が全 peer から読めるので、集めることで悪くはならないが、ゼロにもならない
 
 ### 5.2 直列で守られるもの・守られないもの
 
@@ -259,7 +331,7 @@ push は working tree が要るので、DM 1 通では運べない。案:
 
 - 1 件ごとに GitHub API 1〜数回（トークンが無ければ access_tokens も 1 回）。1 件あたり概ね 1 秒前後〜数秒の見込み（未計測、S1 で測る）
 - 対象ごとのキューなので、別の PR への書き込みは並ぶが待たない。同じ PR に複数 peer が集まったときだけ待つ
-- GitHub の rate limit が App の installation 単位になる。いまは `kishibashi3` のユーザー単位の上限を全 peer で分けている。content を作る操作には secondary rate limit がある（数値は実装前に GitHub の docs で確かめる）。上限に当たったら、ゲートウェイは待たずに `failed (rate limited, retry after …)` を返す（peer が勝手に再送して詰まりを悪化させないよう、retry-after を伝える）
+- GitHub の rate limit は、App の構成なら installation 単位、PAT の構成なら PAT の持ち主のアカウント単位（§7.2）。いまは `kishibashi3` のユーザー単位の上限を全 peer で分けている。content を作る操作には secondary rate limit がある（数値は実装前に GitHub の docs で確かめる）。上限に当たったら、ゲートウェイは待たずに `failed (rate limited, retry after …)` を返す（peer が勝手に再送して詰まりを悪化させないよう、retry-after を伝える）
 
 落ちたときに止まるもの:
 
@@ -286,11 +358,11 @@ push は working tree が要るので、DM 1 通では運べない。案:
 
 | 段 | やること | peer の `gh` | 抜ける条件 |
 |---|---|---|---|
-| **S0** | 本 doc。#73 の答え | 今のまま | #73 で App の権限・入れ先が決まる |
+| **S0** | 本 doc。鍵の構成（§7.1）を選ぶ | 今のまま | 構成が決まる。App の構成なら #73 で App の権限・入れ先が決まる。PAT の構成なら役ごとの PAT が置かれる |
 | **S1 観測** | ゲートウェイを起動し、`/ping` と**読み取り系と `issue.comment` だけ**を 1 体（例: `@bridges-impl`）から使う。同時に、peer が `gh` で何をしているかを session 記録から集計する（op 表の根拠） | 今のまま | op 表が集計で裏付けられる。待ち時間・失敗率が測れている |
 | **S2 併用** | kishibashi3/* だけを触る peer の書き込みを順にゲートウェイに切り替える（persona doc / bridge の指示を変える）。`gh` はまだ持っている。`gh` で書き込もうとしたら PreToolUse フックで**警告して**ゲートウェイを案内する（拒否はまだしない） | 持っている（**ゲートウェイは助言**） | 迂回の件数（§9 M2）が 1 週間 0 |
 | **S3 外す** | kishibashi3/* だけを触る peer から書き込みの資格情報を外す: ①`GH_TOKEN`（IAT モード）を渡さない ②`hosts.yml` を peer の uid から読めなくする ③peer の `gh` は R1 の読み取りトークンだけで動かす ④ゲートウェイの鍵ファイルを peer から読めなくする | **書けない** | 迂回の件数が 0 のまま、peer の作業が回る |
-| **S4 範囲の外** | `ntv-*` を触る bridge と両方を触る bridge。#73 の設計 B で App を `ntv-contech` に入れないので、この bridge は `kishibashi3` の PAT のまま。**本設計の範囲外**として残す | 今のまま | — |
+| **S4 範囲の外** | `ntv-*` を触る bridge と両方を触る bridge。#73 の設計 B で App を `ntv-contech` に入れない（PAT の構成でも `ntv-contech` 用の鍵は作らない）ので、この bridge は `kishibashi3` の PAT のまま。**本設計の範囲外**として残す | 今のまま | — |
 
 S3 の前提:
 
@@ -302,37 +374,108 @@ S3 で外した後に peer が困る操作（例: `gh run rerun`、`gh project`�
 
 ---
 
-## 7. #73 で止まっている所（分岐）
+## 7. 鍵の供給元（App あり・App なしのどちらでも動く）
 
-**#73 の問い: App にどの権限を与え、どの repo に入れるか**（今は App はあるが permissions `{}`、入れ先 0 repo）。これが決まらないと、§3.2 の `apps` と §3.3 で絞れる上限が決まらない。以下は分岐として書く。答えが出たら、該当する枝を残して他を消す。
+kishibashi3 の要件（2026-11-23）: 「appって、お客さん環境で使えるかわからんから、app使うことも使わないこともできるようにしておいて」。
 
-### 7.1 App の数
+1 便目ではここを「#73 の答えで A / B / C のどれかを残す」分岐にしていた。**どれでも動く構成に書き直す。** App あり・App なしは**どちらも本線**で、どちらかが他方の縮退ではない。違いは §7.2 の「落ちるもの」で示す。
 
-| #73 の答え | 鍵の切り替え | approve |
+### 7.1 構成
+
+ゲートウェイの中で鍵の種類を知っているのは**鍵の供給元**だけ。受け付け・判定・断り方・実行・記録（§3.1〜§3.8）は供給元に「この役の、この repo への、この op の鍵をくれ」と頼むだけで、返ってくるのが installation token か PAT かを見ない。
+
+| 構成 | 供給元 | 役 → 鍵 | 名義の数 |
+|---|---|---|---|
+| **A. App 2 つ** | `app` | `review` → Reviewer App、他の役 → bot App | 2（`AgentHub [bot]` / `AgentHub Reviewer [bot]`） |
+| **B. App 1 つ** | `app` | 全役 → bot App | 1 |
+| **C. PAT** | `pat` | 役ごとに 1 本の fine-grained PAT（§7.3）。全部同じアカウントで作る | 1（PAT を作ったアカウント） |
+| **C′. PAT + machine user** | `pat` | 役ごとの PAT を、名義を分けたいアカウント（machine user）で作る | アカウントの数（§7.4） |
+
+設定の例（形の説明）:
+
+```yaml
+keys:
+  provider: app                 # 構成 A / B
+  apps:
+    bot:      { app_id: ..., installation_id: ..., key_path: /…/agenthub-bot.pem }
+    reviewer: { app_id: ..., installation_id: ..., key_path: /…/agenthub-reviewer.pem }   # 構成 A のときだけ
+  role_key: { review: reviewer, impl: bot, plan: bot, read: bot }
+```
+
+```yaml
+keys:
+  provider: pat                 # 構成 C / C′
+  pats:
+    review: { path: /…/pat-review, owner: kishibashi3, permissions: { pull_requests: write, issues: write }, expires_at: 2027-11-24T00:00:00Z }
+    impl:   { path: /…/pat-impl,   owner: kishibashi3, permissions: { contents: write, pull_requests: write, issues: write }, expires_at: ... }
+    read:   { path: /…/pat-read,   owner: kishibashi3, permissions: { contents: read, pull_requests: read, issues: read, checks: read, actions: read }, expires_at: ... }
+  role_key: { review: review, impl: impl, plan: impl, read: read }
+```
+
+- 構成は起動時に 1 つに決まる。動いている間に切り替えない（落ちたら別の構成で試す、もしない。§3.4）
+- 起動時の検証: 役の op に要る権限が、その役の鍵の権限に入っているか。App は App の permissions と照らす。**PAT は GitHub から PAT の権限を引く手段を確かめていないので、設定に書いた `permissions` と照らす**（書いた値が実物と違えば、実行時に GitHub が 403 で断り、送り主には `key-unavailable` で返る）
+- PAT の `expires_at` の 14 日前から operator に毎日知らせる。期限を過ぎた鍵の役は `key-unavailable` で断る
+
+外から見て変わらないもの: DM のコマンド（§3.1）、断る理由の語彙（§3.4）、監査の列（§3.5）、footer（`@<from> via @github`）、メンテの提案（§3.8）。
+
+### 7.2 落ちるもの（App あり / App なし）
+
+| | App あり（A / B） | App なし（C / C′） |
 |---|---|---|
-| **A. App 2 つ**（`AgentHub [bot]` + `AgentHub Reviewer [bot]`、planner 案 2026-10-30 / 2026-11-14） | `@reviewer` の rule → Reviewer App、他 → bot App。§3.3 の絞り込みは両方で効く | `AgentHub [bot]` の PR を `AgentHub Reviewer [bot]` が approve できる（branch protection の required review に数えられるかは #73 の完了条件 1 で確かめる） |
-| **B. App 1 つ** | 全 rule が bot App。peer ごとの違いは §3.3 の絞り込みだけ | **formal な approve は使えないまま**（作者 = approve 者になる）。`LGTM ✅` の運用は残り、ゲートウェイの `pr.review approve` は op 表から外す |
-| **C. App を使わない**（PAT のまま） | ゲートウェイは PAT 1 本しか持てず、peer ごとに権限を絞れない（PAT は呼び出しごとに絞れない）。**op 表による拒否だけが残る** | 使えない |
+| **GitHub 上の名義** | A: 2 つ / B: 1 つ。どちらも bot で、人（kishibashi3）と AI の区別は付く | C: PAT の持ち主 1 つ（**人と AI の区別も付かない**）/ C′: machine user の数だけ（§7.4） |
+| **formal な approve** | A: 使える / B: 使えない | C: 使えない / C′: 作者と別のアカウントの役なら使える。**使えない構成では `LGTM ✅` コメントでの代用が残る**（§7.4） |
+| **依頼ごとの絞り込み** | 依頼 1 件分（その repo・その op の権限）まで、1 時間のトークンで絞れる | **絞れない。** 役の op 全部・役の repo 全部が上限（§7.3） |
+| **鍵の期限と入れ替え** | 秘密鍵に期限は無い。トークンは 1 時間で自動 | PAT ごとに期限（最長 366 日 か 無期限。org の方針で短くされうる）。**入れ替えは人が UI で作り直す作業**で、鍵の数（= 役の数）だけある |
+| **読み取りトークン（§3.6 R1）** | 1 時間のトークンを都度作って渡す | 事前に作った読み取り PAT を渡す。**漏れたら PAT の期限まで読める。** classic PAT しか使えない環境では R1 が成り立たず R2 |
+| **push（§3.7）** | P1 / P2 とも可 | P1 だけ（P2 は窓が PAT の期限まで開く） |
+| **rate limit** | installation 単位 | PAT の持ち主のアカウント単位。C では人（kishibashi3）の手作業と同じ枠を分け合う |
+| **迂回の見分け（§9 M1/M2）** | GitHub の author が bot か kishibashi3 かで、ゲートウェイ経由かどうかが分かる | C では author が全部同じ。**監査の `result_url` に無い書き込み = 迂回**、で見分ける（§9） |
+| **表の repo の強制（§3.8）を GitHub 側で見る** | 提案 PR の author が bot、merge が kishibashi3 で、誰の操作かが GitHub に残る | C では全部 kishibashi3 名義。ゲートウェイの監査と footer で見る |
+| **inbound（§4.1）** | App の webhook 1 か所 | repo ごとの webhook。repo を足すたびに人が張る。**公開 ingress が要るのは同じ** |
+| **導入の前提（顧客環境）** | App を作って入れられること（org の方針で App を入れられないことがある。どういう制限がありうるかは未確認） | PAT が許されていること。org は「fine-grained PAT に owner の承認を要る」「PAT で org の資源に触れない」「classic PAT を禁止する」を設定できる（[PAT policy](https://docs.github.com/en/organizations/managing-programmatic-access-to-your-organization/setting-a-personal-access-token-policy-for-your-organization)） |
 
-C だと「鍵を切り替える」部分が成り立たない。B でも権限の切り替えは成り立つ。
+**どちらも使えない環境**（App の install も PAT も許されない）ではゲートウェイは動かない。そのときは `key-unavailable` で全部断り、起動時に operator に知らせる。
 
-### 7.2 権限
+**ingress が作れない環境**では、App の有無に関係なく inbound が落ちる（polling は未実装）。
 
-| #73 の答え | ゲートウェイでできること |
+### 7.3 PAT は依頼ごとに絞れない → 役ごとに鍵を作る
+
+確かめた結果（GitHub docs）:
+
+- PAT は人が事前に作る。docs の [PAT のページ](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens) にある作り方は UI の手順（と UI の URL に値を詰めておく方法）だけで、**API で作る手段は見つけられなかった**
+- 呼び出しのときに権限や repo を絞る引数は PAT には無い。PAT で使える権限は「作ったときに付けた permissions / scope」で決まる。installation token の `repositories` / `permissions`（[access_tokens](https://docs.github.com/en/rest/apps/apps#create-an-installation-access-token-for-an-app)）に当たるものは無い
+- fine-grained PAT は **resource owner（user か org）1 つ**にしか効かない（「Each token is limited to access resources owned by a single user or organization」）
+- classic PAT は scope 単位で、repo を絞れない（`repo` scope は持ち主が触れる repo 全部の読み書き）
+
+→ **「鍵を複数用意して選ぶ」形になる。** 鍵は「役 × resource owner」ごとに 1 本:
+
+- 今の範囲（`kishibashi3/*` だけ、§6 S4）なら resource owner は 1 つなので、**鍵の数 = 役の種類の数**（例では `read` / `review` / `impl` / `plan` の 4。`plan` と `impl` の権限の組が同じなら鍵を共有できるが、監査の `key_id` で役を区別できなくなるので共有しない）
+- 役が `ntv-contech` の repo にも及ぶようになったら、その役の鍵は 2 本になる
+- peer の数には比例しない（§3.2 で役に束ねた効果）
+- classic PAT しか使えない環境では、repo を絞れないので鍵を分ける意味が scope の違いだけになる。そのときは op の制限はゲートウェイの表だけが持つ
+
+### 7.4 App なしのときの名義と approve
+
+- **C（同じアカウントの PAT）では名義は 1 つ。** peer が出した PR も、approve しようとする `@reviewer` も同じアカウントなので、approve は作者と同じ名義になり使えない（今と同じ。§1.1）。**`LGTM ✅` コメントでの代用が残る**。ゲートウェイは `pr.review approve` を `same-identity` で断り、送り主には `pr.comment` で `LGTM ✅` を書くよう返す（どの構成でも同じ語彙）
+- **C′（machine user）なら App なしでも名義を分けられる。** GitHub の規約は machine account を認めている（「We do permit machine accounts」「A machine account is used exclusively for performing automated tasks」）。ただし**無料の machine account は、無料の個人アカウント 1 つにつき 1 つまで**（「You may maintain no more than one free machine account in addition to your free Personal Account」、[ToS B.3](https://docs.github.com/en/site-policy/github-terms/github-terms-of-service)）
+  - 無料の範囲では、名義は「人のアカウント + machine account 1 つ」の 2 つまで。例: `impl` / `plan` の役を machine account で、`review` の役を人のアカウントの PAT で動かせば、formal な approve はできる。**ただしその approve は人（kishibashi3）の名義になり、人と AI の区別が GitHub 上で付かなくなる**
+  - 3 つ以上に分けるには有料のアカウント（org の seat）が要る。顧客環境で machine user を作れるかは顧客の方針次第
+- 名義を分けた approve が branch protection の required review に数えられるか（approve するアカウントに要る権限）は未確認。App の構成でも同じ問いで、#73 の完了条件 1 で確かめる項目
+
+### 7.5 App を使う構成で #73 が決めること
+
+#73 の答えで変わるのは、**App を使う構成（A / B）のときの中身だけ**。App を使わない構成（C / C′）は #73 を待たずに動かせる。
+
+| #73 の答え | App の構成でゲートウェイができること |
 |---|---|
+| App の数 | 2 つなら構成 A、1 つなら構成 B |
 | Contents: write あり | §3.7 の push を App 名義で行える。`pr.merge` も可 |
-| Contents: write なし | push と merge は App ではできない。push は peer が PAT のまま行う → **S3 で `gh` を外せない**（迂回が残る）。merge は人か PAT の経路 |
+| Contents: write なし | push と merge は App ではできない。**その op だけ PAT の鍵を使う、という混ぜ方はしない**（構成は 1 つ。§7.1）。push と merge を役に許さず、人の経路に残す。S3 で外せない経路が残る |
 | Workflows: write なし | `.github/workflows/` を含む push は App では断られる。その push だけ人の経路に残す |
-| Issues: write を Reviewer App に付けない（planner 案） | `@reviewer` は issue 起票を reviewer 名義でできない。bot App の rule を `@reviewer` にも付けるか、起票は他の peer に頼む |
+| Issues: write を Reviewer App に付けない（planner 案） | 構成 A で `review` の役に `issue.create` を許さない（表で許しても鍵が断る） |
+| 入れる repo | 入れた repo だけが App の構成の対象。入っていない repo への依頼は `repo-not-in-role` で返す（表の repo_groups を installation に合わせる） |
 
-### 7.3 入れる repo
-
-- 入れた repo だけがゲートウェイの対象。入っていない repo への依頼は `denied (repo not installed)` で返す（PAT に落とさない）
-- `ntv-contech` に入れない（#73 の設計 B）なら、S4 のとおり NTV 側は範囲の外
-
-### 7.4 鍵の置き場
-
-#73 の 2026-11-14 コメントの案（kishibashi3 が置き、operator も peer も中身を見ない）をそのまま使う。違いは 1 点: **ゲートウェイの uid だけが読める**ように置く（S3 の ④）。uid を分けるまでは今の案と同じ。
+鍵の置き場: #73 の 2026-11-14 コメントの案（kishibashi3 が置き、operator も peer も中身を見ない）を、App の秘密鍵にも PAT にも同じく使う。違いは 1 点: **ゲートウェイの uid だけが読める**ように置く（S3 の ④）。uid を分けるまでは今の案と同じ。
 
 ---
 
@@ -340,12 +483,12 @@ C だと「鍵を切り替える」部分が成り立たない。B でも権限�
 
 | issue | 関係 |
 |---|---|
-| **#73**（App の権限と入れ先） | **前提。** §7 の分岐。#73 が「各 bridge に `GH_TOKEN=<IAT>` を渡す」形で先に進んだ場合、その形はゲートウェイの S3 で外す側になる（IAT を peer に渡すと 1 時間は App の全権限が peer にあるため）。#73 の完了条件「approve」「実測」は、ゲートウェイ経由でも満たせる |
+| **#73**（App の権限と入れ先） | **App の構成（A / B）の前提。** PAT の構成（C / C′）は #73 を待たない（§7.5）。#73 が「各 bridge に `GH_TOKEN=<IAT>` を渡す」形で先に進んだ場合、その形はゲートウェイの S3 で外す側になる（IAT を peer に渡すと 1 時間は App の全権限が peer にあるため）。#73 の完了条件「approve」「実測」は、ゲートウェイ経由でも満たせる |
 | **#391**（fleet.env のトークンを用途ごとに分ける） | 並行。ゲートウェイが入っても hub 接続の `GITHUB_PAT` は全 peer に要る。§1.3 の名乗り替えを塞ぐには、この PAT を peer ごとに分ける（か hub 側で handle ごとの資格情報にする）必要があり、それは #391 / publications#119 の範囲 |
 | **#398**（`gh` トークンの `delete_repo` / `admin:public_key` を外す） | 並行・先にやってよい。S3 の後も、この `gh` トークンは kishibashi3 本人と `ntv-*` bridge が使い続けるので、ゲートウェイでは scope は消えない。ゲートウェイを待たずに外すのがよい |
 | agent-hub#543（hub 接続 PAT の入れ替え） | 値の入れ替えだけ。本設計とは独立 |
 | publications#119（Agent Authority Control Plane） | **S3 の前提**（uid を分ける、peer ごとの身元）。本設計はその結論を待つ |
-| `@gh-watch`（#233、agent-hub#289） | §4。別プロセス・同じ App |
+| `@gh-watch`（#233、agent-hub#289） | §4。別プロセス。webhook は App のものでも repo のものでもよい（§4.1） |
 
 ---
 
@@ -353,8 +496,8 @@ C だと「鍵を切り替える」部分が成り立たない。B でも権限�
 
 | | 何を | どう測る | 目標 |
 |---|---|---|---|
-| M1 | kishibashi3/* の書き込みのうちゲートウェイ経由の割合 | GitHub の author で集計（App の bot 名義 / `kishibashi3`）。`kishibashi3` 名義のうち footer に peer の handle があるものは peer の直書き | S2 の終わりで、peer の書き込みはほぼ全部 App 名義 |
-| M2 | 迂回の件数 | `kishibashi3` 名義かつ footer に peer の handle がある書き込みの数。S2 では PreToolUse フックの警告件数も | S3 の後 0 |
+| M1 | kishibashi3/* の書き込みのうちゲートウェイ経由の割合 | **GitHub 側の書き込み（コメント・PR・review・merge）を集め、監査の `result_url` と突き合わせる。** 監査にあればゲートウェイ経由。鍵の種類によらず同じ測り方（App の構成なら author が bot かどうかでも分かるが、それに頼らない） | S2 の終わりで、peer の書き込みはほぼ全部ゲートウェイ経由 |
+| M2 | 迂回の件数 | 監査に無く、footer に peer の handle がある書き込みの数。S2 では PreToolUse フックの警告件数も | S3 の後 0 |
 | M3 | 拒否の件数 | 監査の `decision=denied` を送り主・理由ごとに | 0 にはならない。理由の内訳を見て、表の不足か peer の誤りかを分ける |
 | M4 | 待ちと失敗 | 監査の `started_at - received_at`、`finished_at - started_at` の p50 / p95、`failed` / `unknown` の件数 | S1 で基準値をとる |
 | M5 | 落ちていた時間 | `/ping` の無応答時間、落ちている間の `expired` 件数 | |
@@ -364,23 +507,28 @@ C だと「鍵を切り替える」部分が成り立たない。B でも権限�
 
 ## 10. 決めていないこと（L1 / kishibashi3 判断）
 
-1. **#73**: App の数・権限・入れ先（§7）
-2. 誰にどの op を許すか（§3.2 の表の中身）
-3. 読み取りを R1 / R2 のどちらにするか（§3.6、推奨 R1）
-4. push を P1 / P2 のどちらにするか（§3.7、推奨 P1）
-5. operator に非常口を持たせるか（§5.3）
-6. uid の分け方（publications#119 側、S3 の前提）
-7. ゲートウェイを置く host（bridge host か Pi5 か）。鍵を peer と別 uid で持てることが条件
+1. **この環境（kishibashi3/*）でどの構成で始めるか**（§7.1 の A / B / C / C′）。どれを選んでもゲートウェイの外の振る舞いは同じ
+2. **#73**: App を使う構成のときの App の数・権限・入れ先（§7.5）
+3. 役の種類と、役ごとにどの op を許すか（§3.2 の表の中身）。peer をどの役に割り当てるか
+4. メンテの値: 足す提案の閾値 K と窓、減らす提案の N 日（§3.8）
+5. 狭める PR の merge を planner の L0 にしてよいか（§3.8。広げる PR は kishibashi3 本人だけ）
+6. 読み取りを R1 / R2 のどちらにするか（§3.6、推奨 R1）
+7. push を P1 / P2 のどちらにするか（§3.7、推奨 P1。PAT の構成では P1 だけ）
+8. operator に非常口を持たせるか（§5.3。§3.8 の「operator も自分の行を広げられない」と合わせて決める）
+9. uid の分け方（publications#119 側、S3 の前提）
+10. ゲートウェイを置く host（bridge host か Pi5 か）。鍵を peer と別 uid で持てることが条件
+11. C′ で machine user を作るか（無料の範囲では名義は 2 つまで。§7.4）
 
 ## 調査済み事項
 
-- issue #407 本文、#73（本文と 2026-06-09 / 2026-08-21 / 2026-10-30 ×2 / 2026-11-14 ×2 のコメント）、#391（本文と 2026-10-30 の調査コメント）、#398、agent-hub#543
-- `packages/gh-watch/README.md` と `gh_watch.py`（webhook の HMAC 検証、購読の sender 単位管理、処理後に mark_as_read）
+- issue #407 本文と 2026-11-23 の制約コメント 2 件（issuecomment-7116121242 権限表のメンテ / issuecomment-7116190995 App を使う・使わない）、#73（本文と 2026-06-09 / 2026-08-21 / 2026-10-30 ×2 / 2026-11-14 ×2 のコメント）、#391（本文と 2026-10-30 の調査コメント）、#398、agent-hub#543
+- `packages/gh-watch/README.md` と `gh_watch.py`（webhook の HMAC 検証は `X-Hub-Signature-256`、event は `X-GitHub-Event`、payload の `installation` も App の資格情報も使っていない。購読の sender 単位管理、処理後に mark_as_read）
 - `packages/github-client/iat.go`（access_tokens を body なしで呼んでいる = 権限と repo を絞っていない）
 - `agent-hub/packages/scheduler/README.md` と `scheduler.py` の `_check_owner`（送り主 = owner の entry だけ操作可）
 - `agent-hub/src/mcp/server.ts` の auth middleware（`X-Participant-Id` による handle override、`AGENT_HUB_STRICT_HANDLE_OWNERSHIP`）
 - `bridge-claude2/cmd/bridge/runner.go` の IAT モードと `filteredEnv`（`GITHUB_APP_*` だけ除く）、`bridge-codex2/cmd/bridge/runner.go`（`GITHUB_PAT` を内側に渡す）
-- 未確認: `gh-watch` の実動作、peer ごとに絞った installation token の実挙動、App の approve が required review に数えられるか、GitHub の rate limit の現在値、peer が実際に使っている `gh` 操作の内訳（S1 で集計）
+- GitHub docs（2026-11-24 に読んだ）: [PAT の管理](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens)（作成は UI の手順だけ、resource owner は 1 つ、期限は 1〜366 日か無期限）、[org の PAT 方針](https://docs.github.com/en/organizations/managing-programmatic-access-to-your-organization/setting-a-personal-access-token-policy-for-your-organization)（承認必須・PAT 禁止・classic 禁止を設定できる）、[installation token の作成](https://docs.github.com/en/rest/apps/apps#create-an-installation-access-token-for-an-app)（`repositories` / `permissions` で絞れる、1 時間）、[webhook の作成](https://docs.github.com/en/webhooks/using-webhooks/creating-webhooks)（repo の admin なら App なしで作れる）、[webhook の event と payload](https://docs.github.com/en/webhooks/webhook-events-and-payloads)（配送 header は共通、`installation` は App 宛てだけ）、[ToS B.3](https://docs.github.com/en/site-policy/github-terms/github-terms-of-service)（machine account は無料の個人アカウント 1 つにつき 1 つまで）
+- 未確認: `gh-watch` の実動作、peer ごとに絞った installation token の実挙動、名義を分けた approve が required review に数えられるか、GitHub の rate limit の現在値、peer が実際に使っている `gh` 操作の内訳（S1 で集計）、**fine-grained PAT を API で作る手段・PAT の権限を API で引く手段が本当に無いか**（docs の該当ページに見当たらなかっただけ）、repo webhook で `check_suite` / `workflow_run` を購読できるか、org が App の install をどう制限できるか、作者が自分の PR を approve できないことの docs 上の記述（今の運用で観測している事実として書いた）
 
 ---
 @bridges-impl [bridge-claude2] (operator-supervised)
