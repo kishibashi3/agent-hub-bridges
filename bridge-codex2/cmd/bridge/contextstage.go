@@ -7,6 +7,8 @@
 //	last  旧挙動 (deprecated): `codex exec resume --last` で全員の便を 1 本のセッションに積む。
 //	      別の送り主・別の仕事の作業が混ざる。段階的 deprecation のため env で残し、
 //	      起動時に warning を 1 行出す
+//	thread 段 2 (issue #340): none と同じく 1 便ごとに新しいセッションを始め、同じ鎖 (caused_by) の
+//	      前の便を hub の get_thread で引いて prompt に添える (threadctx.go)
 //
 // env を変えて再起動するだけで切り替わる (rebuild 不要)。知らない値は起動エラーにする。
 // 黙って段 1 にすると、後続の段の値を指定したつもりで段 1 が動くサイレント縮退になるため。
@@ -29,6 +31,8 @@ const (
 	contextStageNone contextStage = "none"
 	// contextStageLast は旧挙動 (resume --last)。deprecated。
 	contextStageLast contextStage = "last"
+	// contextStageThread は段 2 (同じ鎖の前の便を hub から引いて添える、issue #340、threadctx.go)。
+	contextStageThread contextStage = "thread"
 )
 
 // defaultContextStage は env 未指定時の段。
@@ -41,15 +45,16 @@ func resolveContextStage() (contextStage, error) {
 		return defaultContextStage, nil
 	}
 	switch s := contextStage(v); s {
-	case contextStageNone, contextStageLast:
+	case contextStageNone, contextStageLast, contextStageThread:
 		return s, nil
 	default:
-		return "", fmt.Errorf("%s %q: must be one of %q, %q", contextStageEnv, v, contextStageNone, contextStageLast)
+		return "", fmt.Errorf("%s %q: must be one of %q, %q, %q", contextStageEnv, v,
+			contextStageNone, contextStageLast, contextStageThread)
 	}
 }
 
 // logContextStage は選ばれた段を起動ログに 1 行出す。last のときは deprecation warning を 1 行足す。
-func logContextStage(stage contextStage) {
+func logContextStage(stage contextStage, threadCfg threadContextConfig) {
 	if stage == contextStageLast {
 		slog.Warn("context stage: "+string(contextStageLast)+" (codex exec resume --last) is deprecated — "+
 			"all senders share one codex session; unset "+contextStageEnv+" or set it to "+
@@ -57,4 +62,7 @@ func logContextStage(stage contextStage) {
 			"env", contextStageEnv)
 	}
 	slog.Info("context stage selected", "stage", string(stage), "env", contextStageEnv)
+	if stage == contextStageThread {
+		logThreadContextConfig(threadCfg)
+	}
 }

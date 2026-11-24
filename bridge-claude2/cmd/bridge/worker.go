@@ -539,7 +539,13 @@ func handleOne(
 	slog.Info("← message",
 		"msg_id", msg.ID, "from", msg.Sender, "body_preview", truncate(msg.Body, 120))
 
-	prompt := formatPrompt("@"+cfg.Participant, msg, cfg.GitHubFooter, time.Now())
+	// issue #340: 段 2 なら同じ鎖の前の便を hub から引いて添える。失敗したら添えずに処理する
+	// (添えた / 添えなかったは fetchThreadContext が固定キーで 1 行ログに出す)。
+	var threadCtx string
+	if cfg.ContextStage == contextStageThread {
+		threadCtx = fetchThreadContext(ctx, client, msg, cfg.ThreadContext).Text
+	}
+	prompt := formatPrompt("@"+cfg.Participant, msg, cfg.GitHubFooter, threadCtx, time.Now())
 
 	const retryBackoff = 5 * time.Second
 	var lastUsage queryUsage

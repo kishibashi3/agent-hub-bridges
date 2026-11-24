@@ -13,6 +13,7 @@ func TestResolveContextStage(t *testing.T) {
 		{env: "", want: contextStageNone},
 		{env: "none", want: contextStageNone},
 		{env: "last", want: contextStageLast},
+		{env: "thread", want: contextStageThread},
 		{env: "chain", wantErr: true},
 		{env: "NONE", wantErr: true},
 	}
