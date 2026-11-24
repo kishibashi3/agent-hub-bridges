@@ -30,8 +30,10 @@ var (
 		},
 		{
 			"tail -f / --follow",
-			// -[a-zA-Z0-9]* で -f, -F, -100f, -nF など combined flags も捕捉する
-			regexp.MustCompile(`\btail\b.*(?:\s-[a-zA-Z0-9]*[fF]\b|\s--follow\b)`),
+			// -[a-zA-Z0-9]* で -f, -F, -100f, -nF など combined flags も捕捉する。
+			// フラグを探すのは tail と同じコマンドの中だけ。; & | 改行で区切られた
+			// 後ろの別コマンドのフラグ (readlink -f, pgrep -af 等) には当てない (#419)。
+			regexp.MustCompile(`\btail\b[^;&|\n]*(?:\s-[a-zA-Z0-9]*[fF]\b|\s--follow\b)`),
 		},
 		{
 			"watch <command>",
