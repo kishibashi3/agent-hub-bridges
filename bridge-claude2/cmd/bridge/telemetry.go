@@ -30,6 +30,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -84,13 +85,21 @@ func initTelemetry(serviceName string) {
 	})
 }
 
+// telemetryShutdownTimeout は shutdownTelemetry が flush を待つ上限 (issue #404)。
+// span は best-effort なので、OTLP 先が応答しないときは取りこぼしても停止を優先する。
+// 期限なしだと BatchSpanProcessor の ExportTimeout (既定 30s) まで exit が遅れる。
+const telemetryShutdownTimeout = 3 * time.Second
+
 // shutdownTelemetry は TracerProvider を正常停止し、バッファ内 span を flush する。
+// flush は telemetryShutdownTimeout で打ち切る (issue #404)。
 // main で defer 呼び出しすること。AGENT_HUB_TELEMETRY_URL 未設定時は no-op。
 func shutdownTelemetry() {
 	if globalTP == nil {
 		return
 	}
-	if err := globalTP.Shutdown(context.Background()); err != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), telemetryShutdownTimeout)
+	defer cancel()
+	if err := globalTP.Shutdown(ctx); err != nil {
 		slog.Warn("[telemetry] TracerProvider shutdown error", "err", err)
 	}
 }
