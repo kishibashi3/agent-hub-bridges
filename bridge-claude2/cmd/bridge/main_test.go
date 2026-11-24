@@ -254,7 +254,7 @@ func TestFormatPrompt_FooterInjection(t *testing.T) {
 	}
 	footer := "@bob [bridge-claude2 · opus-4.8] (operator-supervised)"
 
-	withFooter := formatPrompt("@bob", msg, footer)
+	withFooter := formatPrompt("@bob", msg, footer, time.Now())
 	if !strings.Contains(withFooter, footer) {
 		t.Errorf("formatPrompt() should contain footer literal %q", footer)
 	}
@@ -262,7 +262,7 @@ func TestFormatPrompt_FooterInjection(t *testing.T) {
 		t.Error("formatPrompt() should contain the footer instruction header")
 	}
 
-	withoutFooter := formatPrompt("@bob", msg, "")
+	withoutFooter := formatPrompt("@bob", msg, "", time.Now())
 	if strings.Contains(withoutFooter, "GitHub 投稿ルール") {
 		t.Error("formatPrompt() with empty footer should not inject the footer instruction")
 	}

@@ -161,7 +161,7 @@ func TestFormatPrompt(t *testing.T) {
 		To:     "@reviewer",
 		Body:   "please review PR #42",
 	}
-	got := formatPrompt("@reviewer", msg)
+	got := formatPrompt("@reviewer", msg, time.Now())
 
 	checks := []string{
 		"@reviewer",                    // self handle in prompt

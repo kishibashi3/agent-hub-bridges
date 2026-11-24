@@ -424,11 +424,12 @@ func writeMCPConfig(cfg *config) (string, error) {
 // footer が非空なら、GitHub 投稿時に付与すべき規約 footer の指示を毎メッセージ末尾に
 // 注入する (issue #245)。これにより内側 Claude が model 等を幻覚で埋めるのを防ぎ、
 // bridge が真値から組成した footer のみが使われるようにする。
-func formatPrompt(selfHandle string, msg agenthub.Message, footer string) string {
+func formatPrompt(selfHandle string, msg agenthub.Message, footer string, now time.Time) string {
 	base := fmt.Sprintf(
 		"あなたは agent-hub の peer worker `%s` として動いています。\n"+
 			"agent-hub 経由で %s から以下の message が届きました。\n"+
 			"宛先: %s\n"+
+			"%s"+
 			"本文:\n%s\n\n"+
 			"内容に応じて作業し、返答が必要なら "+
 			"`mcp__agent-hub__send_message` で %s へ送り返してください。\n"+
@@ -437,7 +438,7 @@ func formatPrompt(selfHandle string, msg agenthub.Message, footer string) string
 			"宛先 (to) は必ず `%s` を指定。team 宛 broadcast は避け、"+
 			"送信者個人へ DM で返すこと。",
 		selfHandle,
-		msg.Sender, msg.To, msg.Body,
+		msg.Sender, msg.To, formatSentAtLine(msg.Timestamp, now), msg.Body,
 		msg.Sender, msg.ID,
 		msg.Sender,
 	)
@@ -451,6 +452,43 @@ func formatPrompt(selfHandle string, msg agenthub.Message, footer string) string
 			"この literal を一切変更しないこと:\n%s",
 		footer,
 	)
+}
+
+// formatSentAtLine は prompt に入れる「送信時刻」の行を組む (issue #405)。
+// 受け手のモデルが「いつ送られた便か」を知らないまま古い便を今日の話として
+// 読まないよう、server の timestamp をそのまま載せ、prompt を組み立てた時点
+// (now) との差を添える。
+//   - ts が空なら行ごと省く (時刻を知らないのに書かない)
+//   - RFC 3339 として読めなければ ts をそのまま載せ、経過時間は付けない
+//   - 経過時間が -1 分より小さい (時計のずれ) ときも経過時間は付けない
+func formatSentAtLine(ts string, now time.Time) string {
+	if ts == "" {
+		return ""
+	}
+	sent, err := time.Parse(time.RFC3339, ts)
+	if err != nil {
+		return "送信時刻: " + ts + "\n"
+	}
+	elapsed := now.Sub(sent)
+	if elapsed < -time.Minute {
+		return "送信時刻: " + ts + "\n"
+	}
+	return fmt.Sprintf("送信時刻: %s (受信処理の %s)\n", ts, formatElapsed(elapsed))
+}
+
+// formatElapsed は経過時間を「N 分前 / N 時間前 / N 日前」に丸める (issue #405)。
+// 丸めは切り捨て。1 分未満 (と -1 分までの時計のずれ) は「1 分以内」とする。
+func formatElapsed(d time.Duration) string {
+	switch {
+	case d < time.Minute:
+		return "1 分以内"
+	case d < time.Hour:
+		return fmt.Sprintf("%d 分前", int64(d/time.Minute))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%d 時間前", int64(d/time.Hour))
+	default:
+		return fmt.Sprintf("%d 日前", int64(d/(24*time.Hour)))
+	}
 }
 
 // buildGitHubFooter は GitHub 投稿用の規約 footer を bridge の知る真値から組成する。
