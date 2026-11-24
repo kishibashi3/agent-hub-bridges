@@ -380,7 +380,7 @@ func handleOne(
 	slog.Info("← message",
 		"msg_id", msg.ID, "from", msg.Sender, "body_preview", truncate(msg.Body, 120))
 
-	prompt := formatPrompt("@"+cfg.User, msg, cfg.GitHubFooter)
+	prompt := formatPrompt("@"+cfg.User, msg, cfg.GitHubFooter, time.Now())
 	usage, err := runner.query(ctx, prompt, msg.Sender, tracker)
 	emitSpan(msg.ID, cfg.Model, usage)
 	// issue #336 #4: 内側 codex が先回りで返信した他の inbound を記録する (query の成否に関わらず、

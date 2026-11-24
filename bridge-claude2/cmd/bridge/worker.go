@@ -539,7 +539,7 @@ func handleOne(
 	slog.Info("← message",
 		"msg_id", msg.ID, "from", msg.Sender, "body_preview", truncate(msg.Body, 120))
 
-	prompt := formatPrompt("@"+cfg.Participant, msg, cfg.GitHubFooter)
+	prompt := formatPrompt("@"+cfg.Participant, msg, cfg.GitHubFooter, time.Now())
 
 	const retryBackoff = 5 * time.Second
 	var lastUsage queryUsage
