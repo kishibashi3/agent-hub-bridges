@@ -47,14 +47,14 @@ func TestFormatPrompt_SentAt(t *testing.T) {
 		Body:      "hello",
 		Timestamp: "2026-11-21T09:00:00.000Z",
 	}
-	got := formatPrompt("@me", msg, "", now)
+	got := formatPrompt("@me", msg, "", "", now)
 	want := "宛先: @*\n送信時刻: 2026-11-21T09:00:00.000Z (受信処理の 3 日前)\n本文:\nhello\n"
 	if !strings.Contains(got, want) {
 		t.Errorf("prompt に送信時刻の行が宛先と本文の間に入っていない\nwant 部分: %q\nfull:\n%s", want, got)
 	}
 
 	msg.Timestamp = ""
-	got = formatPrompt("@me", msg, "", now)
+	got = formatPrompt("@me", msg, "", "", now)
 	if strings.Contains(got, "送信時刻") {
 		t.Errorf("timestamp が空なのに送信時刻の行がある:\n%s", got)
 	}

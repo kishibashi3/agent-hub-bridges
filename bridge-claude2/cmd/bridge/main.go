@@ -46,7 +46,10 @@
 //	AGENT_HUB_CONTEXT_STAGE     optional    文脈の段 (default: none; issue #339、bridge-codex2 と同じ env 名・値)。
 //	                                        none = 継続しない (段 1)。last = bridge-codex2 の旧挙動 (deprecated) で、
 //	                                        claude2 では warning を出して none で動く。それ以外の値は起動エラー。
-//	                                        claude2 は 1 通ごとに文脈ゼロなので、どの値でも振る舞いは変わらない
+//	                                        thread = 段 2 (issue #340): 同じ鎖 (caused_by) の前の便を hub の get_thread で
+//	                                        引いて prompt に添える。none / last では claude2 の振る舞いは変わらない
+//	AGENT_HUB_THREAD_MAX_MESSAGES optional  段 2 で添える前の便の数の上限 (default: 10。直近から数える)
+//	AGENT_HUB_THREAD_MAX_CHARS  optional    段 2 で添える本文の合計文字数の上限 (default: 8000)
 //	BRIDGE_LOG_DIR              optional    ログディレクトリ (省略 = ~/.agent-hub/logs/; --log-file が優先)
 //	BRIDGE_LOG_FILE             optional    ログファイルパス (省略 = BRIDGE_LOG_DIR/bridge-<participant>.log)
 //
@@ -124,8 +127,10 @@ type config struct {
 	// GitHubFooter は bridge が真値から組成した GitHub 投稿用 footer (issue #245)。
 	GitHubFooter string
 	// ContextStage は AGENT_HUB_CONTEXT_STAGE で指定された文脈の段 (issue #339)。
-	// claude2 は常に段 1 で動き、この値は起動ログに出すだけ。
+	// none / last では起動ログに出すだけ (段 1 で動く)。thread なら handleOne で前の便を添える。
 	ContextStage contextStage
+	// ThreadContext は段 2 (thread) で添える量の上限 (issue #340、threadctx.go)。
+	ThreadContext threadContextConfig
 }
 
 func parseConfig() (*config, error) {
@@ -246,6 +251,11 @@ func parseConfig() (*config, error) {
 	if err != nil {
 		return nil, err
 	}
+	// 段 2 の上限: AGENT_HUB_THREAD_MAX_MESSAGES / AGENT_HUB_THREAD_MAX_CHARS env > 既定値 (issue #340)
+	resolvedThreadContext, err := resolveThreadContextConfig()
+	if err != nil {
+		return nil, err
+	}
 
 	// journal dir: AGENT_HUB_JOURNAL_DIR env > ~/.agent-hub/journals (HOME がなければ起動エラー)
 	resolvedJournalDir, err := journalDir()
@@ -302,6 +312,7 @@ func parseConfig() (*config, error) {
 		ScannerBufferSize: resolvedScannerBufferSize,
 		JournalDir:        resolvedJournalDir,
 		ContextStage:      resolvedContextStage,
+		ThreadContext:     resolvedThreadContext,
 	}
 	// issue #395: detach の記録は journal dir の下に participant (tenant) ごとに置く
 	cfg.DetachDir = filepath.Join(resolvedJournalDir, "detached", cfg.stateKey())
@@ -424,7 +435,9 @@ func writeMCPConfig(cfg *config) (string, error) {
 // footer が非空なら、GitHub 投稿時に付与すべき規約 footer の指示を毎メッセージ末尾に
 // 注入する (issue #245)。これにより内側 Claude が model 等を幻覚で埋めるのを防ぎ、
 // bridge が真値から組成した footer のみが使われるようにする。
-func formatPrompt(selfHandle string, msg agenthub.Message, footer string, now time.Time) string {
+//
+// threadCtx が非空なら (段 2、issue #340) 本文の指示のあと・footer の前に、同じ鎖の前の便を添える。
+func formatPrompt(selfHandle string, msg agenthub.Message, footer, threadCtx string, now time.Time) string {
 	base := fmt.Sprintf(
 		"あなたは agent-hub の peer worker `%s` として動いています。\n"+
 			"agent-hub 経由で %s から以下の message が届きました。\n"+
@@ -442,6 +455,9 @@ func formatPrompt(selfHandle string, msg agenthub.Message, footer string, now ti
 		msg.Sender, msg.ID,
 		msg.Sender,
 	)
+	if threadCtx != "" {
+		base += "\n\n" + threadCtx
+	}
 	if footer == "" {
 		return base
 	}
@@ -542,7 +558,7 @@ func main() {
 		"add_dirs_count", len(cfg.AddDirs),
 		"log_file", orDefault(cfg.LogFile, "(stderr only)"),
 	)
-	logContextStage(cfg.ContextStage)
+	logContextStage(cfg.ContextStage, cfg.ThreadContext)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()

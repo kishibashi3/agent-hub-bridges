@@ -337,10 +337,10 @@ func TestBuildGitHubFooter(t *testing.T) {
 func TestFormatPrompt_Footer(t *testing.T) {
 	msg := msgAt("m1", c1TS)
 	footer := "@codex-test [bridge-codex2] (operator-supervised)"
-	if got := formatPrompt("@codex-test", msg, footer, time.Now()); !strings.HasSuffix(got, "\n"+footer) {
+	if got := formatPrompt("@codex-test", msg, footer, "", time.Now()); !strings.HasSuffix(got, "\n"+footer) {
 		t.Errorf("prompt does not end with the footer:\n%s", got)
 	}
-	if got := formatPrompt("@codex-test", msg, "", time.Now()); strings.Contains(got, "GitHub 投稿ルール") {
+	if got := formatPrompt("@codex-test", msg, "", "", time.Now()); strings.Contains(got, "GitHub 投稿ルール") {
 		t.Errorf("prompt has footer rule although footer is empty:\n%s", got)
 	}
 }

@@ -33,8 +33,12 @@
 //	AGENT_HUB_CONTEXT_STAGE     optional    文脈の段 (default: none; issue #339、bridge-claude2 と同じ env 名・値)。
 //	                                        none = 継続しない (段 1、1 便ごとに新しい codex セッション)。
 //	                                        last = 旧挙動の `codex exec resume --last` (deprecated、起動時に warning)。
+//	                                        thread = 段 2 (issue #340): none と同じく 1 便ごとに新しいセッションで、
+//	                                        同じ鎖 (caused_by) の前の便を hub の get_thread で引いて prompt に添える。
 //	                                        それ以外の値は起動エラー。env を変えて再起動すれば切り替わる。
 //	                                        注意: env 未設定のまま更新すると旧挙動の `--last` 継続をやめる (戻すなら =last)
+//	AGENT_HUB_THREAD_MAX_MESSAGES optional  段 2 で添える前の便の数の上限 (default: 10。直近から数える)
+//	AGENT_HUB_THREAD_MAX_CHARS  optional    段 2 で添える本文の合計文字数の上限 (default: 8000)
 //	AGENT_HUB_TELEMETRY_URL     optional    OTLP endpoint
 //	BRIDGE_LOG_DIR              optional    ログディレクトリ (省略 = ~/.agent-hub/logs/; --log-file が優先)
 //	BRIDGE_LOG_FILE             optional    ログファイルパス (省略 = BRIDGE_LOG_DIR/bridge-<user>.log)
@@ -106,6 +110,8 @@ type config struct {
 	GitHubFooter string
 	// ContextStage は AGENT_HUB_CONTEXT_STAGE で選んだ文脈の段 (issue #339)。
 	ContextStage contextStage
+	// ThreadContext は段 2 (thread) で添える量の上限 (issue #340、threadctx.go)。
+	ThreadContext threadContextConfig
 }
 
 func parseConfig() (*config, error) {
@@ -247,6 +253,11 @@ func parseConfig() (*config, error) {
 	if err != nil {
 		return nil, err
 	}
+	// 段 2 の上限: AGENT_HUB_THREAD_MAX_MESSAGES / AGENT_HUB_THREAD_MAX_CHARS env > 既定値 (issue #340)
+	resolvedThreadContext, err := resolveThreadContextConfig()
+	if err != nil {
+		return nil, err
+	}
 
 	// scanner-buffer-size: AGENT_HUB_SCANNER_BUFFER_SIZE env > 4MB
 	resolvedScannerBufferSize, err := resolveScannerBufferSize()
@@ -274,6 +285,7 @@ func parseConfig() (*config, error) {
 		SubprocessTimeout: resolvedSubprocessTimeout,
 		ScannerBufferSize: resolvedScannerBufferSize,
 		ContextStage:      resolvedContextStage,
+		ThreadContext:     resolvedThreadContext,
 	}, nil
 }
 
@@ -428,7 +440,9 @@ func linkAuthJSON(codexHomeDir string) error {
 //
 // footer が非空なら、GitHub 投稿時に付ける footer の指示を毎メッセージ末尾に注入する
 // (issue #336 #5)。内側 codex が model 等を推測で埋めず、bridge が真値から組んだ footer を使うようにする。
-func formatPrompt(selfHandle string, msg agenthub.Message, footer string, now time.Time) string {
+//
+// threadCtx が非空なら (段 2、issue #340) 本文の指示のあと・footer の前に、同じ鎖の前の便を添える。
+func formatPrompt(selfHandle string, msg agenthub.Message, footer, threadCtx string, now time.Time) string {
 	base := fmt.Sprintf(
 		"あなたは agent-hub の peer worker `%s` として動いています。\n"+
 			"agent-hub 経由で %s から以下の message が届きました。\n"+
@@ -446,6 +460,9 @@ func formatPrompt(selfHandle string, msg agenthub.Message, footer string, now ti
 		msg.Sender, msg.ID,
 		msg.Sender,
 	)
+	if threadCtx != "" {
+		base += "\n\n" + threadCtx
+	}
 	if footer == "" {
 		return base
 	}
@@ -538,7 +555,7 @@ func main() {
 		"codex_home", cfg.CodexHomeDir,
 		"log_file", orDefault(cfg.LogFile, "(stderr only)"),
 	)
-	logContextStage(cfg.ContextStage)
+	logContextStage(cfg.ContextStage, cfg.ThreadContext)
 
 	// CODEX_HOME セットアップ (config.toml + auth.json symlink)
 	if err := setupCodexHome(cfg); err != nil {
