@@ -29,7 +29,7 @@
 
 ### 1.3 session_id の役割（再掲）
 
-`session_id`（現行は `msg.Sender`、例 `"@planner"`。`query(ctx, prompt, sessionID, …)` の `sessionID` 引数）を stdin JSON プロトコルに渡すことで、Claude 側のセッションストレージ（`~/.claude/projects/.../*.jsonl`）から前回文脈を復元している。stateful モードの継続性はこの仕組みで実現済み（[stateful-mode-design.md](./stateful-mode-design.md) 参照）。
+`session_id`（現行は `msg.Sender`、例 `"@planner"`。`query(ctx, prompt, sessionID, …)` の `sessionID` 引数）を stdin JSON プロトコルに渡しているが、CLI はこの値で Claude 側のセッションストレージ（`~/.claude/projects/.../*.jsonl`）を引き当てず、起動ごとに新しい session を作る。よって現行の cold spawn では **前回文脈は復元されず、1 通ごとに文脈ゼロ** である（#406 で実測。[stateful-mode-design.md](./stateful-mode-design.md) §1.1 も訂正済み）。※初版は「前回文脈を復元している。stateful モードの継続性はこの仕組みで実現済み」と書いていたが誤り（#414 で訂正）。
 
 ---
 
