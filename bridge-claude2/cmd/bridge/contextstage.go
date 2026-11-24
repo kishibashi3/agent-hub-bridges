@@ -1,8 +1,9 @@
 // contextstage.go — 文脈の段を選ぶ env の受け口 (issue #339、epic #338 段 1)
 //
 // 役を claude2 ⇄ codex2 で載せ替えても文脈の単位が同じになるよう、両 bridge で同じ env 名・
-// 同じ値で段を選ぶ。claude2 は 1 通ごとに文脈ゼロ (buildArgs に --resume が無い) で、現状が
-// すでに段 1 なので、env を受けて起動ログに出すだけで振る舞いは変えない。
+// 同じ値で段を選ぶ。claude2 は 1 通ごとに文脈ゼロ (buildArgs に --resume が無く、stdin の
+// session_id だけでは CLI は会話を復元しない。issue #406 で実機確認) で、現状がすでに段 1 なので、
+// env を受けて起動ログに出すだけで振る舞いは変えない。
 //
 //	none  段 1: 継続しない (既定)
 //	last  bridge-codex2 の旧挙動 (`codex exec resume --last`、deprecated)。claude2 には

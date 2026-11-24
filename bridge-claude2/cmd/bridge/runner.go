@@ -11,8 +11,9 @@
 // それ以外 (agent-hub 接続 / reconnect / journal / cursor / commands / compact watchdog) は
 // worker.py と同じ構造を worker.go で維持する。
 //
-// session_id を per-sender に設定することで Claude が自身のセッションストレージから
-// per-peer 会話コンテキストを復元できる (= Python bridge と同等の continuity)。
+// 文脈は 1 通ごとにゼロ (段 1、contextstage.go)。stdin の user message に per-sender の
+// session_id を入れているが、CLI はこの値で会話を復元しない (spawn ごとに新しい session が
+// 作られる。issue #406 で実機確認)。復元には --resume が要り、buildArgs はそれを渡さない。
 //
 // blocking command 阻止 (issue #101, #345):
 // initialize で PreToolUse フックを登録し、CLI から届く hook_callback に deny を返す (hook.go)。
@@ -283,7 +284,7 @@ func newClaudeRunner(cfg *config, mcpConfigPath string) *claudeRunner {
 // restart は on-demand モードでは no-op。
 // CommandRouter の /restart ハンドラから呼ばれる。
 // on-demand では「再起動すべき持続 subprocess」が存在しないため何もしない。
-// 会話の継続性は Claude 自身のセッションストレージが担う。
+// 文脈は 1 通ごとにゼロなので、作り直して失う会話状態も無い (issue #406)。
 func (r *claudeRunner) restart(_ context.Context) error {
 	slog.Info("runner: /restart — on-demand mode, no persistent subprocess to restart")
 	return nil
