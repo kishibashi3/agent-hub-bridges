@@ -11,10 +11,12 @@ from __future__ import annotations
 
 import logging
 import sys
+from datetime import UTC, datetime
 
 import anyio
 from agent_hub_sdk import AgentHub, HubSession, IncomingMessage
 
+from agent_hub_bridges._common.prompt import format_sent_at_line
 from agent_hub_bridges._common.reconnect import run_with_reconnect
 from agent_hub_bridges.client_codex.engine import CodexCLIEngine
 from agent_hub_bridges.codex.config import Config
@@ -26,17 +28,23 @@ logger = logging.getLogger(__name__)
 _AUTO_ERROR_PREFIX = "(auto) bridge-codex error:"
 
 
-def _format_prompt(self_handle: str, msg: IncomingMessage) -> str:
+def _format_prompt(self_handle: str, msg: IncomingMessage, *, now: datetime | None = None) -> str:
     """受信 message を bridge-codex の prompt に整形.
 
     issue #79: セッション永続化により codex が会話状態をネイティブに保持するため、
     get_user_history への依存を廃止。send_message で直接返信する。
+
+    issue #417: 宛先の行と本文の間に、共通 helper ``format_sent_at_line`` で
+    送信時刻の行を入れる (#405 と同じ規則)。``now`` は経過時間の基準で、
+    None なら現在の UTC。test で固定するための引数。
     """
     reply_to = msg.sender
+    sent_at = format_sent_at_line(msg.timestamp, now if now is not None else datetime.now(UTC))
     return (
         f"あなたは agent-hub の peer worker `{self_handle}` として動いています。\n"
         f"agent-hub 経由で {msg.sender} から以下の message が届きました。\n"
         f"宛先: {msg.to}\n"
+        f"{sent_at}"
         f"本文:\n{msg.body}\n\n"
         f"`mcp__agent-hub__send_message` で {reply_to} へ DM を送信してください。\n"
         f"(caused_by='{msg.id}' を設定すること — 因果チェーン追跡 issue #162)\n"

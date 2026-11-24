@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from unittest.mock import MagicMock
 
 from agent_hub_bridges.codex.worker import _format_prompt
@@ -12,12 +13,14 @@ def _make_msg(
     body: str = "hello",
     to: str = "@bridge-codex",
     msg_id: str = "test-id",
+    timestamp: str = "",
 ) -> MagicMock:
     msg = MagicMock()
     msg.sender = sender
     msg.body = body
     msg.to = to
     msg.id = msg_id
+    msg.timestamp = timestamp
     return msg
 
 
@@ -69,3 +72,35 @@ def test_format_prompt_includes_caused_by_instruction() -> None:
     prompt = _format_prompt("@bridge-codex", msg)
     assert "caused_by" in prompt
     assert "bbbbbbbb-0000-0000-0000-000000000001" in prompt
+
+
+_NOW = datetime(2026, 11, 24, 12, 0, 0, tzinfo=UTC)
+
+
+def test_format_prompt_sent_at_line_between_to_and_body() -> None:
+    """issue #417: 宛先の行と本文の間に送信時刻の行が入ること (#405 と同じ規則)."""
+    msg = _make_msg(to="@bridge-codex", body="hello", timestamp="2026-11-22T10:30:00.000Z")
+    prompt = _format_prompt("@bridge-codex", msg, now=_NOW)
+    assert (
+        "宛先: @bridge-codex\n"
+        "送信時刻: 2026-11-22T10:30:00.000Z (受信処理の 2 日前)\n"
+        "本文:\nhello\n"
+    ) in prompt
+    assert prompt.count("送信時刻:") == 1
+
+
+def test_format_prompt_sent_at_line_minutes() -> None:
+    """issue #417: 経過時間が分単位のとき「N 分前」になること."""
+    msg = _make_msg(timestamp="2026-11-24T11:55:30Z")
+    prompt = _format_prompt("@bridge-codex", msg, now=_NOW)
+    assert (
+        "宛先: @bridge-codex\n送信時刻: 2026-11-24T11:55:30Z (受信処理の 4 分前)\n本文:\n" in prompt
+    )
+
+
+def test_format_prompt_omits_sent_at_line_when_timestamp_empty() -> None:
+    """issue #417: timestamp が空なら行ごと省き、宛先の直後が本文になること."""
+    msg = _make_msg(to="@bridge-codex", body="hello", timestamp="")
+    prompt = _format_prompt("@bridge-codex", msg, now=_NOW)
+    assert "送信時刻" not in prompt
+    assert "宛先: @bridge-codex\n本文:\nhello\n" in prompt
