@@ -462,8 +462,10 @@ func TestDeliverDetachNotices_RecordIDMismatch_NotifiedOnce(t *testing.T) {
 	cfg.DetachDir = dir
 	sleeper := &limitSleeper{}
 
-	deliverDetachNotices(context.Background(), cfg, client, runner, &activityTracker{}, journal, sleeper)
-	deliverDetachNotices(context.Background(), cfg, client, runner, &activityTracker{}, journal, sleeper)
+	// 1 tick 1 通なので、record の数より 1 回多く回して、それ以上出ないことも見る
+	for i := 0; i <= len(cases); i++ {
+		deliverDetachNotices(context.Background(), cfg, client, runner, &activityTracker{}, journal, sleeper)
+	}
 
 	data, err := os.ReadFile(promptLog)
 	if err != nil {

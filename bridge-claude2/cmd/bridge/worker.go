@@ -569,6 +569,23 @@ func runPrompt(
 	tracker *activityTracker,
 	journal *Journal,
 ) error {
+	_, err := runPromptReport(ctx, client, runner, msg, prompt, cfg, tracker, journal)
+	return err
+}
+
+// runPromptReport は runPrompt と同じ処理をし、停止 (ctx の取り消し) で返信なしに中断された
+// (= 依頼主に中断通知を出す経路に入った) かも返す。detach の便が、中断された便を出し直すのに
+// 使う (#422)。
+func runPromptReport(
+	ctx context.Context,
+	client *agenthub.Client,
+	runner *claudeRunner,
+	msg agenthub.Message,
+	prompt string,
+	cfg *config,
+	tracker *activityTracker,
+	journal *Journal,
+) (interrupted bool, err error) {
 	// issue #395: detach で切り離した処理の便を、この依頼主のセッションに返すため
 	ctx = withInbound(ctx, msg.Sender, msg.ID)
 
@@ -610,7 +627,7 @@ func runPrompt(
 				slog.Info("handleOne: query ended without reply during shutdown — sending interrupt notice (issue #337)",
 					"msg_id", msg.ID, "err", ctx.Err())
 				sendInterruptNotice(ctx, client, journal, msg)
-				return nil
+				return true, nil
 			}
 			if usage.TerminatedAfterResult {
 				// issue #395: result の後も claude が終わらず止めた。claude の中で動いていた
@@ -618,7 +635,7 @@ func runPrompt(
 				sendTerminatedNotice(ctx, client, journal, msg)
 			}
 			slog.Info("→ message processed", "msg_id", msg.ID, "from", msg.Sender)
-			return nil
+			return false, nil
 		}
 
 		// issue #264/#266: subprocess が result 到達前に timeout kill されても、その前に
@@ -665,7 +682,7 @@ func runPrompt(
 	// 送信者へのエラー通知 (journalledSend) をスキップする。tool_use のみ観測 (未確定) の
 	// 場合はスキップせず通常通り通知する (詳細は上記ループ内コメント参照)。
 	if lastUsage.repliedTo(msg.ID) {
-		return lastErr
+		return false, lastErr
 	}
 
 	// issue #240: SIGTERM 等で ctx がキャンセルされた状態の query 失敗
@@ -688,7 +705,7 @@ func runPrompt(
 		slog.Info("handleOne: query cancelled by shutdown — sending interrupt notice instead of error report (issue #337)",
 			"msg_id", msg.ID, "err", lastErr)
 		sendInterruptNotice(ctx, client, journal, msg)
-		return lastErr
+		return true, lastErr
 	}
 
 	slog.Error("handleOne: claude query error", "msg_id", msg.ID, "err", lastErr)
@@ -697,11 +714,11 @@ func runPrompt(
 	// 休眠を指示する (limitReachedError)。auto 返信すると受信側 (scheduler の bounce /
 	// 同じく limit 中の bridge) との間でピンポンが増幅する (issue #267 の 3 変種)。
 	if lim := detectLimit(lastErr, time.Now()); lim != nil {
-		return lim
+		return false, lim
 	}
 
 	sendAutoErrorReply(ctx, client, runner, journal, msg, fmt.Sprint(lastErr))
-	return lastErr
+	return false, lastErr
 }
 
 // sendAutoErrorReply は送信元へ `autoErrorPrefix + " " + detail` の auto 返信を送る。

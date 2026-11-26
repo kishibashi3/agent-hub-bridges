@@ -37,6 +37,8 @@ type mockHub struct {
 	calls []toolCall
 	// inbox は get_messages が順に返す JSON 配列テキスト。尽きたら "[]" を返す。
 	inbox []string
+	// thread は get_thread が返すテキスト。空なら他の tool と同じ "ok" を返す。
+	thread string
 }
 
 func newMockHub(t *testing.T) *mockHub {
@@ -76,6 +78,9 @@ func newMockHub(t *testing.T) *mockHub {
 				if len(h.inbox) > 0 {
 					text, h.inbox = h.inbox[0], h.inbox[1:]
 				}
+			}
+			if req.Params.Name == "get_thread" && h.thread != "" {
+				text = h.thread
 			}
 			h.mu.Unlock()
 			quoted, _ := json.Marshal(text)
