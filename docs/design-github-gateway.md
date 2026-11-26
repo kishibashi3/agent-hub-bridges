@@ -4,7 +4,7 @@ GitHub への書き込みを 1 つの非エージェント peer に通し、**DM
 
 - 状態: **設計のみ。実装はしていない。**
 - 正本の依頼: kishibashi3/agent-hub-bridges#407（制約の追加: [権限表のメンテ](https://github.com/kishibashi3/agent-hub-bridges/issues/407#issuecomment-7116121242) / [App を使う・使わないの両方](https://github.com/kishibashi3/agent-hub-bridges/issues/407#issuecomment-7116190995) / [範囲に ntv-contech を入れる・複雑にしない](https://github.com/kishibashi3/agent-hub-bridges/issues/407#issuecomment-7189759185)）
-- **2026-11-26 の見直し**: 範囲に `ntv-contech` を入れ（旧 §6 S4 の「範囲外」を取り消し）、最初の段（段 1）を下の 3 つの目標に絞った。役ごとの鍵・表のメンテの機械提案・inbound・読み取りトークン（R1）は後の段（段 2）に回した（§6.1）
+- **2026-11-26 の見直し**: 範囲に `ntv-contech` を入れた（旧 §6 S4 の「範囲外」を取り消し）。kishibashi3 が挙げた止めたいこと 3 つは**例**で、範囲の上限でも最初の段の目標でもない（本人の訂正、逐語:「最低限じゃない。それはあくまで例だ」）。**何を止めるかは表の作り方（§3.2.1）で決め、例はその表で断られることを確かめる試験に使う。** 役ごとの鍵・表のメンテの機械提案・inbound は後の段（段 2）に回し、読み取り専用の鍵（R1）は S3 の前に入れる（理由は §6.1）
 - **#73 は「どれを採るか」ではなくなった。** 鍵の供給は App でも PAT でも動く構成にする（§7）。#73 の答えで決まるのは「App を使う構成のときの App の数・権限・入れ先」だけ
 - 時刻は RFC 3339 UTC で書く
 
@@ -12,17 +12,23 @@ GitHub への書き込みを 1 つの非エージェント peer に通し、**DM
 
 ## 0. 結論（先に）
 
-**段 1 の目標（kishibashi3 の要件、2026-11-26）:**
+**何を止めるか: 止めるものを並べず、許すものだけを表に書き、残りは全部断る（既定拒否）。** 表は 3 つの軸で作る（手順は §3.2.1）:
 
-| | 目標 | 何で止めるか |
-|---|---|---|
-| ① | NTV 以外の peer が `ntv-contech/*` に書き込めない | 表: peer ごとに書いてよい owner を持つ（§3.2）。鍵: `kishibashi3` の token は `ntv-contech` の repo を見られない（§7.3） |
-| ② | NTV の peer が `kishibashi3/*` に書き込めない | 表: 同上。鍵: `k-ishibashi-ntv` の token は `kishibashi3` の repo に READ しか持たない（§7.3） |
-| ③ | `ntv-contech/frontend` に、表で許していない操作をできない | 表だけ: repo ごとの op の上限（§3.2）。鍵は repo も操作も絞れない |
+- **誰の作業か → どの owner に書いてよいか。** peer は自分の作業の owner 1 つにだけ書ける
+- **何の作業か → どの op が要るか（役）。** 役が実際に使っている op だけを許す。戻せない op・設定を変える op はどの役にも許さない
+- **どこに → 影響の大きい repo は狭める。** 名指しされた repo は、役が許す op からさらに減らす
 
-- **鍵はいまある token 2 本で始める。owner ごとに 1 本**（`kishibashi3` → `kishibashi3/*`、`k-ishibashi-ntv` → `ntv-contech/*`）。どちらも OAuth token（scope `repo` を含む）で fine-grained ではないので、**操作の制限は表だけが持つ**（§7.1 の C0）。owner を足すのは表と鍵の設定に 1 行ずつ足すだけにする（§3.2）
-- **①〜③が本当に止まるのは S3（peer から書き込みの資格情報を外す）以降。** S1・S2 の間は、どの peer も `~/.config/gh/hosts.yml` の token 2 本を自分で使えるので、ゲートウェイの判定は**助言・警告**にすぎない。S3 の前提 #409（peer と鍵を別の uid に分ける）の担当は別途決める（§6）
-- **S3 の後も、送り主の名乗り替え（§1.3）が残る間は①②は破れる。** NTV 以外の peer が NTV の peer の handle を名乗れば、ゲートウェイはその handle の owner で通してしまう。塞ぐのは hub 側の handle ごとの資格情報（#391 / #409、§5.1）
+kishibashi3 が挙げた止めたいこと（2026-11-26）は**例**で、範囲の上限でも最初の段の目標でもない。上の作り方で出来た表で、例は次のように断られる（例に無いものも同じ作り方で断られる。§3.2.1 の表）:
+
+| | 止めたいことの例 | 表のどこで断るか（理由） | 鍵の上限（§7.3） |
+|---|---|---|---|
+| ① | NTV 以外の peer が `ntv-contech/*` に書き込む | owner の割り当て（`owner-not-allowed`） | 鍵の選び方の不具合には効く（`kishibashi3` の token から `ntv-contech` は見えない）。表の誤りには効かない |
+| ② | NTV の peer が `kishibashi3/*` に書き込む | owner の割り当て（`owner-not-allowed`） | 効く（`k-ishibashi-ntv` の token は `kishibashi3` の repo に READ だけ） |
+| ③ | `ntv-contech/frontend` に、許していない操作をする | repo を狭める（`op-not-in-repo`）。役に無い op は `op-not-in-role`、戻せない op はゲートウェイの op として作らない（`bad-args`） | 効かない（`k-ishibashi-ntv` は frontend の ADMIN） |
+
+- **鍵はいまある token 2 本で始める。owner ごとに 1 本**（`kishibashi3` → `kishibashi3/*`、`k-ishibashi-ntv` → `ntv-contech/*`）。どちらも OAuth token（scope `repo` を含む）で fine-grained ではないので、**操作の制限は表だけが持つ**（§7.1 の C0）。owner を足すのは表と鍵の設定に 1 行ずつ足すだけにする（§3.2）。S3 の前に、owner ごとの読み取り専用の鍵を 1 本ずつ足す（S3 で書き込みの鍵を外すと読み取りも消えるため。§6.1）
+- **表の制限が本当に効くのは S3（peer から書き込みの資格情報を外す）以降。** 例の①〜③も、例に無いものも同じ。S1・S2 の間は、どの peer も `~/.config/gh/hosts.yml` の token 2 本を自分で使えるので、ゲートウェイの判定は**助言・警告**にすぎない。S3 の前提 #409（peer と鍵を別の uid に分ける）の担当は別途決める（§6）
+- **S3 の後も、送り主の名乗り替え（§1.3）が残る間は表は破れる。** 例えば NTV 以外の peer が NTV の peer の handle を名乗れば、ゲートウェイはその handle の owner と役で通してしまう。塞ぐのは hub 側の handle ごとの資格情報（#391 / #409、§5.1）
 
 以下は段 1・段 2 を通した設計の全体。
 
@@ -129,7 +135,7 @@ GitHub への書き込みを 1 つの非エージェント peer に通し、**DM
 | `pr.review` | PR 番号 | `approve` / `request_changes` / `comment`, **sha** | API の `commit_id` に sha を渡す。見た head 以外への review にならない |
 | `pr.merge` | PR 番号 | **sha**, method | API の `sha` に渡す。head が変わっていれば GitHub が 409 で断る |
 | `push` | repo, branch | 下の §3.7 | |
-| `token.read` | — | — | **段 2。** 読み取りトークン（§3.6 R1）を送り主の受け取り場所に書く。**値は DM に入れない** |
+| `token.read` | — | — | **S3 の前に入れる**（§6.1）。読み取りトークン（§3.6 R1）を送り主の受け取り場所に書く。**値は DM に入れない** |
 
 対象の書き方は `<owner>/<repo>#<n>` に固定する（owner を省略した形は受けない）。owner で鍵と許可が決まるため（§3.2・§3.3）。
 
@@ -174,19 +180,19 @@ repos:
 **判定**（全部通ったときだけ実行する。既定拒否）:
 
 1. 送り主が `members` にある。無ければ `no-role`
-2. 対象 repo の owner が `owners` にあり、かつ送り主の `owners` に入っている。無ければ `owner-not-allowed`（目標 ①②）
+2. 対象 repo の owner が `owners` にあり、かつ送り主の `owners` に入っている。無ければ `owner-not-allowed`（例 ①②）
 3. op が送り主の役の `ops` にある。無ければ `op-not-in-role`
-4. 対象 repo が `repos` にあれば、op がその `ops` にもある。無ければ `op-not-in-repo`（目標 ③）
+4. 対象 repo が `repos` にあれば、op がその `ops` にもある。無ければ `op-not-in-repo`（例 ③）
 
 - **owner を足すのは設定の追加だけ**: `owners` に 1 行、鍵の設定（§7.1）に 1 行、その owner を触る peer の `owners` に足す。役も判定のコードも変えない。どれも**広げる変更**（§3.8）
 - **`repos` は狭めるだけ。** 役が許していない op を `repos` に書いても通らない（積をとるため）。`repos` に無い repo は役の `ops` がそのまま上限になる
-- 1 peer が 2 つの owner を触る（`owners: [kishibashi3, ntv-contech]`）ことは表の形としては書ける。**書くと①②の例外になる**ので、そういう peer を作るかは kishibashi3 が決める（広げる変更）。いまの fleet ではどちらか片方を触る peer だけを想定している
+- 1 peer が 2 つの owner を触る（`owners: [kishibashi3, ntv-contech]`）ことは表の形としては書ける。**書くと「1 peer 1 owner」（§3.2.1 の手順 1）の例外になる**ので、そういう peer を作るかは kishibashi3 が決める（広げる変更）。いまの fleet ではどちらか片方を触る peer だけを想定している
 - 旧版の `repo_groups` はやめた。repo の束は owner で足りる（owner の中で特定の repo を狭めたいときは `repos`）
 - **1 peer に役は 1 つ。** 2 つの役の op が要る peer が出たら、両方を含む役を作る（例の `plan`）。1 peer に複数の役を許すと、どの鍵を使うかが曖昧になる（1 便目の「2 件以上当たったら設定誤り」はこの制約で起きなくなる）
 - **rule に peer 名を書く例外は作らない。** 1 体だけに要る op は、その 1 体のために役を 1 つ作る（それが例外だと表の上で見える）
 - `push` を持つ役は `push.branch_prefixes` が必須（無ければ起動時の検証で落とす）
 - 起動時に検証する（未知の op 名・役・owner、owner に鍵が無い、鍵ファイルの mode が 600 でない、等）。**1 つでも通らなければ起動しない**（中途半端な表で動かない）
-- 誰にどの op を許すかは本 doc では決めない。上の例は形の説明。**誰が何をしてよいかは L1 の判断**（`collaboration-model` の L0/L1/L2 に合わせる）
+- 誰にどの op を許すか（表の中身）は本 doc では決めない。上の例は形の説明。**決め方は §3.2.1 で決め、中身は S0 でその決め方に沿って作る。誰が何をしてよいかは L1 の判断**（`collaboration-model` の L0/L1/L2 に合わせる）
 
 **判定軸: 新しい peer を足すときに `members` に 1 行足すだけで済むか。** 済む（その 1 行も広げる変更なので、PR にして kishibashi3 本人が merge する。§3.8）。`roles` の行の数は「役の種類 × 1」で、peer の数（今 29 体）にも repo の数にも比例しない。`owners` は owner の数、`repos` は狭めたい repo の数だけ。peer ごとの行にしなかった理由:
 
@@ -198,6 +204,48 @@ repos:
 | 鍵の数（§7.3） | peer 数に比例 | 段 1 は owner の数（2）。段 2 で役ごとに分けると役の種類 × owner |
 | 失うもの | — | 同じ役の peer の間で差を付けられない。付けたいときは役を分ける |
 
+### 3.2.1 何を止めるかの決め方
+
+kishibashi3 が挙げた 3 つ（§0 の①〜③）は止めたいことの**例**で、範囲の上限でも最初の段の目標でもない。表は例を 1 つずつ規則にして作るのではなく、**許すものから作る**。止めたいものを並べる作り方だと、並べなかったものが通るため。例は、出来た表で断られることを確かめる**試験**に使う（S0 の表の検証と S1 のわざと送る依頼。§6）。
+
+例から取り出した軸は 3 本で、表の 3 つの欄に対応する:
+
+| 軸 | 例 | 表の欄 |
+|---|---|---|
+| 誰の作業か → どの owner に書いてよいか | ①②（owner をまたぐ書き込み） | `members[].owners` |
+| 何の作業か → どの op が要るか | （③の「許していない操作」の中身） | `roles[].ops` |
+| どこに → 影響の大きい repo は狭める | ③（`ntv-contech/frontend`） | `repos` |
+
+**手順**（S0 で表の初版を作るとき・peer や owner を足すとき）:
+
+1. **owner を割り当てる。** peer は、自分の workdir の repo の owner 1 つにだけ書いてよい（1 peer 1 owner を既定にする）。2 つの owner にまたがる peer は、kishibashi3 が 1 体ずつ決める（広げる変更、§3.8）。①② は個別の規則ではなく、この既定から出る
+2. **op を 3 つに分ける。**
+   - **作業の中身（戻せる）**: `issue.create` / `issue.comment` / `pr.create` / `pr.comment` / `push`（branch の prefix 付き、§3.7）
+   - **状態を決める**: `pr.review` / `pr.merge` / `issue.close` / `issue.reopen` / `issue.label`
+   - **戻せない・設定を変える**: issue の削除、branch や ref の削除、コメントの削除、`variable set`、`workflow run`、Projects の作成・項目の追加、repo の設定、webhook など。**ゲートウェイの op として作らない**ので、どの役にも書けない（表に書いても起動時の検証が未知の op 名で落とす）。要るときは人が自分で行う。§11.4 の「表に入れないほうがよい候補」と同じ
+3. **役の ops を決める。** その役の peer が §11 の集計で実際に使っている op だけを入れる（上の 3 つ目は除く）。使っていない op は入れない。足りなければ断られた記録から足す（§3.8。段 1 では人が読んで PR にする）
+4. **狭める repo を決める。** 次のどれかに当たる repo を `repos` に載せる: (a) owner（kishibashi3 か、その owner の責任者）が名指しした、(b) main の変更がそのまま顧客や本番に出る、(c) public。載せた repo では、**「状態を決める」op を外すのを既定**にし、残す op は 1 つずつ理由を書く。`ntv-contech/frontend` は (a) で載る。(b)(c) に当たる repo があるかは確かめていない（S0 で kishibashi3 が決める。§10.2 の 3）
+5. **表で変えられない断り**（コードに固定）: 表を置いた repo への書き込み（§3.8）、保護 branch・既定 branch への push、force push、`.github/workflows/` を変える push（§3.7）、`owners` に無い owner への書き込み
+
+**例と、例に無いものが、この表でどう断られるか**（表は §3.2 の形の例。理由の語は §3.4）:
+
+| 依頼 | 断る手順 | 理由 | S3 の前 |
+|---|---|---|---|
+| ① `@bridges-impl` → `ntv-contech/<repo>` に `issue.comment` | 1（`@bridges-impl` の owners は `kishibashi3` だけ） | `owner-not-allowed` | 助言 |
+| ② `@ntv-planner` → `kishibashi3/agent-hub` に `pr.merge` | 1 | `owner-not-allowed`（鍵も READ だけ） | 助言 |
+| ③ `@ntv-planner` → `ntv-contech/frontend` に `pr.merge` | 4（frontend の `ops` に `pr.merge` が無い） | `op-not-in-repo` | 助言 |
+| ③ `@ntv-frontend-coder` → `ntv-contech/frontend` に `issue.close` | 3（`impl` の役に無い） | `op-not-in-role` | 助言 |
+| （例に無い）`@bridges-impl` → `kishibashi3/agent-hub` に `pr.merge` | 3 | `op-not-in-role` | 助言 |
+| （例に無い）だれか → issue の削除・`variable set` | 2（op として無い） | `bad-args` | 助言 |
+| （例に無い）`@bridges-impl` → `main` に push | 5 | `bad-args` | 助言 |
+| （例に無い）未登録の peer → 何でも | — | `no-role` | 助言 |
+| （例に無い）だれか → 表の repo に書き込む | 5 | コードで断る（§3.8） | 助言 |
+| （例に無い）だれか → 3 つ目の owner（未登録）に書き込む | 5 | `owner-not-allowed` | 助言 |
+
+「S3 の前」の列が全部「助言」なのは、S1・S2 の間は peer が `gh` と token 2 本を持ったままだから（§0・§6.1）。S3 の後はすべて止まる。**名乗り替え（§1.3）が残る間は、他の peer の handle を名乗れば、その peer の行で判定される**（§5.1）。
+
+**この決め方で失うもの:** 正当だが §11 に出ていない op は、最初は断られる。断られた記録（`op-not-in-role` / `op-not-in-repo`）を見て足す（広げる変更なので kishibashi3 本人が merge）。初めは断りが多めに出ることを、S2 の間に監査で確かめる。
+
 ### 3.3 鍵の選び方
 
 **段 1: 鍵は書き込み先の owner で決まる**（owner ごとに 1 本。§7.1 の C0）。判定（§3.2）を通った依頼だけが、対象 repo の owner の鍵で実行される。役は鍵の選択に関わらない。
@@ -207,7 +255,7 @@ repos:
 - **App の供給元**: installation token を作るときに `repositories` と `permissions` を指定して、依頼 1 件分（その repo・その op に要る権限）まで絞る（`POST /app/installations/{id}/access_tokens` の body）。例: `issue.comment` を `agent-hub-bridges` に → `{"repositories":["agent-hub-bridges"],"permissions":{"issues":"write"}}`。トークンは (App, repo, 権限の組) ごとにキャッシュし、期限 5 分前に作り直す（今の `iat.go` と同じ考え方。`iat.go` に絞る引数を足す必要がある）
 - **PAT の供給元**: 事前に作った PAT を使う。依頼ごとには絞れない（§7.3）。fine-grained なら鍵に付けた権限・repo、classic / OAuth token（段 1 の C0）なら scope と持ち主のアカウントが触れる repo 全部が上限になる
 
-どちらでも、**op を許すかどうかの判定はゲートウェイの表で行う。** 鍵の権限は「表が誤っていたとき・ゲートウェイに不具合があったときの上限」の役目になる。App のほうがその上限が細かい、というのが違い（§7.2）。段 1 の C0 では、鍵の上限が効くのは **owner をまたぐ書き込み（目標 ①②）だけ**で、owner の中の repo・op（目標 ③）には効かない（§7.3）。
+どちらでも、**op を許すかどうかの判定はゲートウェイの表で行う。** 鍵の権限は「表が誤っていたとき・ゲートウェイに不具合があったときの上限」の役目になる。App のほうがその上限が細かい、というのが違い（§7.2）。段 1 の C0 では、鍵の上限が効くのは **owner をまたぐ書き込み（例 ①②）だけ**で、owner の中の repo・op（例 ③ や役に無い op）には効かない（§7.3）。
 
 ### 3.4 断り方
 
@@ -227,7 +275,7 @@ SQLite（ゲートウェイの uid だけが書ける。**#409 で uid を分け
 | `caused_by` | 依頼 DM の caused_by（因果の連鎖） |
 | `received_at` / `started_at` / `finished_at` | RFC 3339 UTC |
 | `from` | 送り主 handle（§1.3 のとおり、hub の名乗りをそのまま記録したもの） |
-| `op` / `owner` / `repo` / `target` | 何を・どこに（`owner` は鍵の選択と目標 ①② の集計に使う） |
+| `op` / `owner` / `repo` / `target` | 何を・どこに（`owner` は鍵の選択と owner をまたぐ拒否の集計に使う） |
 | `args_digest` | 本文の sha256 と長さ（本文は GitHub 側に残るので全文は持たない） |
 | `decision` | `allowed` / `denied` |
 | `deny_reason` | §3.4 の語彙 |
@@ -244,7 +292,7 @@ SQLite（ゲートウェイの uid だけが書ける。**#409 で uid を分け
 
 ### 3.6 読み取り
 
-> **段 2。** 段 1（S1・S2）では peer は今の `gh` を持ったままなので、読み取りは今のまま。段 1 の C0 の鍵は OAuth token（classic と同じく `repo` scope が読み書き両方）なので、そもそも読み取り専用の鍵が作れない。R1 に要る読み取り専用の鍵を作るのは段 2 に回した。①〜③は書き込みの目標なので、R1 が無くても成り立つ。ただし **S3 で書き込みの資格情報を外すと読み取りも一緒に消える**ので、S3 に入る前に R1 の鍵（段 2）か R2 のどちらかが要る（§6・§10.2 の 12）
+> **S3 の前に入れる（段 2 には回さない）。** S1・S2 では peer は今の `gh` を持ったままなので、読み取りは今のまま。C0 の鍵は OAuth token（classic と同じく `repo` scope が読み書き両方）なので、読み取り専用の鍵にはならない。**S3 で書き込みの資格情報を外すと読み取りも一緒に消える**ので、S3 の前に読み取りの手段が要る。R1 にする: owner ごとに読み取り専用の fine-grained PAT を 1 本ずつ（いまは 2 本）作る。R2（読み取りもゲートウェイに通す）は採らない。読み取りは `gh` 呼び出しの 9 割（§11）で、全部通すとゲートウェイが詰まり所として大きくなりすぎる。`ntv-contech` の org 方針で fine-grained PAT が使えない場合だけ、その owner を R2 にする（未確認。§10.2 の 12）
 
 読み取り（`gh pr view` / `gh pr diff` / `gh pr checks` / `gh api` の GET）は peer の作業のほとんどを占める（未集計、S1 で測る）。これを全部ゲートウェイに通すと詰まり所が大きくなるので、2 案:
 
@@ -281,7 +329,7 @@ push は working tree が要るので、DM 1 通では運べない。案:
 
 ### 3.8 権限表のメンテ（足す・減らす・記録）
 
-> **段 1 で入れるのは「表は専用 repo に置き、変更は PR、広げる変更の merge は kishibashi3 本人だけ」の記録の規則（この節の後半）だけ。** 監査からの機械的な提案（`/propose`、足す提案・減らす提案）は段 2 に回した。段 1 の表は小さく（役 3・owner 2・狭める repo 1）、人が読んで足し引きできる。提案が無くても判定は既定拒否のまま動くので、①〜③は成り立つ。失うのは「使われていない許可が残り続ける」のを機械が見つけることだけ
+> **段 1 で入れるのは「表は専用 repo に置き、変更は PR、広げる変更の merge は kishibashi3 本人だけ」の記録の規則（この節の後半）だけ。** 監査からの機械的な提案（`/propose`、足す提案・減らす提案）は段 2 に回した。段 1 の表は小さく（役 3〜4・owner 2・狭める repo 1）、人が読んで足し引きできる。提案が無くても判定は既定拒否のまま動くので、止まるものは変わらない（§3.2.1）。失うのは「使われていない許可が残り続ける」のを機械が見つけることだけ
 
 放っておくと表は足す方向にだけ動く。**使われていない許可は害が見えないので残り続ける**（前例: `@reviewer` の規則が 653 行まで伸び、自己改善の節 3 箇所が実行 0 回 —— `deep-research/research-archive/2026-11-23-reviewer-refactor-proposal.md`）。そのため、減らす経路を足す経路と同時に作る。
 
@@ -289,7 +337,7 @@ push は working tree が要るので、DM 1 通では運べない。案:
 
 | | 足す提案 | 減らす提案 |
 |---|---|---|
-| 根拠 | **断られた記録**: `denied` のうち `op-not-in-role`（`owner-not-allowed` と `op-not-in-repo` は目標 ①〜③ の拒否なので、足す提案の根拠にしない） | **使われていない記録**: 役に許された (op, owner) のうち、N 日 `allowed` が 0 件 |
+| 根拠 | **断られた記録**: `denied` のうち `op-not-in-role`（`owner-not-allowed` と `op-not-in-repo` は owner と狭めた repo の拒否で、例の①〜③もここに入る。足す提案の根拠にしない） | **使われていない記録**: 役に許された (op, owner) のうち、N 日 `allowed` が 0 件 |
 | 単位 | (役, op, owner)。peer ごとには出さない | (役, op, owner)。役の中の誰か 1 体でも使っていれば出さない。`members` のうち N 日依頼が 0 件の peer も候補に出す |
 | 出す条件 | 同じ (役, op, owner) の拒否が窓の中で K 件以上、**かつ異なる送り主が min(K, 役の members の数) 体以上**（1 体が K 回送っただけで表を広げないため）。**初期値 K = 3、窓 = 14 日** | **初期値 N = 60 日** |
 | 付ける根拠 | 拒否した依頼の msg_id と送り主の一覧。peer の誤りか表の不足かを人が見分けられるように。**§1.3 が残る間は、PR 本文に「送り主は hub の名乗りのままで未検証」と書く**（1 体が複数の handle を名乗れば、送り主の数の条件も満たせるため） | 最後に使われた日時（無ければ「表に入ってから一度も」） |
@@ -318,7 +366,7 @@ push は working tree が要るので、DM 1 通では運べない。案:
 
 ## 4. 設計してほしいこと 3: inbound（`@gh-watch`）との関係
 
-> **段 2。** inbound は通知で、①〜③（書き込みを止める）には関わらない。段 1 では作らない。下は段 2 で作るときの方針として残す
+> **段 2。** inbound は通知で、書き込みを止めること（§3.2.1）には関わらない。段 1 では作らない。下は段 2 で作るときの方針として残す
 
 **別プロセスにする。部品（`packages/github-client`）は共有する。**
 
@@ -422,9 +470,9 @@ App なしの inbound で変わるもの:
 | 段 | やること | peer の `gh` | 抜ける条件 | 戻し方 |
 |---|---|---|---|---|
 | **S0** | 本 doc。鍵の構成は段 1 では C0（いまある token 2 本、owner ごと。§7.1）に決まった。表（§3.2）の中身を決める: NTV の peer の一覧、`ntv-contech/frontend` の op の上限（§10.2 の 3） | 今のまま | 表の初版が専用 repo に merge される（kishibashi3 本人。§3.8） | — |
-| **S1 観測** | ゲートウェイを起動し、`/ping` と `issue.comment` だけを、各 owner の 1 体ずつ（例: `@bridges-impl` と NTV の peer 1 体）から使う。①〜③の拒否（`owner-not-allowed` / `op-not-in-repo`）がわざと送った依頼で返ることも確かめる。同時に、peer が `gh` で何をしているかを session 記録から集計する（op 表の根拠） | 今のまま | op 表が集計で裏付けられる。待ち時間・失敗率が測れている | ゲートウェイを止める（peer は `gh` を持ったまま） |
+| **S1 観測** | ゲートウェイを起動し、`/ping` と `issue.comment` だけを、各 owner の 1 体ずつ（例: `@bridges-impl` と NTV の peer 1 体）から使う。§3.2.1 の表の依頼（例の①〜③と、例に無いもの）をわざと送り、表のとおりの理由で断られることも確かめる。同時に、peer が `gh` で何をしているかを session 記録から集計する（op 表の根拠） | 今のまま | op 表が集計で裏付けられる。待ち時間・失敗率が測れている | ゲートウェイを止める（peer は `gh` を持ったまま） |
 | **S2 併用** | peer の書き込みを順にゲートウェイに切り替える（persona doc / bridge の指示を変える）。`gh` はまだ持っている。`gh` で書き込もうとしたら PreToolUse フックで**警告して**ゲートウェイを案内する（拒否はまだしない）。planner の LGTM 判定をゲートウェイの footer に切り替える（§3.1） | 持っている（**ゲートウェイは助言**） | 迂回の件数（§9 M2）が 1 週間 0 | 指示とフックを戻す（peer ごと） |
-| **S3 外す** | peer から書き込みの資格情報を外す: ①`GH_TOKEN`（IAT モード）を渡さない ②`hosts.yml`（token 2 本とも）を peer の uid から読めなくする ③peer の `gh` は読み取りだけで動かす（R1 の読み取り鍵は段 2。それまでは R2。§3.6・§10.2 の 12） ④ゲートウェイの鍵ファイル・監査 DB・起動設定・コードを peer から読み書きできなくする。**2 つに分ける**: S3a は peer ごとの flag（例: bridge の `--gateway-only`）で ①〜③ を切り替え、元の資格情報は消さずに残す。S3b は S3a で問題が出ないことをログで確かめてから元の資格情報を消す | **書けない** | 迂回の件数が 0 のまま、peer の作業が回る | S3a: その peer の flag を戻して respawn（元の資格情報は残っている）。S3b の後は戻せない（資格情報の作り直しになる）ので、S3b は S3a を全 peer で 1 日以上回してから |
+| **S3 外す** | peer から書き込みの資格情報を外す: ①`GH_TOKEN`（IAT モード）を渡さない ②`hosts.yml`（token 2 本とも）を peer の uid から読めなくする ③peer の `gh` は読み取りだけで動かす（R1 の読み取り鍵を S3 の前に入れる。§3.6・§10.2 の 12） ④ゲートウェイの鍵ファイル・監査 DB・起動設定・コードを peer から読み書きできなくする。**2 つに分ける**: S3a は peer ごとの flag（例: bridge の `--gateway-only`）で上の ①〜③ を切り替え、元の資格情報は消さずに残す。S3b は S3a で問題が出ないことをログで確かめてから元の資格情報を消す | **書けない** | 迂回の件数が 0 のまま、peer の作業が回る | S3a: その peer の flag を戻して respawn（元の資格情報は残っている）。S3b の後は戻せない（資格情報の作り直しになる）ので、S3b は S3a を全 peer で 1 日以上回してから |
 
 S3 の前提:
 
@@ -438,26 +486,26 @@ S3 で外した後に peer が困る操作（例: `gh run rerun`、`gh project`�
 
 ### 6.1 段 1 と段 2（2026-11-26 の見直し）
 
-kishibashi3 の要件「あまり複雑にはしたくない」に合わせ、①〜③（§0）に要るものだけを段 1 に入れ、残りを段 2 に回した。S0〜S3 はどちらの段にも共通の入れ方の順番で、段 1 は S3 まで進める。
+kishibashi3 の要件「あまり複雑にはしたくない」に合わせ、段 1 には**表の制限を S3 で本当に効かせるのに要るもの**だけを入れ、残りを段 2 に回した。①〜③は例なので、段の分け方の基準にはしていない。基準は「それが無いと S3 の後に表の判定（§3.2.1）が効かない、または peer の作業が回らないか」。S0〜S3 はどちらの段にも共通の入れ方の順番で、段 1 は S3 まで進める。
 
-**段 1 に入れるもの:** ゲートウェイ本体（§3.1 の受け付け・§3.4 の断り方・§3.5 の監査）、owner と repo を入れた表（§3.2）、owner ごとの鍵 2 本（§7.1 の C0）、push の P1（§3.7）、表の記録の規則（専用 repo・PR・広げる変更は kishibashi3 本人。§3.8 の後半）。
+**段 1 に入れるもの:** ゲートウェイ本体（§3.1 の受け付け・§3.4 の断り方・§3.5 の監査）、owner と repo を入れた表（§3.2）と、その作り方（§3.2.1）、owner ごとの鍵 2 本（§7.1 の C0）、push の P1（§3.7）、表の記録の規則（専用 repo・PR・広げる変更は kishibashi3 本人。§3.8 の後半）、**読み取り専用の鍵（§3.6 R1。S3 の前まで）**。
 
-**段 2 に回すもの:**
+**回すか決めたもの:**
 
-| 回すもの | 回した理由 | 回しても①〜③は成り立つか |
+| もの | 決めたこと | 理由 |
 |---|---|---|
-| 役ごとの鍵（§7.3） | いまある token は OAuth で fine-grained ではない。役ごとに分けても repo・op を絞れないので、鍵を増やすだけで上限は変わらない。分けて意味が出るのは fine-grained PAT か App にしたとき | 成り立つ。①②は owner ごとの鍵と表で、③は表で止める。役ごとの鍵は、表に誤りがあったときの上限を細かくするだけ |
-| 表のメンテの機械提案（§3.8 の `/propose`） | 段 1 の表は役 3・owner 2・狭める repo 1 で、人が読める大きさ | 成り立つ。判定は既定拒否のまま。失うのは「使われていない許可」を機械が見つけることだけ |
-| inbound（§4） | 通知で、書き込みを止める話ではない | 関わらない |
-| 読み取り専用の鍵（§3.6 R1） | 段 1 の鍵（OAuth の `repo` scope）では読み取りだけの鍵が作れない。作るには新しく fine-grained PAT か App が要る | 成り立つ（①〜③は書き込みの目標）。**ただし S3 では書き込みと一緒に読み取りの資格情報も外れる**ので、S3 に入る前に R1 の鍵を段 2 から前倒しするか、読み取りもゲートウェイに通す（R2）かを決める（§10.2 の 12） |
+| 役ごとの鍵（§7.3） | **段 2 に回す** | いまある token は OAuth で fine-grained ではない。役ごとに分けても repo・op を絞れないので、鍵が増えるだけで上限は変わらない。分けて意味が出るのは fine-grained PAT か App にしたとき。回しても表の判定は同じに効く（鍵は表の誤りや不具合のときの上限で、判定そのものではない） |
+| 表のメンテの機械提案（§3.8 の `/propose`） | **段 2 に回す** | 段 1 の表は役 3〜4・owner 2・狭める repo 1 で、人が読んで足し引きできる。判定は既定拒否のまま動く。失うのは「使われていない許可」を機械が見つけることだけ。表が人の手に余る大きさになったら入れる |
+| inbound（§4） | **段 2 に回す** | 通知で、書き込みを止める話ではない。今の `@gh-watch` は動いているので、段 1 で触る理由が無い |
+| 読み取り専用の鍵（§3.6 R1） | **回さない。S3 の前に入れる** | S3 で書き込みの資格情報を外すと、C0 では読み取りも一緒に外れる。読み取りは `gh` 呼び出しの 9 割（§11）で、無いと peer の作業が止まる。R2（ゲートウェイに通す）は詰まり所が大きすぎるので採らない。鍵は owner ごとに 1 本（いまは 2 本）で、表の形も判定も変えない。S1・S2 では要らないので、作るのは S3 の前でよい |
 
-**段 1 で①〜③が止まる時期:**
+**表の制限が効く時期:**
 
 | | S1・S2 | S3 の後（#409 の後） |
 |---|---|---|
-| ① NTV 以外 → `ntv-contech` | 助言。peer は `hosts.yml` の `k-ishibashi-ntv` の token を自分で使える | 止まる（表 + 鍵の上限）。名乗り替え（§1.3）は残る |
-| ② NTV → `kishibashi3/*` | 助言。peer は `kishibashi3` の token を自分で使える | 止まる（表 + 鍵の上限）。名乗り替えは残る |
-| ③ `ntv-contech/frontend` の表に無い操作 | 助言 | 止まる（表だけ。鍵は frontend の admin 権限を持つので、ゲートウェイの不具合や表の誤りには上限が無い） |
+| owner をまたぐ書き込み（例 ①②） | 助言。peer は `hosts.yml` の token 2 本を自分で使える | 止まる（表 + 鍵の上限。②は鍵でも止まる、①は鍵の選び方の不具合にだけ鍵が効く）。名乗り替え（§1.3）は残る |
+| 狭めた repo の許していない操作（例 ③） | 助言 | 止まる（表だけ。鍵は frontend の admin 権限を持つので、ゲートウェイの不具合や表の誤りには上限が無い） |
+| 役に無い op・作っていない op（例に無いもの） | 助言 | 止まる（表とゲートウェイの op の語彙。鍵の上限は無い） |
 
 ---
 
@@ -561,6 +609,8 @@ keys:
 - `k-ishibashi-ntv` の token は、見える `kishibashi3/*` の repo 28 個すべてで `viewerPermission` が `READ` → ②は鍵の上限でも止まる（コラボレーターを足せば変わる。足すのは広げる変更と同じく kishibashi3 本人の判断）
 - `k-ishibashi-ntv` は `ntv-contech/frontend` で `ADMIN` → ③に鍵の上限は無い。表だけが止める
 
+**段 1 の S3 の前に足す鍵: owner ごとに読み取り専用の鍵 1 本**（§3.6 R1・§6.1）。書き込みの鍵とは別に持ち、`token.read` で peer に渡す。
+
 **段 2 以降: 役 × owner ごとに 1 本**（fine-grained PAT か App にしたとき）。
 
 - 鍵の数 = 役の種類 × owner の数。`plan` と `impl` の権限の組が同じでも、監査の `key_id` で役を区別できなくなるので共有しない
@@ -625,12 +675,12 @@ keys:
 
 | | 決めたこと | 根拠 |
 |---|---|---|
-| 読み取り | **R1**（§3.6）。classic PAT しか使えない環境では R2。**2026-11-26: 段 2 に回した**（段 1 の C0 では R1 が成り立たない。S3 の前に何を使うかは §10.2 の 12） | 読み取りが `gh` 呼び出しの 9 割（§11） |
+| 読み取り | **R1**（§3.6）。classic PAT しか使えない環境では R2。**2026-11-26: 段 2 には回さず、S3 の前に入れる**（C0 の鍵は読み取り専用にならないので、owner ごとに読み取り専用の鍵を足す。§6.1・§10.2 の 12） | 読み取りが `gh` 呼び出しの 9 割（§11） |
 | push | **P1**（§3.7） | PAT の構成では P1 しか成り立たない。App の構成でも鍵を peer に渡さない |
 | メンテの値 | **K = 3・窓 14 日、N = 60 日**（§3.8） | §11 の頻度。運用で直す |
 | 置く host | **bridge host**。鍵はゲートウェイ専用の uid だけが読める | P1 の bundle をファイルで受け渡すので peer と同じ host が要る。Pi5 に置いても peer の uid から ssh で辿れる（§6）ので隔離は増えない。Pi5 はメモリが逼迫している。**条件（鍵を peer と別 uid で持てる）は、#409 で peer の uid を `docker` / `sudo` から外して初めて満たせる** |
 | 鍵の混ぜ方 | 操作ごとに鍵を混ぜない（§7.1） | どの鍵で通ったかが追えなくなる |
-| 範囲と段 1（**kishibashi3、2026-11-26**） | 範囲は `kishibashi3/*` と `ntv-contech/*`（owner は将来増える前提）。段 1 の目標は §0 の①〜③。鍵は C0（いまある token 2 本、owner ごと）。役ごとの鍵・機械提案・inbound・R1 は段 2（§6.1） | issuecomment-7189759185 |
+| 範囲と段 1（**kishibashi3、2026-11-26**） | 範囲は `kishibashi3/*` と `ntv-contech/*`（owner は将来増える前提）。止めたいこと 3 つ（§0 の①〜③）は**例**で、上限でも段 1 の目標でもない（本人の訂正）。何を止めるかは表の作り方（§3.2.1）で決める。鍵は C0（いまある token 2 本、owner ごと）。段の分け方は本設計で決めた: 役ごとの鍵・機械提案・inbound は段 2、R1 は S3 の前（§6.1） | issuecomment-7189759185（2026-11-26 に「例」へ書き直された版） |
 | 表の repo | 表は専用 repo に置き、ゲートウェイがその main から自分で読む（operator はファイルを置かない）。表を置いた repo への書き込みは表の中身に関係なくコードで断る（§3.8） | 表が自分を広げる経路を持たない。merge されていない表を読ませない |
 
 ### 10.2 決めていないこと
@@ -644,7 +694,7 @@ keys:
 | 8 | operator に非常口を持たせるか（§5.3。§3.8 の「operator も自分の行を広げられない」と合わせて決める） | **kishibashi3**（operator の権限を緩める話なので operator は決められない） |
 | 9 | uid の分け方 | **#409**。担当未定 |
 | 11 | C′ で machine user を作るか（無料の範囲では名義は 2 つまで。§7.4） | 1 に従属。C′ のときだけ |
-| 12 | **S3 で peer の読み取りをどうするか**。書き込みの資格情報を外すと、C0 では読み取りも一緒に外れる（§3.6）。案: R1 の読み取り専用の鍵（fine-grained PAT か App、owner ごと）を S3 の前に段 2 から前倒しする / 読み取りもゲートウェイに通す（R2、詰まり所が大きい） | kishibashi3。S3 に入る前まで（S1・S2 は決めなくても進む） |
+| 12 | **S3 の読み取りは R1 に決めた**（§3.6・§6.1）。決めていないのは、`ntv-contech` の org 方針で読み取り専用の fine-grained PAT が使えるか（承認必須・禁止を org が設定できる。確かめていない）。使えなければその owner だけ R2 | S3 の前に確かめる。使えないときに R2 にするか、org 方針を変えてもらうかは kishibashi3 |
 
 番号は旧 §10 のもの（4・6・7・10 は 10.1 に移した）。
 
@@ -715,5 +765,6 @@ keys:
 - [Create a review](https://docs.github.com/en/rest/pulls/reviews#create-a-review-for-a-pull-request) の応答（200 / 403 / 422。reviewer の指摘で知り、§5.2 に反映）
 - publications#119: `gh pr view` で 2026-10-30 に merge 済みの PR（題「docs(ai): Agent Authority Control Plane 構想を公開」）と確かめた
 - 2026-11-26 の見直しで確かめたこと: issuecomment-7189759185（planner が kishibashi3 の要件を逐語で記録）。`gh auth status`（`kishibashi3`: `admin:public_key` `delete_repo` `gist` `project` `read:org` `repo` `workflow` / `k-ishibashi-ntv`: `gist` `read:org` `repo` `workflow`。token の値は表示していない）。`gh repo view --json viewerPermission` をアカウントごとに: `kishibashi3` → `kishibashi3/agent-hub-bridges` は `ADMIN`、`ntv-contech/frontend` は見えない（`gh repo list ntv-contech` も 0 件） / `k-ishibashi-ntv` → `ntv-contech/frontend` は `ADMIN`、`kishibashi3` の repo（一覧で見える 28 個）はすべて `READ`。`gh repo list ntv-contech`（20 repo、すべて private）。`get_participants`（`@ntv-*` 9 体と `@cae-coder` が online。NTV の peer かは確かめていない、§10.2 の 3）
-- 未確認: `gh-watch` の実動作、peer ごとに絞った installation token の実挙動、名義を分けた approve が required review に数えられるか、GitHub の rate limit の現在値、codex の bridge の `gh` 操作（記録の場所）、**fine-grained PAT を API で作る手段・PAT の権限を API で引く手段が本当に無いか**（docs の該当ページに見当たらなかっただけ）、repo webhook で `workflow_run` を受けられるか（Availability に `repository` はあるが本文を逐語で読めていない。`check_suite` は確かめた、§4.1）、古い `commit_id` への approve の実挙動（docs の応答一覧からの判断。実機では試していない）、`gh` が `hosts.yml` の installation token / fine-grained PAT を使えるか（§3.6）、org が App の install をどう制限できるか、作者が自分の PR を approve できないことの docs 上の記述（今の運用で観測している事実として書いた）
+- 2026-11-26 の訂正（planner msg、issuecomment-7189759185 の書き直し後の版）: ①〜③は例で上限でも段 1 の目標でもない、何を止めるか・段の分け方は設計の中で決める。§11.3 / §11.4 の集計を §3.2.1 の op の分け方と役の ops の根拠に使った
+- 未確認: `ntv-contech` の org の PAT 方針（fine-grained PAT の承認必須・禁止。§10.2 の 12）、`ntv-contech` の repo のうち main が本番に出るもの・public のもの（§3.2.1 の手順 4 の (b)(c)）、`gh-watch` の実動作、peer ごとに絞った installation token の実挙動、名義を分けた approve が required review に数えられるか、GitHub の rate limit の現在値、codex の bridge の `gh` 操作（記録の場所）、**fine-grained PAT を API で作る手段・PAT の権限を API で引く手段が本当に無いか**（docs の該当ページに見当たらなかっただけ）、repo webhook で `workflow_run` を受けられるか（Availability に `repository` はあるが本文を逐語で読めていない。`check_suite` は確かめた、§4.1）、古い `commit_id` への approve の実挙動（docs の応答一覧からの判断。実機では試していない）、`gh` が `hosts.yml` の installation token / fine-grained PAT を使えるか（§3.6）、org が App の install をどう制限できるか、作者が自分の PR を approve できないことの docs 上の記述（今の運用で観測している事実として書いた）
 
