@@ -422,3 +422,65 @@ func TestDetachNotice_LostSupervisor_SaysJobMayStillRun(t *testing.T) {
 		t.Errorf("body should say the job may still be running:\n%s", body)
 	}
 }
+
+// 中身の id が欠けている・ファイル名と違う record でも、印はファイル名の id で付き、便は 1 回だけ
+// (PR #401 レビュー Minor 1: 印が別名で書かれて毎 tick 便が出続けない / spool の外に印を作らない)。
+func TestDeliverDetachNotices_RecordIDMismatch_NotifiedOnce(t *testing.T) {
+	dir := setDetachEnv(t)
+	outside := filepath.Join(filepath.Dir(dir), "outside")
+	for _, d := range []string{dir, outside} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	res := detachResult{ExitCode: 0, EndedAt: now}
+	cases := map[string]string{ // ファイル名の id → 中身の id
+		"f-missing":  "",
+		"f-mismatch": "other-id",
+		"f-escape":   "../outside/x",
+	}
+	for fileID, recID := range cases {
+		rec := detachRecord{ID: recID, Argv: []string{"x"}, Session: "@requester", StartedAt: now}
+		if err := writeJSONFile(filepath.Join(dir, fileID+".json"), rec); err != nil {
+			t.Fatal(err)
+		}
+		if err := writeJSONFile(filepath.Join(dir, fileID+".done.json"), res); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	tmp := t.TempDir()
+	promptLog := filepath.Join(tmp, "prompts")
+	script := filepath.Join(tmp, "fake-claude")
+	body := fmt.Sprintf("#!/bin/sh\nread -r _init\nread -r msg\nprintf '%%s\\n' \"$msg\" >> '%s'\necho '%s'\n",
+		promptLog, fakeResultLine)
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	client, cfg, runner, _, journal := newTestEnv(t, script)
+	cfg.DetachDir = dir
+	sleeper := &limitSleeper{}
+
+	deliverDetachNotices(context.Background(), cfg, client, runner, &activityTracker{}, journal, sleeper)
+	deliverDetachNotices(context.Background(), cfg, client, runner, &activityTracker{}, journal, sleeper)
+
+	data, err := os.ReadFile(promptLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lines := strings.Split(strings.TrimSpace(string(data)), "\n"); len(lines) != len(cases) {
+		t.Fatalf("claude started %d times, want %d (once per record)", len(lines), len(cases))
+	}
+	for fileID := range cases {
+		if !detachFileExists(filepath.Join(dir, fileID+".notified")) {
+			t.Errorf("%s.notified not created in spool", fileID)
+		}
+	}
+	if entries, _ := os.ReadDir(outside); len(entries) != 0 {
+		t.Errorf("marker written outside spool: %v", entries)
+	}
+	if ns := pendingDetachNotices(dir, time.Now()); len(ns) != 0 {
+		t.Errorf("pending = %d, want 0", len(ns))
+	}
+}

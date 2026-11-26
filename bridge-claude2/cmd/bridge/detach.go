@@ -291,6 +291,12 @@ func pendingDetachNotices(dir string, now time.Time) []detachNotice {
 			slog.Warn("detach: unreadable record, skipping", "file", name, "err", err)
 			continue
 		}
+		// 印 (<id>.notified) はファイル名の id で判定するので、以降もファイル名の id を使う。
+		// 中身の id が欠けている・違うと、印が別名で書かれて便が毎 tick 出続ける (PR #401 レビュー Minor 1)。
+		if rec.ID != id {
+			slog.Warn("detach: record id differs from file name, using file name", "file", name, "record_id", rec.ID)
+			rec.ID = id
+		}
 		var res detachResult
 		if err := readJSONFile(filepath.Join(dir, id+".done.json"), &res); err == nil {
 			out = append(out, detachNotice{Record: rec, Result: &res})
