@@ -85,8 +85,7 @@ func buildBlockingErrorMessage(patternName string) string {
 	return fmt.Sprintf(
 		"Error: blocking command detected (`%s`).\n"+
 			"Blocking waits prevent this bridge from receiving messages.\n\n"+
-			"Instead, use @scheduler:\n"+
-			"  @scheduler /run_in 10m @<your-handle> <alternative-command>",
+			cannotWaitGuidance,
 		patternName,
 	)
 }

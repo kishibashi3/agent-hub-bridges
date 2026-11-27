@@ -166,10 +166,10 @@ func blockingHookOutput(req controlRequest) map[string]any {
 
 // backgroundDeniedMessage は run_in_background: true を deny するときの理由 (issue #374)。
 // bridge は依頼ごとに claude を終わらせるので、バックグラウンドのタスクは残らない。
+// 案内は cannotWaitGuidance に揃える (issue #394)。@scheduler に委ねると返信が依頼主に届かない。
 const backgroundDeniedMessage = "Error: run_in_background is not available in this bridge.\n" +
 	"This bridge ends the claude process after each request, so background tasks do not survive.\n\n" +
-	"If you need to wait, use @scheduler instead:\n" +
-	"  @scheduler /run_in 10m @<your-handle> <alternative-command>"
+	cannotWaitGuidance
 
 // cannotWaitGuidance は Monitor / ScheduleWakeup / CronCreate の理由文に共通の案内 (issue #389)。
 // @scheduler に委ねると発火した便の返信先が @scheduler になり、依頼主に届かない。
