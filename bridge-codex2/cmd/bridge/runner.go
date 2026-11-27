@@ -141,7 +141,10 @@ func (r *codexRunner) query(ctx context.Context, prompt, _ string, tracker *acti
 	cmd := exec.CommandContext(queryCtx, r.cfg.CodexCLI, args...)
 	cmd.Dir = r.cfg.Workdir
 	cmd.Stderr = os.Stderr
-	cmd.Env = r.buildEnv()
+	// issue #377: 便ごとの印。engine が終わった後、これを持って残っているものを reapLeftovers が探す。
+	// 親環境の同名の値は消してから付ける。
+	runID := newEngineRunID(r.cfg.User)
+	cmd.Env = append(envWithout(r.buildEnv(), engineRunEnv), engineRunEnvEntry(runID))
 	// issue #397: ターンを越える処理を detach で切り離せるよう、置き場と依頼を渡す
 	cmd.Env = append(cmd.Env, r.detachEnv(ctx)...)
 	// issue #336 #1: 上限到達・停止で kill するときは wrapper だけでなく子孫ごと止める (proctree.go)
@@ -161,6 +164,8 @@ func (r *codexRunner) query(ctx context.Context, prompt, _ string, tracker *acti
 		stdinPipe.Close()
 		return queryUsage{IsError: true}, fmt.Errorf("runner: start codex subprocess: %w", err)
 	}
+	// issue #377: ここから後のどの return も cmd.Wait() の後なので、engine が終わってから回収する
+	defer reapLeftovers(runID, r.cfg.ReapLeftovers)
 
 	pid := cmd.Process.Pid
 	mode := "new-session"

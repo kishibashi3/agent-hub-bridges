@@ -30,6 +30,8 @@
 //	AGENT_HUB_SUBPROCESS_TIMEOUT optional   1 依頼あたりの codex 作業時間の上限 (Go duration: "30m", "1h", "0" = 無制限;
 //	                                        default: 30m; --subprocess-timeout フラグが優先)。上限に達すると codex を止め、
 //	                                        送信元へエラーを 1 回返す (リトライしない、issue #336)
+//	AGENT_HUB_REAP_LEFTOVERS    optional    便の後に残った & の子 (setsid 済みのもの) を止める (1/true; default: false = ログだけ;
+//	                                        --reap-leftovers フラグが優先・issue #377)
 //	AGENT_HUB_CONTEXT_STAGE     optional    文脈の段 (default: none; issue #339、bridge-claude2 と同じ env 名・値)。
 //	                                        none = 継続しない (段 1、1 便ごとに新しい codex セッション)。
 //	                                        last = 旧挙動の `codex exec resume --last` (deprecated、起動時に warning)。
@@ -56,6 +58,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -114,6 +117,9 @@ type config struct {
 	ThreadContext threadContextConfig
 	// DetachDir は detach で切り離した処理の記録の置き場 (issue #397)。"" なら detach を使わない。
 	DetachDir string
+	// ReapLeftovers は engine が終わった後に残った、その便の印を持つプロセスを止めるか (issue #377、
+	// leftover.go)。false (既定) ではログに出すだけ。--reap-leftovers / AGENT_HUB_REAP_LEFTOVERS で有効にする。
+	ReapLeftovers bool
 }
 
 func parseConfig() (*config, error) {
@@ -132,6 +138,7 @@ func parseConfig() (*config, error) {
 		maxRetries        = flag.Int("max-retries", 10, "circuit breaker: max consecutive get_messages failures (0 = unlimited)")
 		subprocessTimeout = flag.Duration("subprocess-timeout", -1, "codex subprocess max runtime per query (0 = no timeout; -1 = use AGENT_HUB_SUBPROCESS_TIMEOUT env or default 30m)")
 		showVersion       = flag.Bool("version", false, "print version and exit")
+		reapLeftovers     = flag.Bool("reap-leftovers", false, "stop processes a tool left running (e.g. with setsid ... &) after each run ends (default: AGENT_HUB_REAP_LEFTOVERS env or false = log only)")
 		addDirs           stringSlice
 	)
 	flag.StringVar(&participantVal, "participant", "", "agent-hub handle (without @) [required]")
@@ -139,6 +146,16 @@ func parseConfig() (*config, error) {
 	flag.StringVar(&userDeprecated, "user", "", "deprecated: use --participant / -p")
 	flag.Var(&addDirs, "add-dir", "add extra directory to codex context (repeatable; only applied on new sessions)")
 	flag.Parse()
+	reapLeftoversSet := false
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == "reap-leftovers" {
+			reapLeftoversSet = true
+		}
+	})
+	resolvedReapLeftovers, err := resolveReapLeftovers(reapLeftoversSet, *reapLeftovers)
+	if err != nil {
+		return nil, err
+	}
 
 	if *showVersion {
 		fmt.Printf("bridge-codex2/%s (agent-hub-bridges)\n", version)
@@ -286,6 +303,7 @@ func parseConfig() (*config, error) {
 		MaxRetries:        *maxRetries,
 		SubprocessTimeout: resolvedSubprocessTimeout,
 		ScannerBufferSize: resolvedScannerBufferSize,
+		ReapLeftovers:     resolvedReapLeftovers,
 		ContextStage:      resolvedContextStage,
 		ThreadContext:     resolvedThreadContext,
 		// issue #397: detach の記録は journal と同じ dir の下に、journal と同じく user ごとに置く
@@ -568,6 +586,7 @@ func main() {
 		"poll_interval_s", cfg.PollInterval.Seconds(),
 		"subprocess_timeout_s", cfg.SubprocessTimeout.Seconds(),
 		"scanner_buffer_size", cfg.ScannerBufferSize,
+		"reap_leftovers", cfg.ReapLeftovers,
 		"codex_home", cfg.CodexHomeDir,
 		"log_file", orDefault(cfg.LogFile, "(stderr only)"),
 	)
@@ -648,6 +667,26 @@ func resolveSubprocessTimeout(flagVal time.Duration) (time.Duration, error) {
 
 // defaultSubprocessTimeout は 1 依頼あたりの codex 作業時間の既定上限 (bridge-claude2 と同じ値)。
 const defaultSubprocessTimeout = 30 * time.Minute
+
+// reapLeftoversEnv は --reap-leftovers を指定しなかったときに見る env (issue #377)。
+const reapLeftoversEnv = "AGENT_HUB_REAP_LEFTOVERS"
+
+// resolveReapLeftovers は --reap-leftovers を解決する (issue #377)。
+// 優先順位: フラグ (指定したとき) > AGENT_HUB_REAP_LEFTOVERS env (strconv.ParseBool) > false (既定 = ログだけ)
+func resolveReapLeftovers(flagSet, flagVal bool) (bool, error) {
+	if flagSet {
+		return flagVal, nil
+	}
+	envVal := os.Getenv(reapLeftoversEnv)
+	if envVal == "" {
+		return false, nil
+	}
+	v, err := strconv.ParseBool(envVal)
+	if err != nil {
+		return false, fmt.Errorf("%s %q: must be a boolean (1/0/true/false)", reapLeftoversEnv, envVal)
+	}
+	return v, nil
+}
 
 // resolveScannerBufferSize は AGENT_HUB_SCANNER_BUFFER_SIZE env を解決する。
 // 優先順位: AGENT_HUB_SCANNER_BUFFER_SIZE env > 4MB (default)
