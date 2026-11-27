@@ -367,6 +367,30 @@ func TestBlockingHookOutput_DeniesScheduleWakeupAndCronCreate(t *testing.T) {
 	}
 }
 
+// run_in_background / blocking-cmd の理由文は @scheduler を案内せず、cannotWaitGuidance を
+// 含むこと (issue #394)。Monitor 等 (issue #389) と案内を 1 種類に揃える。
+func TestDenyMessages_NoSchedulerGuidance(t *testing.T) {
+	cases := map[string]string{
+		"backgroundDeniedMessage":   backgroundDeniedMessage,
+		"buildBlockingErrorMessage": buildBlockingErrorMessage("sleep <N>=60s+"),
+	}
+	for name, msg := range cases {
+		if strings.Contains(msg, "@scheduler") {
+			t.Errorf("%s should not mention @scheduler: %q", name, msg)
+		}
+		if !strings.Contains(msg, cannotWaitGuidance) {
+			t.Errorf("%s should contain cannotWaitGuidance: %q", name, msg)
+		}
+	}
+	// 1 行目 (何が使えないか) は変えない
+	if !strings.HasPrefix(backgroundDeniedMessage, "Error: run_in_background is not available in this bridge.\n") {
+		t.Errorf("backgroundDeniedMessage first line changed: %q", backgroundDeniedMessage)
+	}
+	if !strings.HasPrefix(buildBlockingErrorMessage("sleep <N>=60s+"), "Error: blocking command detected (`sleep <N>=60s+`).\n") {
+		t.Errorf("blocking message first line changed")
+	}
+}
+
 func TestRunInBackground(t *testing.T) {
 	cases := []struct {
 		raw  string
