@@ -36,6 +36,9 @@ type queryUsage struct {
 	// RepliedCausedBy は内側 codex の agent-hub send_message が成功した呼び出しの caused_by 一覧
 	// (issue #336 #4)。処理中の inbound への返信済み判定と、先回り返信の skip に使う。
 	RepliedCausedBy []string
+	// UnfinishedCommands は、終わらないままターンが終わり、codex の終了と一緒に止まったコマンド
+	// (issue #397)。依頼主に止まったことを知らせるのに使う。
+	UnfinishedCommands []string
 }
 
 // repliedTo は caused_by=msgID の send_message が成功していたかを返す。

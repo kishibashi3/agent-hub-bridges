@@ -53,7 +53,9 @@ type codexEvent struct {
 // codexItem は `item.started` / `item.completed` イベントの item (codex CLI 0.163.0 で確認)。
 // MCP ツール呼び出しは type="mcp_tool_call" で、完了時の status は "completed" / "failed"。
 type codexItem struct {
+	ID        string          `json:"id,omitempty"`
 	Type      string          `json:"type"`
+	Command   string          `json:"command,omitempty"`
 	Server    string          `json:"server,omitempty"`
 	Tool      string          `json:"tool,omitempty"`
 	Arguments json.RawMessage `json:"arguments,omitempty"`
@@ -305,6 +307,7 @@ func (r *codexRunner) buildEnv() []string {
 func (r *codexRunner) readOutput(ctx context.Context, stdout io.Reader, tracker *activityTracker) queryUsage {
 	var usage queryUsage
 	scanner := newStreamScanner(stdout, r.cfg.ScannerBufferSize)
+	var cmds unfinishedCommands
 
 	for scanner.Scan() {
 		select {
@@ -331,6 +334,9 @@ func (r *codexRunner) readOutput(ctx context.Context, stdout io.Reader, tracker 
 			usage.RepliedCausedBy = append(usage.RepliedCausedBy, causedBy)
 		}
 
+		// issue #397: 始まったまま終わっていないコマンドを数える
+		cmds.observe(ev)
+
 		// agent 系イベントで tracker を更新
 		switch ev.Type {
 		case "agent_message", "message", "reasoning", "tool_call", "tool_result":
@@ -343,7 +349,48 @@ func (r *codexRunner) readOutput(ctx context.Context, stdout io.Reader, tracker 
 	if err := scanner.Err(); err != nil {
 		slog.Warn("runner: codex stdout scan error", "err", err)
 	}
+	// issue #397: 出力を最後まで読んだ時点で終わっていないコマンドは、codex の終了と一緒に止まる
+	usage.UnfinishedCommands = cmds.remaining()
 	return usage
+}
+
+// unfinishedCommands は command_execution の item.started を数え、item.completed で外す (issue #397)。
+//
+// codex はコマンドが終わる前にモデルがターンを終えると、codex の終了時にそのコマンドを止める
+// (codex CLI 0.163.0 の実機確認、#397)。そのとき JSONL には item.started (in_progress) だけが
+// 出て、item.completed は出ないまま turn.completed になる。
+type unfinishedCommands struct {
+	order []string          // item.started の順の id
+	cmd   map[string]string // 終わっていないコマンドの id → command
+}
+
+func (u *unfinishedCommands) observe(ev codexEvent) {
+	if ev.Item == nil || ev.Item.Type != "command_execution" || ev.Item.ID == "" {
+		return
+	}
+	switch ev.Type {
+	case "item.started":
+		if u.cmd == nil {
+			u.cmd = make(map[string]string)
+		}
+		if _, ok := u.cmd[ev.Item.ID]; !ok {
+			u.order = append(u.order, ev.Item.ID)
+		}
+		u.cmd[ev.Item.ID] = ev.Item.Command
+	case "item.completed":
+		delete(u.cmd, ev.Item.ID)
+	}
+}
+
+// remaining は終わっていないコマンドを始まった順に返す。
+func (u *unfinishedCommands) remaining() []string {
+	var out []string
+	for _, id := range u.order {
+		if c, ok := u.cmd[id]; ok {
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 // markSessionExists は session marker file を書き込む。

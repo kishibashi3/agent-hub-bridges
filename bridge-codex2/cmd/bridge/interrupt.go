@@ -16,7 +16,9 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	agenthub "github.com/kishibashi3/agent-hub-sdk/go"
@@ -66,4 +68,43 @@ func logShutdownLeftUnread(logPrefix string, rest []agenthub.Message) {
 	}
 	slog.Info(logPrefix+": shutdown — leaving remaining batch messages unread for drain / next startup (issue #342)",
 		"count", len(rest), "msg_ids", ids)
+}
+
+// unfinishedNoticeMaxCommands / unfinishedNoticeMaxCommandLen は通知に載せるコマンドの数と長さの上限。
+const (
+	unfinishedNoticeMaxCommands   = 3
+	unfinishedNoticeMaxCommandLen = 200
+)
+
+// unfinishedNoticeBody は、終わっていないコマンドを残してターンが終わったときの通知の本文 (issue #397)。
+func unfinishedNoticeBody(cmds []string) string {
+	var b strings.Builder
+	b.WriteString(autoNoticePrefix + " codex が終わっていないコマンドを残してターンを終えたため、" +
+		"そのコマンドは codex の終了と一緒に止まりました。結果は返りません。" +
+		"返信で「流した」「後で送る」とあった作業は進んでいません。必要なら依頼を送り直してください。\n止まったコマンド:")
+	for i, c := range cmds {
+		if i == unfinishedNoticeMaxCommands {
+			fmt.Fprintf(&b, "\n- ほか %d 件", len(cmds)-i)
+			break
+		}
+		b.WriteString("\n- " + truncate(c, unfinishedNoticeMaxCommandLen))
+	}
+	return b.String()
+}
+
+// sendUnfinishedNotice は、終わっていないコマンドを残してターンが終わった依頼の送り主へ
+// 通知を 1 通送る (issue #397)。
+func sendUnfinishedNotice(ctx context.Context, client *agenthub.Client, journal *Journal, msg agenthub.Message, cmds []string) {
+	if isAutoErrorEcho(msg.Body) {
+		return
+	}
+	sendCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), interruptNoticeTimeout)
+	defer cancel()
+	if err := journalledSend(sendCtx, client, journal, msg.Sender, unfinishedNoticeBody(cmds), msg.ID); err != nil {
+		slog.Warn("sendUnfinishedNotice: send failed — kept in journal for replay on next startup (issue #397)",
+			"msg_id", msg.ID, "from", msg.Sender, "err", err)
+		return
+	}
+	slog.Info("sendUnfinishedNotice: sent unfinished-command notice (issue #397)",
+		"msg_id", msg.ID, "from", msg.Sender, "commands", len(cmds))
 }
