@@ -35,6 +35,10 @@ type mockHub struct {
 	inbox []string
 	// sent は bridge が send_message で送った内容 (issue #336)。
 	sent []sentMessage
+	// thread は get_thread が返す JSON テキスト (issue #397)。"" なら "ok" を返す (解析に失敗する)。
+	thread string
+	// getThreadCalls は get_thread を受けた回数 (issue #397)。
+	getThreadCalls int
 }
 
 // sentMessage は mock hub が受けた send_message の引数。
@@ -83,6 +87,14 @@ func newMockHub(t *testing.T, inbox ...string) *mockHub {
 			if req.Params.Name == "send_message" {
 				h.mu.Lock()
 				h.sent = append(h.sent, req.Params.Arguments)
+				h.mu.Unlock()
+			}
+			if req.Params.Name == "get_thread" {
+				h.mu.Lock()
+				h.getThreadCalls++
+				if h.thread != "" {
+					text = h.thread
+				}
 				h.mu.Unlock()
 			}
 			if req.Params.Name == "get_messages" {

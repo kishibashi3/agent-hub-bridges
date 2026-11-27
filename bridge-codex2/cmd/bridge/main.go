@@ -112,6 +112,8 @@ type config struct {
 	ContextStage contextStage
 	// ThreadContext は段 2 (thread) で添える量の上限 (issue #340、threadctx.go)。
 	ThreadContext threadContextConfig
+	// DetachDir は detach で切り離した処理の記録の置き場 (issue #397)。"" なら detach を使わない。
+	DetachDir string
 }
 
 func parseConfig() (*config, error) {
@@ -286,6 +288,8 @@ func parseConfig() (*config, error) {
 		ScannerBufferSize: resolvedScannerBufferSize,
 		ContextStage:      resolvedContextStage,
 		ThreadContext:     resolvedThreadContext,
+		// issue #397: detach の記録は journal と同じ dir の下に、journal と同じく user ごとに置く
+		DetachDir: filepath.Join(filepath.Dir(newJournal(participantVal).path), "detached", participantVal),
 	}, nil
 }
 
@@ -442,6 +446,7 @@ func linkAuthJSON(codexHomeDir string) error {
 // (issue #336 #5)。内側 codex が model 等を推測で埋めず、bridge が真値から組んだ footer を使うようにする。
 //
 // threadCtx が非空なら (段 2、issue #340) 本文の指示のあと・footer の前に、同じ鎖の前の便を添える。
+// その後に detach の案内 (issue #397) を添える。
 func formatPrompt(selfHandle string, msg agenthub.Message, footer, threadCtx string, now time.Time) string {
 	base := fmt.Sprintf(
 		"あなたは agent-hub の peer worker `%s` として動いています。\n"+
@@ -463,10 +468,16 @@ func formatPrompt(selfHandle string, msg agenthub.Message, footer, threadCtx str
 	if threadCtx != "" {
 		base += "\n\n" + threadCtx
 	}
+	return base + detachGuidance + footerInstruction(footer)
+}
+
+// footerInstruction は GitHub 投稿 footer の指示を返す (issue #245)。footer が空なら ""。
+// 通常の便と detach の便 (issue #397) で共通。
+func footerInstruction(footer string) string {
 	if footer == "" {
-		return base
+		return ""
 	}
-	return base + fmt.Sprintf(
+	return fmt.Sprintf(
 		"\n\n【GitHub 投稿ルール (issue #245)】git / GitHub への投稿"+
 			"(PR・issue のコメント等) や成果物テキストを作成する場合は、文末に次の "+
 			"footer 行を**そのまま**付けること。model 等は推測で書き換えず、"+
