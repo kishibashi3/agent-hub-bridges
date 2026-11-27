@@ -142,6 +142,8 @@ func (r *codexRunner) query(ctx context.Context, prompt, _ string, tracker *acti
 	cmd.Dir = r.cfg.Workdir
 	cmd.Stderr = os.Stderr
 	cmd.Env = r.buildEnv()
+	// issue #397: ターンを越える処理を detach で切り離せるよう、置き場と依頼を渡す
+	cmd.Env = append(cmd.Env, r.detachEnv(ctx)...)
 	// issue #336 #1: 上限到達・停止で kill するときは wrapper だけでなく子孫ごと止める (proctree.go)
 	cmd.SysProcAttr = newProcessGroupAttr()
 	cmd.Cancel = func() error { return killProcessTree(cmd.Process.Pid) }
@@ -406,4 +408,34 @@ func (r *codexRunner) markSessionExists() {
 	}
 	r.hasSession = true
 	slog.Info("runner: session marker written — next startup will resume", "path", r.sessionMarker)
+}
+
+// inboundKey は ctx に処理中の依頼 (依頼主と message ID) を載せるキー (issue #397)。
+type inboundKey struct{}
+
+type inboundInfo struct {
+	Session  string // 依頼主 (detach の便の宛先)
+	CausedBy string // 処理中の依頼の message ID
+}
+
+// withInbound は処理中の依頼を ctx に載せる。query が detach 用の env に使う。
+func withInbound(ctx context.Context, session, causedBy string) context.Context {
+	return context.WithValue(ctx, inboundKey{}, inboundInfo{Session: session, CausedBy: causedBy})
+}
+
+// detachEnv は codex に渡す detach 用の env を返す (issue #397)。
+// detach の置き場・依頼は分かるときだけ付ける。
+func (r *codexRunner) detachEnv(ctx context.Context) []string {
+	if r.cfg.DetachDir == "" {
+		return nil
+	}
+	var env []string
+	if exe, err := os.Executable(); err == nil {
+		env = append(env, detachBinEnv+"="+exe)
+	}
+	env = append(env, detachDirEnv+"="+r.cfg.DetachDir)
+	if in, ok := ctx.Value(inboundKey{}).(inboundInfo); ok {
+		env = append(env, detachSessionEnv+"="+in.Session, detachCausedByEnv+"="+in.CausedBy)
+	}
+	return env
 }

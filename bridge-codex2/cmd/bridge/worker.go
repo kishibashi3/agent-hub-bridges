@@ -173,6 +173,11 @@ func runHubSession(
 
 	selfHandle := "@" + cfg.User
 
+	// issue #397: detach で切り離した処理が終わったら便を差し込む。Go SDK のツール呼び出しは
+	// 単一 goroutine で行う制約があるので、hub の受信と同じこのループから呼ぶ。
+	detachTicker := time.NewTicker(detachPollInterval)
+	defer detachTicker.Stop()
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -243,16 +248,27 @@ func runHubSession(
 		}
 
 		// push を受信すれば即時ループ、なければ PollInterval 待機 (issue #198)
+		// issue #397: 待つ間に detach の便を出す。便を出しても hub の取得は早めない (push / poll を待ち続ける)
 		pollTimer := time.NewTimer(cfg.PollInterval)
-		select {
-		case <-ctx.Done():
-			pollTimer.Stop()
-			// 次ループ先頭の ctx.Done() check で drain が走る
-		case <-pushCh:
-			pollTimer.Stop()
-			slog.Debug("runHubSession: inbox push — immediate GetMessages")
-		case <-pollTimer.C:
-			// timer fired; already drained — Stop() unnecessary
+	wait:
+		for {
+			select {
+			case <-ctx.Done():
+				pollTimer.Stop()
+				// 次ループ先頭の ctx.Done() check で drain が走る
+				break wait
+			case <-pushCh:
+				pollTimer.Stop()
+				slog.Debug("runHubSession: inbox push — immediate GetMessages")
+				break wait
+			case <-pollTimer.C:
+				// timer fired; already drained — Stop() unnecessary
+				break wait
+			case <-detachTicker.C:
+				if ctx.Err() == nil {
+					deliverDetachNotices(ctx, cfg, client, runner, tracker, journal)
+				}
+			}
 		}
 	}
 }
@@ -387,6 +403,26 @@ func handleOne(
 		threadCtx = fetchThreadContext(ctx, client, msg, cfg.ThreadContext).Text
 	}
 	prompt := formatPrompt("@"+cfg.User, msg, cfg.GitHubFooter, threadCtx, time.Now())
+	_, err := runPromptReport(ctx, client, runner, msg, prompt, cfg, tracker, journal)
+	return err
+}
+
+// runPromptReport は prompt を codex に流し、失敗時の依頼主への通知までを行う。handleOne と
+// detach の便 (issue #397) で共通。msg は依頼主 (Sender) と因果の ID (ID) に使う。
+// 停止 (ctx の取り消し) で返信なしに中断された (= 依頼主に中断通知を出す経路に入った) かも返す。
+// detach の便が、中断された便を出し直すのに使う。
+func runPromptReport(
+	ctx context.Context,
+	client *agenthub.Client,
+	runner *codexRunner,
+	msg agenthub.Message,
+	prompt string,
+	cfg *config,
+	tracker *activityTracker,
+	journal *Journal,
+) (interrupted bool, err error) {
+	// issue #397: detach で切り離した処理の便を、この依頼主に返すため
+	ctx = withInbound(ctx, msg.Sender, msg.ID)
 	usage, err := runner.query(ctx, prompt, msg.Sender, tracker)
 	emitSpan(msg.ID, cfg.Model, usage)
 	// issue #336 #4: 内側 codex が先回りで返信した他の inbound を記録する (query の成否に関わらず、
@@ -399,25 +435,25 @@ func handleOne(
 			sendUnfinishedNotice(ctx, client, journal, msg, usage.UnfinishedCommands)
 		}
 		slog.Info("→ message processed", "msg_id", msg.ID, "from", msg.Sender)
-		return nil
+		return false, nil
 	}
 
 	if usage.repliedTo(msg.ID) {
 		slog.Warn("handleOne: codex failed after replying to this message — suppressing error report "+
 			"to avoid a second reply (issue #336)",
 			"msg_id", msg.ID, "err", err)
-		return err
+		return false, err
 	}
 	if ctx.Err() != nil {
 		slog.Info("handleOne: query cancelled by shutdown — sending interrupt notice instead of error report (issue #337)",
 			"msg_id", msg.ID, "err", err)
 		sendInterruptNotice(ctx, client, journal, msg)
-		return err
+		return true, err
 	}
 
 	slog.Error("handleOne: codex query error", "msg_id", msg.ID, "err", err)
 	sendAutoErrorReply(ctx, client, runner, journal, msg, fmt.Sprint(err))
-	return err
+	return false, err
 }
 
 // sendAutoErrorReply は送信元へ `autoErrorPrefix + " " + detail` の auto 返信を送る。
