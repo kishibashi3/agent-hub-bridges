@@ -39,6 +39,7 @@
 //	AGENT_HUB_PUSH_SILENT_THRESHOLD_S optional gap 警告閾値秒数 (default: 25)
 //	AGENT_HUB_SUBPROCESS_TIMEOUT optional   claude subprocess 最大実行時間 (Go duration: "30m", "1h", "0" = 無制限; --subprocess-timeout フラグが優先)
 //	AGENT_HUB_MAX_QUERY_RETRIES optional    subprocess timeout 時のリトライ上限 (default: 2; --max-query-retries フラグが優先)
+//	AGENT_HUB_REAP_LEFTOVERS    optional    便の後に残った & の子を止める (1/true; default: false = ログだけ; --reap-leftovers フラグが優先・issue #377)
 //	BRIDGE_COMPACT_ARCHIVE_DIR  optional    compact archive ディレクトリ (SIGTERM compact 時に使用)
 //	BRIDGE_INVENTORY            optional    bridge inventory ファイルパス
 //	AGENT_HUB_BRIDGE_MAX_RETRIES optional   circuit breaker 連続失敗上限 (default: 10, 0=無限)
@@ -67,6 +68,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -133,6 +135,9 @@ type config struct {
 	ContextStage contextStage
 	// ThreadContext は段 2 (thread) で添える量の上限 (issue #340、threadctx.go)。
 	ThreadContext threadContextConfig
+	// ReapLeftovers は engine が終わった後に残った、その便の印を持つプロセスを止めるか (issue #377、
+	// leftover.go)。false (既定) ではログに出すだけ。--reap-leftovers / AGENT_HUB_REAP_LEFTOVERS で有効にする。
+	ReapLeftovers bool
 }
 
 func parseConfig() (*config, error) {
@@ -151,6 +156,7 @@ func parseConfig() (*config, error) {
 		subprocessTimeout = flag.Duration("subprocess-timeout", -1, "claude subprocess max runtime per query (0 = no timeout; -1 = use AGENT_HUB_SUBPROCESS_TIMEOUT env or default 30m)")
 		maxQueryRetries   = flag.Int("max-query-retries", -1, "max retries on subprocess timeout per message (-1 = use AGENT_HUB_MAX_QUERY_RETRIES env or default 2; 0 = no retry)")
 		showVersion       = flag.Bool("version", false, "print version and exit")
+		reapLeftovers     = flag.Bool("reap-leftovers", false, "stop processes a tool left running (e.g. with &) after each run ends (default: AGENT_HUB_REAP_LEFTOVERS env or false = log only)")
 		addDirs           stringSlice
 	)
 	flag.StringVar(&participantVal, "participant", "", "agent-hub handle (without @) [required]")
@@ -158,6 +164,16 @@ func parseConfig() (*config, error) {
 	flag.StringVar(&userDeprecated, "user", "", "deprecated: use --participant / -p")
 	flag.Var(&addDirs, "add-dir", "add extra directory to Claude context (repeatable)")
 	flag.Parse()
+	reapLeftoversSet := false
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == "reap-leftovers" {
+			reapLeftoversSet = true
+		}
+	})
+	resolvedReapLeftovers, err := resolveReapLeftovers(reapLeftoversSet, *reapLeftovers)
+	if err != nil {
+		return nil, err
+	}
 
 	if *showVersion {
 		fmt.Printf("%s/%s (agent-hub-bridges)\n", bridgeType, version)
@@ -315,6 +331,7 @@ func parseConfig() (*config, error) {
 		JournalDir:        resolvedJournalDir,
 		ContextStage:      resolvedContextStage,
 		ThreadContext:     resolvedThreadContext,
+		ReapLeftovers:     resolvedReapLeftovers,
 	}
 	// issue #395: detach の記録は journal dir の下に participant (tenant) ごとに置く
 	cfg.DetachDir = filepath.Join(resolvedJournalDir, "detached", cfg.stateKey())
@@ -562,6 +579,7 @@ func main() {
 		"subprocess_timeout_s", cfg.SubprocessTimeout.Seconds(),
 		"max_query_retries", cfg.MaxQueryRetries,
 		"scanner_buffer_size", cfg.ScannerBufferSize,
+		"reap_leftovers", cfg.ReapLeftovers,
 		"add_dirs_count", len(cfg.AddDirs),
 		"log_file", orDefault(cfg.LogFile, "(stderr only)"),
 	)
@@ -665,6 +683,26 @@ func resolveSubprocessTimeout(flagVal time.Duration) (time.Duration, error) {
 		return d, nil
 	}
 	return 30 * time.Minute, nil
+}
+
+// reapLeftoversEnv は --reap-leftovers を指定しなかったときに見る env (issue #377)。
+const reapLeftoversEnv = "AGENT_HUB_REAP_LEFTOVERS"
+
+// resolveReapLeftovers は --reap-leftovers を解決する (issue #377)。
+// 優先順位: フラグ (指定したとき) > AGENT_HUB_REAP_LEFTOVERS env (strconv.ParseBool) > false (既定 = ログだけ)
+func resolveReapLeftovers(flagSet, flagVal bool) (bool, error) {
+	if flagSet {
+		return flagVal, nil
+	}
+	envVal := os.Getenv(reapLeftoversEnv)
+	if envVal == "" {
+		return false, nil
+	}
+	v, err := strconv.ParseBool(envVal)
+	if err != nil {
+		return false, fmt.Errorf("%s %q: must be a boolean (1/0/true/false)", reapLeftoversEnv, envVal)
+	}
+	return v, nil
 }
 
 // resolveMaxQueryRetries は --max-query-retries フラグ値 (-1 = 未指定) を解決する。
