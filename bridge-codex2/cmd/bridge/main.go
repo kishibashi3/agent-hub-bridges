@@ -530,6 +530,11 @@ func buildGitHubFooter(handle, bridgeType, model string) string {
 // ──────────────────────────────────────────────────────────────────────── //
 
 func main() {
+	// issue #397: codex のツールから呼ばれる detach / detach-run サブコマンド
+	if code, ok := runSubcommand(os.Args[1:]); ok {
+		os.Exit(code)
+	}
+
 	cfg, err := parseConfig()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "config error: %v\n", err)
