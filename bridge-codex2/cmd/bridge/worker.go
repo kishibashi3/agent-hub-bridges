@@ -393,6 +393,11 @@ func handleOne(
 	// 成功を確認できた送信は hub に届いている)
 	recordInnerReplied(runner, msg.ID, usage.RepliedCausedBy)
 	if err == nil {
+		if len(usage.UnfinishedCommands) > 0 && ctx.Err() == nil {
+			// issue #397: 終わっていないコマンドを残してターンが終わった。コマンドは codex の
+			// 終了と一緒に止まっているので、依頼主に知らせる (静かに成果が消えないように)。
+			sendUnfinishedNotice(ctx, client, journal, msg, usage.UnfinishedCommands)
+		}
 		slog.Info("→ message processed", "msg_id", msg.ID, "from", msg.Sender)
 		return nil
 	}
