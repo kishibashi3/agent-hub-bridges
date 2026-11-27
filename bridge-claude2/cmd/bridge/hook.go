@@ -171,7 +171,8 @@ const backgroundDeniedMessage = "Error: run_in_background is not available in th
 	"This bridge ends the claude process after each request, so background tasks do not survive.\n\n" +
 	cannotWaitGuidance
 
-// cannotWaitGuidance は Monitor / ScheduleWakeup / CronCreate の理由文に共通の案内 (issue #389)。
+// cannotWaitGuidance は deny 理由文に共通の案内 (issue #389 / #394)。
+// Monitor / ScheduleWakeup / CronCreate / run_in_background / blocking-cmd の理由文の末尾に付ける。
 // @scheduler に委ねると発火した便の返信先が @scheduler になり、依頼主に届かない。
 // 待たずにいま依頼主へ send_message で返してからターンを終えるよう案内する。
 const cannotWaitGuidance = "This bridge cannot wait across turns.\n" +
