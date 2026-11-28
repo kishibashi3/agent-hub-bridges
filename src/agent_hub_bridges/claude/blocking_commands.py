@@ -11,7 +11,7 @@ bridge の ``receive_response()`` ループが完了しなくなり、後続の 
      ブロッキングパターンに一致すれば検出パターン名を返す純粋関数。
   2. ``bash_pre_tool_use_hook`` — ``ClaudeAgentOptions.hooks["PreToolUse"]``
      に登録する非同期フック。ブロッキング検出時に ``permissionDecision: "deny"``
-     を返して実行を拒否し、@scheduler の代替手段を案内する。
+     を返して実行を拒否し、待たずに依頼主へ返すよう案内する (issue #431)。
 
 ブロッキングパターン:
   - ``gh run watch``              : GitHub Actions run の監視 (無限待ち)
@@ -82,10 +82,14 @@ _SLEEP_UNIT_PATTERN = re.compile(r"\bsleep\s+\d+(?:\.\d+)?[mhd]\b")
 # sleep infinity / sleep inf — 無限 sleep
 _SLEEP_INFINITY_PATTERN = re.compile(r"\bsleep\s+(?:infinity|inf)\b", re.IGNORECASE)
 
-# @scheduler ヒントメッセージ (全パターン共通)
-_SCHEDULER_HINT = (
-    "Instead, use @scheduler:\n"
-    "  @scheduler /run_in 10m @<your-handle> gh run view <run_id> --repo <owner/repo>"
+# 待てないときの案内 (全パターン共通, issue #431)。
+# bridge-claude2 の cannotWaitGuidance (hook.go) と同じ文言にそろえる。
+# @scheduler に委ねると、発火した便は session "@scheduler" で処理され、返信は
+# @scheduler に行くので依頼主に届かない。待たずにいま依頼主へ返すよう案内する。
+_CANNOT_WAIT_GUIDANCE = (
+    "This bridge cannot wait across turns.\n"
+    "Do not wait. Reply to the requester now with send_message, then end the turn.\n"
+    "If the task needs waiting, say so in the reply (e.g. that you cannot wait here)."
 )
 
 
@@ -161,7 +165,7 @@ def build_blocking_error_message(pattern_name: str) -> str:
         f"Error: blocking command detected (`{pattern_name}`).\n"
         "Blocking waits prevent this bridge from receiving messages.\n"
         "\n"
-        f"{_SCHEDULER_HINT}"
+        f"{_CANNOT_WAIT_GUIDANCE}"
     )
 
 
@@ -177,7 +181,7 @@ async def bash_pre_tool_use_hook(
 
     ブロッキングコマンドが検出された場合:
       - ``permissionDecision: "deny"`` を返して Bash ツールの実行を中止させる。
-      - ``permissionDecisionReason`` に @scheduler の代替案内を含むエラーメッセージを設定する。
+      - ``permissionDecisionReason`` に待たずに依頼主へ返す案内を含むエラーメッセージを設定する。
       - WARNING ログを出力する。
 
     ブロッキングコマンドでない場合:

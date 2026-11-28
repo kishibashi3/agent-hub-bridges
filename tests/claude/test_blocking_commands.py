@@ -7,7 +7,7 @@
   - check_blocking_command: sleep 時間単位付き (1m / 1h / 1d)
   - check_blocking_command: sleep infinity / inf
   - check_blocking_command: tail -F (capital F, follow-name モード)
-  - build_blocking_error_message: エラーメッセージに pattern_name と @scheduler ヒントを含む
+  - build_blocking_error_message: pattern_name と待てない案内を含み @scheduler を含まない (#431)
   - bash_pre_tool_use_hook: 非ブロッキングコマンドは空 dict を返す
   - bash_pre_tool_use_hook: ブロッキングコマンドは deny + permissionDecisionReason を返す
   - bash_pre_tool_use_hook: tool_input が欠落しても安全に空 dict を返す
@@ -21,6 +21,7 @@ from typing import ClassVar
 import pytest
 
 from agent_hub_bridges.claude.blocking_commands import (
+    _CANNOT_WAIT_GUIDANCE,
     bash_pre_tool_use_hook,
     build_blocking_error_message,
     check_blocking_command,
@@ -187,10 +188,12 @@ class TestBuildBlockingErrorMessage:
         msg = build_blocking_error_message("gh run watch")
         assert "gh run watch" in msg
 
-    def test_contains_scheduler_hint(self) -> None:
+    def test_contains_cannot_wait_guidance(self) -> None:
+        """@scheduler には委ねず、待たずに依頼主へ返す案内で終わる (issue #431)。"""
         msg = build_blocking_error_message("tail -f / --follow")
-        assert "@scheduler" in msg
-        assert "/run_in" in msg
+        assert "@scheduler" not in msg
+        assert "/run_in" not in msg
+        assert msg.endswith(_CANNOT_WAIT_GUIDANCE)
 
     def test_contains_blocking_warning(self) -> None:
         msg = build_blocking_error_message("watch <command>")
@@ -237,7 +240,8 @@ class TestBashPreToolUseHook:
         assert specific.get("hookEventName") == "PreToolUse"
         assert specific.get("permissionDecision") == "deny"
         assert "gh run watch" in specific.get("permissionDecisionReason", "")
-        assert "@scheduler" in specific.get("permissionDecisionReason", "")
+        assert "@scheduler" not in specific.get("permissionDecisionReason", "")
+        assert _CANNOT_WAIT_GUIDANCE in specific.get("permissionDecisionReason", "")
 
     @pytest.mark.asyncio
     async def test_sleep_long_denied(self) -> None:
