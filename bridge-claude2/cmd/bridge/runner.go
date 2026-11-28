@@ -303,10 +303,13 @@ func (r *claudeRunner) query(ctx context.Context, prompt, sessionID string, trac
 		defer cancel()
 	}
 
-	cmd, stdinPipe, scanner, err := r.spawnSubprocess(queryCtx)
+	runID := newEngineRunID(r.cfg.Participant)
+	cmd, stdinPipe, scanner, err := r.spawnSubprocess(queryCtx, runID)
 	if err != nil {
 		return queryUsage{IsError: true}, err
 	}
+	// issue #377: どの return も cmd.Wait() の後なので、engine が終わってから回収する
+	defer reapLeftovers(runID, r.cfg.ReapLeftovers)
 	pid := cmd.Process.Pid
 	slog.Info("runner: Claude subprocess started (on-demand)", "pid", pid, "session_id", sessionID)
 
@@ -376,10 +379,13 @@ func (r *claudeRunner) query(ctx context.Context, prompt, sessionID string, trac
 // Python の IdleCompactWatchdog._run_compact_and_archive 内の client.query("/compact") に相当。
 // on-demand: 専用の subprocess を spawn する。
 func (r *claudeRunner) compact(ctx context.Context) (string, error) {
-	cmd, stdinPipe, scanner, err := r.spawnSubprocess(ctx)
+	runID := newEngineRunID(r.cfg.Participant)
+	cmd, stdinPipe, scanner, err := r.spawnSubprocess(ctx, runID)
 	if err != nil {
 		return "", err
 	}
+	// issue #377: どの return も cmd.Wait() の後なので、engine が終わってから回収する
+	defer reapLeftovers(runID, r.cfg.ReapLeftovers)
 	pid := cmd.Process.Pid
 	slog.Info("runner: compact subprocess started (on-demand)", "pid", pid)
 
@@ -416,7 +422,8 @@ func (r *claudeRunner) compact(ctx context.Context) (string, error) {
 
 // spawnSubprocess は claude subprocess を起動して stdin/stdout を返す。
 // 呼び出し元が stdinPipe.Close() と cmd.Wait() を担当する。
-func (r *claudeRunner) spawnSubprocess(ctx context.Context) (*exec.Cmd, io.WriteCloser, *bufio.Scanner, error) {
+// runID は便ごとの印 (issue #377)。engine とツールの子に engineRunEnv として渡す。
+func (r *claudeRunner) spawnSubprocess(ctx context.Context, runID string) (*exec.Cmd, io.WriteCloser, *bufio.Scanner, error) {
 	args := r.buildArgs()
 	cmd := exec.CommandContext(ctx, r.cfg.ClaudeCLI, args...)
 	cmd.Dir = r.cfg.Workdir
@@ -451,6 +458,9 @@ func (r *claudeRunner) spawnSubprocess(ctx context.Context) (*exec.Cmd, io.Write
 	// issue #395: claude の中に background task を立てさせない。立つと result 後に claude ごと止められ、
 	// 作業が黙って消える (タイムアウトした foreground の Bash も background に移らず、タイムアウトとして返る)。
 	cmd.Env = append(cmd.Env, disableBackgroundTasksEnv)
+	// issue #377: 便ごとの印。engine が終わった後、これを持って残っているものを reapLeftovers が探す。
+	// 親環境の同名の値 (bridge が bridge の中で起動された場合等) は消してから付ける。
+	cmd.Env = append(envWithout(cmd.Env, engineRunEnv), engineRunEnvEntry(runID))
 
 	stdinPipe, err := cmd.StdinPipe()
 	if err != nil {

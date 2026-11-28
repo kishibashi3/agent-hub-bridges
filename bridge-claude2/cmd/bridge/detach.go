@@ -187,6 +187,8 @@ func runDetach(args []string, stdout, stderr io.Writer) int {
 	sup.Stderr = logFile
 	// 別セッションにして claude のプロセスグループ・ツールのシェルの片付けから外す。
 	sup.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	// issue #377: 便ごとの印を外す。ターンを越える処理の正規の経路なので、便の終わりに止めさせない。
+	sup.Env = envWithout(os.Environ(), engineRunEnv)
 	if err := sup.Start(); err != nil {
 		fmt.Fprintf(stderr, "detach: start supervisor: %v\n", err)
 		// 記録は残っている。pid が無いまま detachStartGrace を過ぎると、bridge が「起動できなかった」として便を出す。

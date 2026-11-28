@@ -167,7 +167,7 @@ func TestSpawnSubprocess_SetsBridgeEnv(t *testing.T) {
 		t.Fatal(err)
 	}
 	r := &claudeRunner{cfg: &config{ClaudeCLI: script, Workdir: t.TempDir()}}
-	cmd, stdin, scanner, err := r.spawnSubprocess(context.Background())
+	cmd, stdin, scanner, err := r.spawnSubprocess(context.Background(), "test-run")
 	if err != nil {
 		t.Fatalf("spawnSubprocess: %v", err)
 	}

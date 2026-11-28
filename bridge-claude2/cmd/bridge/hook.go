@@ -174,9 +174,14 @@ const backgroundDeniedMessage = "Error: run_in_background is not available in th
 // cannotWaitGuidance は Monitor / ScheduleWakeup / CronCreate の理由文に共通の案内 (issue #389)。
 // @scheduler に委ねると発火した便の返信先が @scheduler になり、依頼主に届かない。
 // 待たずにいま依頼主へ send_message で返してからターンを終えるよう案内する。
+// issue #377: `&` で立てたプロセスは便の終わりに止められうるので、便をまたいで残したい常駐
+// プロセスは systemd-run --user で起動するよう案内する (bridge の印が付かず、回収の対象にならない)。
 const cannotWaitGuidance = "This bridge cannot wait across turns.\n" +
 	"Do not wait. Reply to the requester now with send_message, then end the turn.\n" +
-	"If the task needs waiting, say so in the reply (e.g. that you cannot wait here)."
+	"If the task needs waiting, say so in the reply (e.g. that you cannot wait here).\n" +
+	"Processes started with & may be stopped when this request ends. " +
+	"To keep a long-running process (e.g. a proxy) across requests, start it with " +
+	"`systemd-run --user --unit=<name> <command>` instead."
 
 // monitorDeniedMessage は Monitor を deny するときの理由 (issue #388)。
 // Monitor で待つとターンが先に終わり、result 後に bridge が claude を止めるので返信が届かない。
